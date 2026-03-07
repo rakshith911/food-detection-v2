@@ -707,7 +707,7 @@ export default function MealDetailScreen() {
 
           <View style={styles.mealActions}>
             <TouchableOpacity style={styles.addButton} onPress={handleAddContent}>
-              <Text style={styles.addButtonText}>+ Add Content</Text>
+              <Text style={styles.addButtonText}>+ Add Ingredient</Text>
             </TouchableOpacity>
             <View style={styles.captureInfo}>
               <Text style={styles.captureValue}>
@@ -764,7 +764,7 @@ export default function MealDetailScreen() {
                         handleInputFocus(row.id, 'name');
                         scrollToInput(row.id);
                       }}
-                      placeholder="Item name"
+                      placeholder="Ingredient name"
                       placeholderTextColor="#D1D5DB"
                       keyboardType="default"
                       editable={true}
@@ -804,7 +804,7 @@ export default function MealDetailScreen() {
                           inputRefs.current[row.id]?.calories?.focus();
                         }, 100);
                       }}
-                      placeholder="Weight"
+                      placeholder="Grams"
                       placeholderTextColor="#D1D5DB"
                       keyboardType={Platform.OS === 'ios' ? 'numbers-and-punctuation' : 'numeric'}
                       editable={true}
@@ -837,7 +837,7 @@ export default function MealDetailScreen() {
                         setEditingRowId(null);
                         focusedInputRef.current = null;
                       }}
-                      placeholder="Calories"
+                      placeholder="KCal"
                       placeholderTextColor="#D1D5DB"
                       keyboardType={Platform.OS === 'ios' ? 'numbers-and-punctuation' : 'numeric'}
                       editable={true}
@@ -1094,8 +1094,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#E5E7EB',
     borderRadius: 4,
-    paddingHorizontal: 12,
-    fontSize: 14,
+    paddingHorizontal: 6,
+    fontSize: 12,
     color: '#1F2937',
     backgroundColor: '#FFFFFF',
   },

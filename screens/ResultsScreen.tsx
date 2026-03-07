@@ -343,6 +343,8 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
     // Only treat as "unidentified" when there is truly no data — no meal name and no calories.
     // A user-cleared entry (calories=0 but mealName set) should stay tappable and show "-".
     const hasZeroCalories = isCompletedOrFailed && totalCalories === 0 && !hasMealName;
+    const isNoFoodDetected = item.mealName === 'No food detected';
+    const isNonTappable = isPendingOrAnalyzing || hasZeroCalories || isNoFoodDetected;
     const titleText = isPendingOrAnalyzing ? '' : (hasZeroCalories ? 'Unidentified Food' : (item.mealName || ''));
     const subtitleText = isPendingOrAnalyzing
       ? 'Analyzing...'
@@ -382,12 +384,12 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
             <TouchableOpacity
               style={styles.card}
               onPress={() => {
-                if (!isPendingOrAnalyzing && !hasZeroCalories) {
+                if (!isNonTappable) {
                   nav.navigate('MealDetail', { item });
                 }
               }}
-              activeOpacity={isPendingOrAnalyzing || hasZeroCalories ? 1 : 0.9}
-              disabled={isPendingOrAnalyzing || hasZeroCalories}
+              activeOpacity={isNonTappable ? 1 : 0.9}
+              disabled={isNonTappable}
             >
           <View style={styles.mediaWrapper}>
             {isVideo && item.videoUri ? (
