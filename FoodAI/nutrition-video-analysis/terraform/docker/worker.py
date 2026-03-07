@@ -175,7 +175,7 @@ def is_video_file(filename: str) -> bool:
     return Path(filename).suffix.lower() in video_extensions
 
 
-def process_media(media_path: str, job_id: str, user_context: dict = None) -> dict:
+def process_media(media_path: str, job_id: str, user_context: dict = None, pipeline=None) -> dict:
     """
     Process media file (image or video) through the nutrition analysis pipeline.
 
@@ -201,23 +201,22 @@ def process_media(media_path: str, job_id: str, user_context: dict = None) -> di
         from app.models import ModelManager
         from app.config import Settings
 
-        # Initialize configuration
-        print("Initializing configuration...")
-        config = Settings()
-        config.DEVICE = DEVICE
-        config.GEMINI_API_KEY = GEMINI_API_KEY
+        if pipeline is None:
+            # Fallback: initialize fresh (slower path, kept for safety)
+            print("Initializing configuration...")
+            config = Settings()
+            config.DEVICE = DEVICE
+            config.GEMINI_API_KEY = GEMINI_API_KEY
 
-        update_job_status(job_id, 'processing', progress=5)
+            update_job_status(job_id, 'processing', progress=5)
 
-        # Initialize models
-        print("Loading AI models...")
-        model_manager = ModelManager(config)
+            print("Loading AI models...")
+            model_manager = ModelManager(config)
 
-        update_job_status(job_id, 'processing', progress=10)
+            update_job_status(job_id, 'processing', progress=10)
 
-        # Initialize pipeline
-        print("Initializing processing pipeline...")
-        pipeline = NutritionVideoPipeline(model_manager, config)
+            print("Initializing processing pipeline...")
+            pipeline = NutritionVideoPipeline(model_manager, config)
 
         update_job_status(job_id, 'processing', progress=15)
 
@@ -403,7 +402,7 @@ def real_process_video(video_path: str, job_id: str) -> dict:
 # Mock processing function removed - code must fail on errors, not silently use mock
 
 
-def process_message(message: dict):
+def process_message(message: dict, pipeline=None):
     """Process a single SQS message."""
     receipt_handle = message['ReceiptHandle']
     
@@ -480,7 +479,7 @@ def process_message(message: dict):
             update_job_status(job_id, 'processing', progress=5)
 
             # Process media (image or video) — pass user_context so Gemini prompts are enriched
-            results = process_media(media_path, job_id, user_context=user_context)
+            results = process_media(media_path, job_id, user_context=user_context, pipeline=pipeline)
 
             # Upload results
             results_key = upload_results(job_id, results)
@@ -554,6 +553,25 @@ def poll_queue():
     print(f"Device: {DEVICE}")
     print("")
 
+    # Load models once at startup so they are reused across all jobs
+    pipeline = None
+    try:
+        sys.path.insert(0, '/app')
+        from app.pipeline import NutritionVideoPipeline
+        from app.models import ModelManager
+        from app.config import Settings
+
+        print("⏳ Pre-loading AI models at startup (one-time cost)...")
+        config = Settings()
+        config.DEVICE = DEVICE
+        config.GEMINI_API_KEY = GEMINI_API_KEY
+        model_manager = ModelManager(config)
+        pipeline = NutritionVideoPipeline(model_manager, config)
+        print("✅ Models loaded and ready — subsequent jobs will be fast")
+    except Exception as e:
+        print(f"⚠️ Could not pre-load models: {e} — will load per-job instead")
+        pipeline = None
+
     while True:
         try:
             # Receive messages
@@ -568,7 +586,7 @@ def poll_queue():
 
             if messages:
                 for message in messages:
-                    process_message(message)
+                    process_message(message, pipeline=pipeline)
             else:
                 print("No messages in queue, waiting...")
 
