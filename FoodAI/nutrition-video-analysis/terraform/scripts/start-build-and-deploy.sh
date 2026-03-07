@@ -29,10 +29,15 @@ while true; do
 done
 
 echo "Build succeeded. Forcing new ECS deployment..."
+
+# Preserve current desired count so a manually-started server stays running after deploy
+CURRENT_DESIRED=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --region "$REGION" --query 'services[0].desiredCount' --output text)
+
 aws ecs update-service \
   --cluster "$CLUSTER" \
   --service "$SERVICE" \
   --force-new-deployment \
+  --desired-count "$CURRENT_DESIRED" \
   --region "$REGION" \
   --query 'service.{serviceName:serviceName,desiredCount:desiredCount,runningCount:runningCount}' \
   --output table

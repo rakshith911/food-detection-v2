@@ -1044,7 +1044,7 @@ class NutritionVideoPipeline:
         )
         prompt += self._build_user_context_suffix(user_context)
         # Try multiple models (404 if model name not available in this API version)
-        gemini_models_try = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp", "gemini-pro-vision"]
+        gemini_models_try = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro-vision"]
         response_text = ""
         for model_name in gemini_models_try:
             try:
@@ -1305,7 +1305,7 @@ class NutritionVideoPipeline:
                 pil_img.save(buf, format="JPEG", quality=85)
                 parts.append(types.Part(inline_data=types.Blob(data=buf.getvalue(), mime_type="image/jpeg")))
             response_text = ""
-            for model_name in ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp"]:
+            for model_name in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]:
                 try:
                     print(f"  → Calling Gemini multi-image for food detection ({model_name}), 5 frames (no duplicates)...")
                     sys.stdout.flush()
@@ -1434,7 +1434,7 @@ class NutritionVideoPipeline:
                 client = genai_new.Client(api_key=self.config.GEMINI_API_KEY)
                 size = video_path.stat().st_size
                 mime = "video/mp4" if video_path.suffix.lower() in (".mp4", ".mpg", ".mpeg") else "video/quicktime"
-                video_models_try = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp"]
+                video_models_try = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
                 response_text = ""
                 if size <= self._GEMINI_VIDEO_INLINE_LIMIT:
                     video_bytes = video_path.read_bytes()
@@ -3110,7 +3110,7 @@ class NutritionVideoPipeline:
             # Add small delay to avoid rate limiting
             time.sleep(0.2)
             genai.configure(api_key=self.config.GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-2.0-flash-exp')
+            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
             
             prompt = f"""You are a food portion estimation expert. Analyze this volume calculation:
 
@@ -3209,7 +3209,7 @@ Examples:
             import json
             time.sleep(0.2)  # Rate limiting
             genai.configure(api_key=self.config.GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-2.0-flash-exp')
+            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
             
             # Build prompt with both validation and estimation items
             validation_list = []
@@ -3352,7 +3352,7 @@ Example:
             import json
             time.sleep(0.2)  # Rate limiting
             genai.configure(api_key=self.config.GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-2.0-flash-exp')
+            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
             
             # Build prompt with all items
             items_list = []
@@ -3448,7 +3448,7 @@ Example:
             import json
             time.sleep(0.2)  # Rate limiting
             genai.configure(api_key=self.config.GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-2.0-flash-exp')
+            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
             
             prompt = f"""You are a food portion estimation expert. Estimate the typical serving volume for this food item.
 
@@ -3522,7 +3522,7 @@ Example:
             import json
             time.sleep(0.2)  # Rate limiting
             genai.configure(api_key=self.config.GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-2.0-flash-exp')
+            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
             
             # Create list of detected items
             items_list = ", ".join([f'"{label}"' for label in labels])
@@ -3591,7 +3591,7 @@ Example:
         try:
             import google.generativeai as genai
             genai.configure(api_key=self.config.GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-2.0-flash-exp')
+            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
             
             # Skip non-food items
             skip_keywords = [
@@ -3744,7 +3744,7 @@ If no duplicates, respond: {{"merge_groups": [], "keep_separate": ["ID1", "ID2",
             import json
             time.sleep(0.2)  # Rate limiting
             genai.configure(api_key=self.config.GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-2.0-flash-exp')
+            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
             
             # Build list of all detected objects
             skip_keywords = [
@@ -3911,7 +3911,7 @@ If no duplicates/combinations, respond: {{"merge_groups": [], "combine": [], "ke
             import time
             time.sleep(0.2)  # Rate limiting
             genai.configure(api_key=self.config.GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-2.0-flash-exp')
+            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
             
             # Build list of items with their counts
             item_groups = {}
