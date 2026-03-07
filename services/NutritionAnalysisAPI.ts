@@ -401,7 +401,7 @@ export class NutritionAnalysisAPI {
             if ((data as any).detected_foods && Array.isArray((data as any).detected_foods)) {
               data.items = (data as any).detected_foods.map((item: any) => ({
                 food_name: item.name || 'Unknown',
-                mass_g: 0, // Not available in simplified response
+                mass_g: item.mass_g || 0,
                 volume_ml: undefined,
                 total_calories: item.calories || 0,
               }));
@@ -416,7 +416,7 @@ export class NutritionAnalysisAPI {
           if ((data as any).detected_foods && Array.isArray((data as any).detected_foods)) {
             data.items = (data as any).detected_foods.map((item: any) => ({
               food_name: item.name || 'Unknown',
-              mass_g: 0, // Not available in simplified response
+              mass_g: item.mass_g || 0,
               volume_ml: undefined,
               total_calories: item.calories || 0,
             }));
@@ -429,7 +429,7 @@ export class NutritionAnalysisAPI {
         if ((data as any).detected_foods && Array.isArray((data as any).detected_foods)) {
           data.items = (data as any).detected_foods.map((item: any) => ({
             food_name: item.name || 'Unknown',
-            mass_g: 0, // Not available in simplified response
+            mass_g: item.mass_g || 0,
             volume_ml: undefined,
             total_calories: item.calories || 0,
           }));

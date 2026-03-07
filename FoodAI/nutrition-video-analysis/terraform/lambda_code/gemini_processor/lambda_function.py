@@ -378,7 +378,7 @@ def lambda_handler(event, context):
 
             # 5. Build detected_foods list (lightweight, stored in DynamoDB)
             detected_foods = [
-                {'name': i['food_name'], 'calories': i['total_calories']}
+                {'name': i['food_name'], 'calories': i['total_calories'], 'mass_g': i['mass_g']}
                 for i in items
             ]
 

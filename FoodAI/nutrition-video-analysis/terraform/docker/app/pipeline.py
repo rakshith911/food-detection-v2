@@ -83,7 +83,13 @@ class NutritionVideoPipeline:
             if items:
                 lines.append(
                     f"- Ingredients present but not fully visible in the image: {items}. "
-                    "Include each of these in visible_ingredients and estimate their weights and calories."
+                    "For each, convert the quantity to grams using standard conversions "
+                    "(e.g. 1 tbsp olive oil = 13.5g, 1 tbsp butter = 14.2g, 1 tbsp sugar = 12.5g, "
+                    "1 tsp salt = 6g, 1 cup flour = 120g, 1 cup rice = 185g, 1 cup milk = 240g). "
+                    "If given in grams already, use that directly. "
+                    "Set estimated_quantity_grams to the converted gram value and estimated_total_kcal "
+                    "based on that gram weight using standard nutritional values. "
+                    "Include each as a separate entry in visible_ingredients with a full-image bounding box."
                 )
         extras = user_context.get('extras', [])
         if extras:
@@ -94,20 +100,32 @@ class NutritionVideoPipeline:
             if items:
                 lines.append(
                     f"- Extras or cooking additions that add calories: {items}. "
-                    "Include these in your analysis and factor them into the calorie totals."
+                    "For each, convert the quantity to grams using standard conversions "
+                    "(e.g. 1 tbsp olive oil = 13.5g ~119 kcal, 1 tbsp butter = 14.2g ~102 kcal, "
+                    "1 tbsp sugar = 12.5g ~48 kcal, 1 tbsp honey = 21g ~64 kcal, "
+                    "1 tbsp cream = 15g ~52 kcal, 1 tsp oil = 4.5g ~40 kcal). "
+                    "If given in grams already, use that directly. "
+                    "Set estimated_quantity_grams to the converted gram value and estimated_total_kcal "
+                    "based on that gram weight using standard nutritional values. "
+                    "Include each as a separate entry in visible_ingredients with a full-image bounding box "
+                    "and factor their calories into the totals."
                 )
         recipe = user_context.get('recipe_description', '').strip()
         if recipe:
             lines.append(
                 f"- Recipe/menu description from user: \"{recipe}\". "
-                "Use this to improve accuracy of food identification and portion estimates."
+                "Use this to improve accuracy of food identification, portion estimates, and "
+                "to infer any cooking ingredients (oils, butter, sauces) that add calories even if not visible. "
+                "If the description mentions specific quantities, convert them to grams and calculate KCal accordingly."
             )
         if not lines:
             return ""
         return (
             "\n\nADDITIONAL CONTEXT PROVIDED BY THE USER (treat as high-confidence information):\n"
             + "\n".join(lines)
-            + "\n"
+            + "\nIMPORTANT: For every user-specified ingredient, always output estimated_quantity_grams "
+            "(converted from any unit to grams) and estimated_total_kcal (calculated from that gram weight). "
+            "Never output 0g for an ingredient the user has specified a quantity for.\n"
         )
 
     def process_image(self, image_path: Path, job_id: str, user_context: dict = None) -> Dict:
