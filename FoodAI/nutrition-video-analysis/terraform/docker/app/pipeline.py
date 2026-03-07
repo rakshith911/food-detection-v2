@@ -1100,6 +1100,8 @@ class NutritionVideoPipeline:
         grams_list = []
         quantity_list = []
         calories_list = []
+        # Minimum box area to filter out Gemini placeholder boxes (e.g. [0,0,1,1])
+        MIN_BOX_AREA = 100
         for ing in visible:
             bbox = ing.get("bounding_box")
             name = (ing.get("name") or "").strip()
@@ -1111,6 +1113,9 @@ class NutritionVideoPipeline:
             x_max = max(0, min(float(x_max), img_width))
             y_max = max(0, min(float(y_max), img_height))
             if x_max <= x_min or y_max <= y_min:
+                continue
+            # Drop tiny placeholder boxes Gemini creates for duplicate/ghost entries
+            if (x_max - x_min) * (y_max - y_min) < MIN_BOX_AREA:
                 continue
             g = ing.get("estimated_quantity_grams")
             try:
@@ -1129,6 +1134,30 @@ class NutritionVideoPipeline:
                 calories_list.append(None)
             boxes.append([x_min, y_min, x_max, y_max])
             labels.append(name)
+
+        # Deduplicate: if both "X (added)" and "X" exist, drop the plain "X"
+        # Gemini sometimes returns the same ingredient twice — once labelled and once as a ghost
+        labelled_bases = {
+            lbl.lower().replace('(added)', '').replace('(hidden)', '').strip()
+            for lbl in labels
+            if '(added)' in lbl.lower() or '(hidden)' in lbl.lower()
+        }
+        if labelled_bases:
+            keep_indices = []
+            for i, lbl in enumerate(labels):
+                normalized = lbl.lower().replace('(added)', '').replace('(hidden)', '').strip()
+                is_plain_duplicate = (
+                    '(added)' not in lbl.lower()
+                    and '(hidden)' not in lbl.lower()
+                    and normalized in labelled_bases
+                )
+                if not is_plain_duplicate:
+                    keep_indices.append(i)
+            boxes        = [boxes[i]        for i in keep_indices]
+            labels       = [labels[i]       for i in keep_indices]
+            grams_list   = [grams_list[i]   for i in keep_indices]
+            quantity_list= [quantity_list[i] for i in keep_indices]
+            calories_list= [calories_list[i] for i in keep_indices]
         caption = data.get("main_food_item") or ""
         if data.get("additional_notes"):
             caption = f"{caption}. {data['additional_notes']}" if caption else data["additional_notes"]
