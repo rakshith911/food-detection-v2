@@ -220,7 +220,7 @@ const styles = StyleSheet.create({
     height: 56, // Fixed height
     width: '100%', // Fixed width
     backgroundColor: '#7BA21B',
-    borderRadius: 8,
+    borderRadius: 28,
     alignItems: 'center',
     justifyContent: 'center',
     flexDirection: 'row',

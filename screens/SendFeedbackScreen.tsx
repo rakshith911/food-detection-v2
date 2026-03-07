@@ -416,7 +416,7 @@ const styles = StyleSheet.create({
   nextButton: {
     height: 56,
     width: '100%',
-    borderRadius: 8,
+    borderRadius: 28,
     backgroundColor: '#7BA21B',
     alignItems: 'center',
     justifyContent: 'center',

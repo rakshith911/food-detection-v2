@@ -989,7 +989,7 @@ const styles = StyleSheet.create({
     height: 56,
     width: '100%',
     backgroundColor: '#7BA21B',
-    borderRadius: 8,
+    borderRadius: 28,
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#7BA21B',

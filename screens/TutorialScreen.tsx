@@ -186,14 +186,21 @@ export default function TutorialScreen({ onBack }: TutorialScreenProps = {}) {
                   <View style={styles.bulletPoint}>
                     <View style={styles.bulletDot} />
                     <Text style={styles.instructionText}>
-                      Take a photo or short 5-second video from above so the whole meal is visible.
+                      Keep a blank business card beside the plate for accurate portion size.(Optional)
                     </Text>
                   </View>
-                  
+
                   <View style={styles.bulletPoint}>
                     <View style={styles.bulletDot} />
                     <Text style={styles.instructionText}>
-                      Provide supplemental text (optional), preview, and submit.
+                      Take a photo or short 5-second video from above so the whole meal is visible.
+                    </Text>
+                  </View>
+
+                  <View style={styles.bulletPoint}>
+                    <View style={styles.bulletDot} />
+                    <Text style={styles.instructionText}>
+                      Provide supplemental information and submit.
                     </Text>
                   </View>
                 </View>
@@ -427,7 +434,7 @@ const styles = StyleSheet.create({
     height: 56, // Fixed height
     width: '100%', // Fixed width
     backgroundColor: '#7BA21B',
-    borderRadius: 8,
+    borderRadius: 28,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
