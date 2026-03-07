@@ -94,7 +94,7 @@ exports.handler = async (event) => {
     trigger === 'CustomMessage_ResendCode' ||
     trigger === 'CustomMessage_ForgotPassword'
   ) {
-    event.response.emailSubject = 'Your UKcal verification code';
+    event.response.emailSubject = 'UKCal One-Time-Password';
     event.response.emailMessage = buildEmail();
     return event;
   }
