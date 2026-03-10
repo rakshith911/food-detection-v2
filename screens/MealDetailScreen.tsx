@@ -1081,6 +1081,9 @@ const styles = StyleSheet.create({
     color: '#6B7280',
   },
   addButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
     backgroundColor: '#7BA21B',
     paddingHorizontal: 16,
     paddingVertical: 8,
@@ -1091,9 +1094,9 @@ const styles = StyleSheet.create({
     opacity: 0.6,
   },
   addButtonIcon: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
+    width: 17,
+    height: 17,
+    borderRadius: 9,
     backgroundColor: '#FFFFFF',
     alignItems: 'center',
     justifyContent: 'center',
@@ -1102,7 +1105,8 @@ const styles = StyleSheet.create({
     color: '#7BA21B',
     fontSize: 16,
     fontWeight: '700',
-    lineHeight: 20,
+    lineHeight: 16,
+    textAlign: 'center',
   },
   addButtonText: {
     color: '#FFFFFF',

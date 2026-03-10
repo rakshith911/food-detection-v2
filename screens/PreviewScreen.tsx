@@ -500,9 +500,9 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
     <View style={styles.ingredientSection}>
       <View style={styles.tableDivider} />
       <View style={styles.tableHeader}>
-        <Text style={[styles.tableHeaderText, { flex: 5 }]}>{headerLabel}</Text>
+        <Text style={[styles.tableHeaderText, { flex: 5, paddingLeft: 10 }]}>{headerLabel}</Text>
         <View style={{ width: 8 }} />
-        <Text style={[styles.tableHeaderText, { flex: 4 }]}>Quantity</Text>
+        <Text style={[styles.tableHeaderText, { flex: 4, paddingLeft: 10 }]}>Quantity</Text>
         <Text style={[styles.tableHeaderText, { flex: 2, textAlign: 'center' }]}>Action</Text>
       </View>
       {rows.map((row) => {
@@ -990,9 +990,9 @@ const styles = StyleSheet.create({
     opacity: 0.6,
   },
   addIngredientIcon: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
+    width: 17,
+    height: 17,
+    borderRadius: 9,
     backgroundColor: '#FFFFFF',
     alignItems: 'center',
     justifyContent: 'center',
@@ -1001,7 +1001,8 @@ const styles = StyleSheet.create({
     color: '#7BA21B',
     fontSize: 16,
     fontWeight: '700',
-    lineHeight: 20,
+    lineHeight: 16,
+    textAlign: 'center',
   },
   addIngredientText: {
     color: '#FFFFFF',
