@@ -109,7 +109,7 @@ export default function FeedbackScreen() {
     (async () => {
       setRefreshingOverlay(true);
       try {
-        const fresh = await nutritionAnalysisAPI.getResults(item.job_id!, true);
+        const fresh = await nutritionAnalysisAPI.getResults(item.job_id!, true, false);
         if (cancelled) return;
         if (fresh?.segmented_images?.overlay_urls?.length) {
           setRefreshedSegmentedImages(fresh.segmented_images);
@@ -132,7 +132,7 @@ export default function FeedbackScreen() {
     if (item?.job_id && user?.email) {
       setRefreshingOverlay(true);
       try {
-        const fresh = await nutritionAnalysisAPI.getResults(item.job_id, true);
+        const fresh = await nutritionAnalysisAPI.getResults(item.job_id, true, false);
         if (fresh?.segmented_images?.overlay_urls?.length) {
           setRefreshedSegmentedImages(fresh.segmented_images);
           await dispatch(updateAnalysis({

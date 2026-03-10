@@ -211,13 +211,6 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
 
     setIsSubmitting(true);
 
-    // Immediately let the user know — result will come via push notification
-    Alert.alert(
-      'Submitted!',
-      'We will notify you when the results are ready.',
-      [{ text: 'OK' }]
-    );
-
     let analysisId: string | null = null;
 
     try {
@@ -251,11 +244,10 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
           analysisId = result_action.payload.id;
           setCurrentAnalysisId(analysisId);
 
-          setTimeout(() => {
-            if (onAnalyze) {
-              onAnalyze();
-            }
-          }, 100);
+          // Navigate immediately — Results screen will show the notification on mount
+          if (onAnalyze) {
+            onAnalyze();
+          }
         }
       }
 
@@ -454,7 +446,7 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
 
       if (error?.message === 'Analysis timeout') {
         console.log('[PreviewScreen] Timeout — job remains queued in SQS, analysisId:', analysisId);
-        // Already shown the initial "we will notify you" alert — no second popup needed
+        // Job is queued — push notification will fire when ready, no alert needed
       } else {
         console.log('[PreviewScreen] Real failure — marking analysisId as failed:', analysisId, 'error:', error?.message);
         if (analysisId && user?.email) {

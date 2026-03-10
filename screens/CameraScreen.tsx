@@ -436,7 +436,7 @@ export default function CameraScreen() {
         onAnalyze={() => {
           // After submit, show the new results feed screen
           // @ts-ignore - stack param list not strictly typed here
-          (navigation as any).navigate('Results');
+          (navigation as any).navigate('Results', { showSubmittedNotification: true });
         }}
       />
     );

@@ -261,12 +261,14 @@ export class NutritionAnalysisAPI {
   /**
    * Get the results of a completed job
    * @param jobId - The job ID
-   * @param detailed - Whether to fetch detailed results (default: true to get segmented images)
+   * @param detailed - Whether to request ?detailed=true (fetches segmented images + detailed_results from Lambda)
+   * @param fetchDetailedJson - Whether to also download the full results JSON via download_url (default: true).
+   *   Pass false when you only need segmented_images to avoid an extra large S3 download.
    */
-  async getResults(jobId: string, detailed: boolean = true): Promise<NutritionAnalysisResult | null> {
+  async getResults(jobId: string, detailed: boolean = true, fetchDetailedJson: boolean = true): Promise<NutritionAnalysisResult | null> {
     try {
       // Request detailed results to get segmented images
-      const url = detailed 
+      const url = detailed
         ? `${this.baseUrl}/api/results/${jobId}?detailed=true`
         : `${this.baseUrl}/api/results/${jobId}`;
       const response = await fetch(url);
@@ -283,8 +285,8 @@ export class NutritionAnalysisAPI {
         console.log('[Nutrition API] Segmented images URLs found in response');
       }
 
-      // Fetch detailed results if download URL is available
-      if (data.download_url) {
+      // Fetch detailed results if download URL is available and caller requested it
+      if (fetchDetailedJson && data.download_url) {
         try {
           console.log('[Nutrition API] Fetching detailed results from S3...');
           const detailsResponse = await fetch(data.download_url, {

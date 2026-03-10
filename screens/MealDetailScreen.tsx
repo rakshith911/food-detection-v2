@@ -155,7 +155,7 @@ export default function MealDetailScreen() {
     (async () => {
       setRefreshingOverlay(true);
       try {
-        const fresh = await nutritionAnalysisAPI.getResults(item.job_id!, true);
+        const fresh = await nutritionAnalysisAPI.getResults(item.job_id!, true, false);
         if (cancelled) return;
         const hasResult = fresh?.segmented_images?.overlay_urls?.length || fresh?.segmented_images?.video_overlay_url;
         if (hasResult) {
@@ -180,7 +180,7 @@ export default function MealDetailScreen() {
     if (item?.job_id && user?.email) {
       setRefreshingOverlay(true);
       try {
-        const fresh = await nutritionAnalysisAPI.getResults(item.job_id, true);
+        const fresh = await nutritionAnalysisAPI.getResults(item.job_id, true, false);
         if (fresh?.segmented_images?.overlay_urls?.length || fresh?.segmented_images?.video_overlay_url) {
           setRefreshedSegmentedImages(fresh.segmented_images);
           await dispatch(updateAnalysis({
@@ -365,7 +365,6 @@ export default function MealDetailScreen() {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.error('[MealDetail] Failed to save changes:', errorMessage, error);
-      Alert.alert('Save Failed', 'Failed to save changes. Please try again.');
       return false;
     } finally {
       setIsSaving(false);
@@ -925,38 +924,32 @@ export default function MealDetailScreen() {
       <BottomButtonContainer>
         {(() => {
           const hasIncompleteRow = dishContents.some(r => !r.name.trim() || !r.calories.trim());
-          const canProceed = !isSaving && !hasIncompleteRow;
+          const canProceed = !hasIncompleteRow;
           return (
         <TouchableOpacity
           style={[styles.nextButton, !canProceed && styles.nextButtonDisabled]}
-          onPress={async () => {
+          onPress={() => {
             if (!canProceed) return;
-            
+
             setEditingRowId(null);
             Keyboard.dismiss();
-            
-            // Save changes before navigating
-            const saved = await saveChanges();
-            
-            if (saved) {
-              // Update item with latest changes for navigation
-              const updatedItem = {
-                ...item,
-                mealName,
-                dishContents,
-                nutritionalInfo: {
-                  ...item.nutritionalInfo,
-                  calories: totalCalories,
-                },
-              };
-              (navigation as any).navigate('Feedback', { item: updatedItem });
-            }
+
+            // Navigate immediately with latest data; save in the background
+            const updatedItem = {
+              ...item,
+              mealName,
+              dishContents,
+              nutritionalInfo: {
+                ...item.nutritionalInfo,
+                calories: totalCalories,
+              },
+            };
+            (navigation as any).navigate('Feedback', { item: updatedItem });
+            saveChanges();
           }}
           disabled={!canProceed}
         >
-          <Text style={styles.nextButtonText}>
-            {isSaving ? 'Saving...' : 'Next'}
-          </Text>
+          <Text style={styles.nextButtonText}>Next</Text>
         </TouchableOpacity>
           );
         })()}

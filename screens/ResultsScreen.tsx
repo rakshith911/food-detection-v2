@@ -6,7 +6,7 @@ import { Video, ResizeMode } from 'expo-av';
 import { Camera } from 'react-native-vision-camera';
 import { Ionicons } from '@expo/vector-icons';
 import Svg, { Path } from 'react-native-svg';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useRoute } from '@react-navigation/native';
 import { useAppDispatch, useAppSelector } from '../store/hooks';
 import { deleteAnalysis, loadHistory, clearHistoryLocal } from '../store/slices/historySlice';
 import { loadProfile } from '../store/slices/profileSlice';
@@ -81,6 +81,7 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
 
 export default function ResultsScreen({ navigation: navigationProp }: { navigation?: any }) {
   const navigation = useNavigation<any>();
+  const route = useRoute<any>();
   const dispatch = useAppDispatch();
   const history = useAppSelector((state) => state.history?.history ?? []);
   const isLoading = useAppSelector((state) => state.history?.isLoading ?? false);
@@ -98,6 +99,15 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
   // Resolved S3 URLs for videos whose local file:// URI is no longer on device
   const [resolvedVideoUris, setResolvedVideoUris] = useState<Record<string, string>>({});
   const fetchedVideoIds = useRef<Set<string>>(new Set());
+
+  // Show "we'll notify you" alert after navigating from a new submission (no flash before nav)
+  useEffect(() => {
+    if (route.params?.showSubmittedNotification) {
+      Alert.alert('Submitted!', 'We will notify you when the results are ready.', [{ text: 'OK' }]);
+      // Clear the param so re-focusing the screen doesn't re-show it
+      navigation.setParams({ showSubmittedNotification: false });
+    }
+  }, [route.params?.showSubmittedNotification]);
 
   // Proactively fetch S3 URLs for all video items so playback works even if local file is gone
   useEffect(() => {

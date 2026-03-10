@@ -98,6 +98,10 @@ const restoreUserDataFromS3 = async (userId: string, email: string): Promise<boo
         await AsyncStorage.setItem('business_profile_completed', 'true');
       }
 
+      if (s3Data.profile.consentDate) {
+        await AsyncStorage.setItem('consent_date', s3Data.profile.consentDate);
+      }
+
       console.log('[Auth] Profile data restored from S3');
     }
 
@@ -247,6 +251,12 @@ export const login = createAsyncThunk(
           } catch (error) {
             console.log('[Auth] Could not check history:', error);
           }
+
+          // Restore full profile from S3 (covers consent_date and other fields cleared on logout)
+          await restoreUserDataFromS3(userAccount.userId, input);
+          // Re-read restored account in case S3 had newer data
+          const restoredAccount = await userService.getUserAccount();
+          if (restoredAccount) userAccount = restoredAccount;
 
           // Restore profile completion status for existing users
           // Consider profile complete if: explicitly marked complete OR has history

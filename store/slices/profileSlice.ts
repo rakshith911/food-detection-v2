@@ -1,4 +1,5 @@
 import { createSlice, createAsyncThunk, PayloadAction } from '@reduxjs/toolkit';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { userService, BusinessProfile, Avatar, UserAccount } from '../../services/UserService';
 import { s3UserDataService, ProfileBackup } from '../../services/S3UserDataService';
 import { backupSettings } from './appSlice';
@@ -51,6 +52,8 @@ const backupProfileToS3 = async (state: { profile: ProfileState }) => {
     const { userAccount, businessProfile, avatar, profileImage } = state.profile;
     if (!userAccount?.userId) return;
 
+    const consentDate = await AsyncStorage.getItem('consent_date');
+
     const backup: ProfileBackup = {
       userAccount: {
         userId: userAccount.userId,
@@ -61,6 +64,7 @@ const backupProfileToS3 = async (state: { profile: ProfileState }) => {
       businessProfile,
       avatar: avatar ? { id: avatar.id } : null,
       profileImage,
+      consentDate: consentDate ?? undefined,
       updatedAt: new Date().toISOString(),
     };
 

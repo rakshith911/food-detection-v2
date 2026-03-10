@@ -78,6 +78,7 @@ export interface ProfileBackup {
   businessProfile: any | null;
   avatar: { id: number } | null;
   profileImage: string | null;
+  consentDate?: string;
   updatedAt: string;
 }
 
