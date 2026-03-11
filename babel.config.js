@@ -5,7 +5,7 @@ module.exports = function(api) {
     plugins: [
       // Must run before any class-feature plugins so that TypeScript `declare` fields
       // (used by expo-file-system's new NativeModule architecture) are stripped first.
-      ['@babel/plugin-transform-typescript', { allowDeclareFields: true }],
+      ['@babel/plugin-transform-typescript', { allowDeclareFields: true, allExtensions: true, isTSX: true }],
       '@babel/plugin-transform-class-static-block',
       '@babel/plugin-transform-private-methods',
       ['@babel/plugin-transform-class-properties', { loose: false }],
