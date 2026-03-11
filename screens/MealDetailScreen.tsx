@@ -35,6 +35,7 @@ import OptimizedImage from '../components/OptimizedImage';
 import AppHeader from '../components/AppHeader';
 import BottomButtonContainer from '../components/BottomButtonContainer';
 
+
 export default function MealDetailScreen() {
   const navigation = useNavigation<any>();
   const route = useRoute();
@@ -102,35 +103,35 @@ export default function MealDetailScreen() {
   const [refreshingOverlay, setRefreshingOverlay] = useState(false);
   const [mediaLoading, setMediaLoading] = useState(true);
   const [videoOverlayError, setVideoOverlayError] = useState(false);
-  // Resolved image URI: falls back to S3 presigned URL when the local file is from another device
-  const [resolvedImageUri, setResolvedImageUri] = useState<string | undefined>(item?.imageUri);
-  // Resolved video URI: falls back to S3 presigned URL when the local file is gone
-  const [resolvedVideoUri, setResolvedVideoUri] = useState<string | undefined>(item?.videoUri);
+  // Resolved image/video URI — always fetched fresh from S3 (presigned URL)
+  const [resolvedImageUri, setResolvedImageUri] = useState<string | undefined>(undefined);
+  const [resolvedVideoUri, setResolvedVideoUri] = useState<string | undefined>(undefined);
 
   useEffect(() => {
-    // Image was already uploaded to S3 during analysis — retrieve it by job_id
-    if (item?.job_id && item?.imageUri?.startsWith('file://')) {
+    // Always fetch from S3 when job_id is available — presigned URLs are always fresh
+    if (item?.job_id) {
       getImagePresignedUrl(item.job_id)
-        .then(url => { if (url) setResolvedImageUri(url); })
-        .catch(() => {});
+        .then(url => { setResolvedImageUri(url || item?.imageUri); })
+        .catch(() => setResolvedImageUri(item?.imageUri));
     } else {
       setResolvedImageUri(item?.imageUri);
     }
-  }, [item?.id, item?.job_id, item?.imageUri]);
+  }, [item?.id, item?.job_id]);
 
   useEffect(() => {
-    // Video was uploaded to S3 — retrieve presigned URL so it plays even if local file is gone
-    if (item?.job_id && item?.videoUri) {
+    // Always fetch from S3 when job_id is available — works on any device after reinstall
+    if (item?.job_id) {
       getImagePresignedUrl(item.job_id)
-        .then(url => { if (url) setResolvedVideoUri(url); })
+        .then(url => { setResolvedVideoUri(url || item?.videoUri); })
         .catch(() => setResolvedVideoUri(item?.videoUri));
     } else {
       setResolvedVideoUri(item?.videoUri);
     }
-  }, [item?.id, item?.job_id, item?.videoUri]);
+  }, [item?.id, item?.job_id]);
   
-  // Effective overlay: use refreshed URLs if we got them, else stored
-  const effectiveSegmentedImages = refreshedSegmentedImages ?? item?.segmented_images;
+  // Effective overlay: only use freshly fetched URLs — never show stale stored ones
+  // (stored overlay_urls are presigned S3 URLs that expire, so always wait for fresh ones)
+  const effectiveSegmentedImages = refreshedSegmentedImages;
   
   // Reset overlay state and loader when item changes
   useEffect(() => {
@@ -152,14 +153,9 @@ export default function MealDetailScreen() {
     prefetchSegmentedImage(item.job_id, remoteUrl);
   }, [effectiveSegmentedImages?.overlay_urls?.[0]?.url, item?.job_id]);
 
-  // Fetch segmented image URLs on open:
-  // - Videos: always refetch (presigned URLs expire after 1h)
-  // - Images: skip if overlay already saved
+  // Fetch segmented image URLs on open — always refetch since presigned URLs expire
   useEffect(() => {
-    const skipFetch = isVideo
-      ? false
-      : !!effectiveSegmentedImages?.overlay_urls?.length;
-    if (!item?.job_id || !user?.email || skipFetch || refreshingOverlay) return;
+    if (!item?.job_id || !user?.email || refreshingOverlay) return;
     let cancelled = false;
     (async () => {
       setRefreshingOverlay(true);
@@ -168,6 +164,7 @@ export default function MealDetailScreen() {
         if (cancelled) return;
         const hasResult = fresh?.segmented_images?.overlay_urls?.length || fresh?.segmented_images?.video_overlay_url;
         if (hasResult) {
+          setOverlayLoadFailed(false);
           setVideoOverlayError(false);
           setRefreshedSegmentedImages(fresh.segmented_images);
           await dispatch(updateAnalysis({
@@ -191,6 +188,8 @@ export default function MealDetailScreen() {
       try {
         const fresh = await nutritionAnalysisAPI.getResults(item.job_id, true, false);
         if (fresh?.segmented_images?.overlay_urls?.length || fresh?.segmented_images?.video_overlay_url) {
+          setOverlayLoadFailed(false);
+          setVideoOverlayError(false);
           setRefreshedSegmentedImages(fresh.segmented_images);
           await dispatch(updateAnalysis({
             userEmail: user.email,
@@ -560,9 +559,8 @@ export default function MealDetailScreen() {
               : null;
             const displayUri = overlayUri || resolvedImageUri || null;
             const showImageLoader = !isVideo && !!displayUri;
-            // When playing: try segmented overlay video first, fall back to original (from S3 if local is gone)
-            // When paused: just show the original video thumbnail
-            const originalVideoUri = resolvedVideoUri || item.videoUri;
+            // Use S3 URL only — never fall back to stale local file:// path on reinstall / new device
+            const originalVideoUri = resolvedVideoUri ?? (item?.job_id ? null : item?.videoUri ?? null);
             const videoSource = isVideo ? (isVideoPlaying ? (videoOverlayUrl || originalVideoUri) : originalVideoUri) : null;
             return (
           <>
@@ -625,9 +623,8 @@ export default function MealDetailScreen() {
                   source={{ uri: displayUri }}
                   style={styles.media}
                   resizeMode="cover"
-                  cachePolicy="disk"
+                  cachePolicy="memory-disk"
                   priority="normal"
-                  cacheKey={item.job_id ? cacheKeyFor(item.job_id) : undefined}
                   onImageLoad={() => setMediaLoading(false)}
                   onError={() => { setMediaLoading(false); setOverlayLoadFailed(true); }}
                 />
@@ -712,9 +709,8 @@ export default function MealDetailScreen() {
                   source={{ uri: fullImageUri }}
                   style={styles.fullImage}
                   resizeMode="contain"
-                  cachePolicy="disk"
+                  cachePolicy="memory-disk"
                   priority="high"
-                  cacheKey={item.job_id ? cacheKeyFor(item.job_id) : undefined}
                 />
               ) : null}
             </View>

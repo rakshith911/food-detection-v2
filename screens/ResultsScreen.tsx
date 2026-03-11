@@ -111,13 +111,13 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
   }, [route.params?.showSubmittedNotification]);
 
   useEffect(() => {
-    if (!pendingNotification) return;
+    if (!pendingNotification || history.length === 0) return;
     const t = setTimeout(() => {
-      setPendingNotification(false); // reset AFTER timer fires, not before (avoids cleanup cancelling the timer)
+      setPendingNotification(false);
       Alert.alert('Submitted!', 'We will notify you when the results are ready.', [{ text: 'OK' }]);
-    }, 600);
+    }, 300);
     return () => clearTimeout(t);
-  }, [pendingNotification]);
+  }, [pendingNotification, history.length]);
 
   // Proactively fetch S3 URLs for all video items so playback works even if local file is gone
   useEffect(() => {
@@ -538,8 +538,7 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
 
   const shouldShowLoader = !user?.email ||
                            emailChanged ||
-                           historyNotReadyYet ||
-                           (history.length === 0 && !canShowTutorial);
+                           (history.length === 0 && (historyNotReadyYet || !canShowTutorial));
 
   // Update last rendered email once we're sure we're showing the correct data
   if (!shouldShowLoader && user?.email && profileBelongsToCurrentUser) {

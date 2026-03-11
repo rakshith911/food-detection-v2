@@ -2496,8 +2496,26 @@ class NutritionVideoPipeline:
                     continue
                 label_info[i][3] = new_ty
 
-        # Final image — coloured fills only, no leader lines or text labels
+        # Final image — coloured fills + text labels
         result = (np.clip(overlay, 0, 1) * 255).astype(np.uint8)
+
+        # Draw label pills on the result image.
+        # result is RGB; cv2 uses BGR so we convert, draw, then convert back.
+        if label_info:
+            result_bgr = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
+            for info in label_info:
+                cx, cy, tx, ty, tw, th_text, baseline, display_label, rgb = info
+                # rgb stored as (r, g, b); cv2 needs (b, g, r)
+                bgr_color = (rgb[2], rgb[1], rgb[0])
+                pill_x1 = max(0, tx - pad)
+                pill_y1 = max(0, ty - th_text - pad)
+                pill_x2 = min(w - 1, tx + tw + pad)
+                pill_y2 = min(h - 1, ty + baseline + pad)
+                # Dark semi-opaque pill background for readability
+                cv2.rectangle(result_bgr, (pill_x1, pill_y1), (pill_x2, pill_y2), (20, 20, 20), -1)
+                # Label text in the food item's assigned colour
+                cv2.putText(result_bgr, display_label, (tx, ty), font, font_scale, bgr_color, thickness, cv2.LINE_AA)
+            result = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
 
         overlay_filename = overlay_dir / f"frame_{frame_idx:05d}_all_masks.png"
         # Frame is RGB; use PIL to save so channels are stored correctly for web/mobile viewers
