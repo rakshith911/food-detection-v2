@@ -5,6 +5,7 @@ import { Image as ExpoImage } from 'expo-image';
 type OptimizedImageProps = ImageProps & {
   cachePolicy?: 'none' | 'memory' | 'disk' | 'memory-disk';
   priority?: 'low' | 'normal' | 'high';
+  cacheKey?: string;
   showLoader?: boolean;
   onImageLoad?: () => void;
   onImageError?: () => void;
@@ -15,6 +16,7 @@ export default function OptimizedImage({
   resizeMode = 'cover',
   cachePolicy = 'memory-disk',
   priority = 'normal',
+  cacheKey,
   onImageLoad,
   onImageError,
   showLoader = false,
@@ -68,6 +70,7 @@ export default function OptimizedImage({
         contentFit={contentFit as any}
         cachePolicy={cachePolicy}
         priority={priority}
+        {...(cacheKey ? { cacheKey } : {})}
         transition={200}
         onLoad={handleLoad}
         onError={handleError}

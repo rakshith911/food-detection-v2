@@ -152,9 +152,20 @@ export const updateAnalysis = createAsyncThunk(
   'history/updateAnalysis',
   async (
     { userEmail, analysisId, updates }: { userEmail: string; analysisId: string; updates: Partial<AnalysisEntry> },
-    { getState }
+    { getState, rejectWithValue }
   ) => {
-    const response = await historyAPI.updateAnalysis(userEmail, analysisId, updates);
+    const state = getState() as { history: HistoryState };
+    const existing = state.history.history.find(e => e.id === analysisId);
+
+    // Entry was deleted by the user — skip silently, no error
+    if (!existing) {
+      return rejectWithValue('ENTRY_DELETED');
+    }
+
+    // Include type + timestamp so MockHistoryAPI can recreate the entry if AsyncStorage lost it
+    const fullUpdates: Partial<AnalysisEntry> = { type: existing.type, timestamp: existing.timestamp, ...updates };
+
+    const response = await historyAPI.updateAnalysis(userEmail, analysisId, fullUpdates);
     if (response.success && response.data) {
       // Backup updated history to S3
       const state = getState() as { history: HistoryState };
@@ -265,8 +276,9 @@ const historySlice = createSlice({
         }
         state.error = null;
       })
-      .addCase(updateAnalysis.rejected, (state, action) => {
-        state.error = action.error.message || 'Failed to update analysis';
+      .addCase(updateAnalysis.rejected, (_state, action) => {
+        if (action.payload === 'ENTRY_DELETED') return; // user deleted the card — expected, no log needed
+        console.error('[History] updateAnalysis rejected:', action.error.message);
       });
   },
 });

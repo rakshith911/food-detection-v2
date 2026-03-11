@@ -133,23 +133,21 @@ const smoothTransitionConfig = {
   cardStyleInterpolator: ({ current, next, layouts }: any) => {
     return {
       cardStyle: {
+        backgroundColor: '#000000',
         transform: [
           {
             translateX: current.progress.interpolate({
               inputRange: [0, 1],
-              outputRange: [layouts.screen.width, 0], // Slide from right edge
+              outputRange: [layouts.screen.width, 0],
             }),
           },
         ],
-        opacity: current.progress.interpolate({
-          inputRange: [0, 0.5, 1],
-          outputRange: [0, 1, 1], // Smoother fade in
-        }),
+        opacity: current.progress, // Fade out outgoing (white) content; NavigationContainer bg is #000000 so no white shows
       },
       overlayStyle: {
         opacity: current.progress.interpolate({
           inputRange: [0, 1],
-          outputRange: [0, 0.3], // Lighter overlay for smoother look
+          outputRange: [0, 0.3],
         }),
       },
     };
@@ -638,7 +636,7 @@ function AppContent() {
           dark: false,
         }}>
           <SafeAreaProvider>
-            <NavigationContainer ref={navigationRef}>
+            <NavigationContainer ref={navigationRef} theme={{ dark: false, colors: { primary: '#7BA21B', background: '#000000', card: '#FFFFFF', text: '#000000', border: '#E5E7EB', notification: '#7BA21B' } }}>
               <RootNavigator />
             </NavigationContainer>
           </SafeAreaProvider>

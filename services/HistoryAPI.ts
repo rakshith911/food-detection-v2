@@ -215,12 +215,17 @@ class MockHistoryAPI extends HistoryAPI {
       // Simulate network delay
       await new Promise(resolve => setTimeout(resolve, 300));
       
+      // Always re-read from AsyncStorage before updating.
+      // this.mockData can become stale if S3HistoryAPI recreated this.local
+      // (e.g. after getHistory re-init) between addAnalysis and updateAnalysis.
+      await this.loadFromStorage();
+
       // Initialize user data if it doesn't exist
       if (!this.mockData[userEmail]) {
         this.mockData[userEmail] = [];
         console.log(`[Mock API] Initialized data for ${userEmail}`);
       }
-      
+
       const index = this.mockData[userEmail].findIndex(entry => entry.id === analysisId);
       if (index !== -1) {
         // Create a new array with the updated entry (avoid mutation)
@@ -312,13 +317,18 @@ class S3HistoryAPI {
       const s3History = await loadHistoryFromS3(userEmail);
       if (s3History && s3History.length > 0) {
         console.log(`[S3History] Loaded ${s3History.length} entries from S3 for ${userEmail}`);
-        // Populate local AsyncStorage so writes on this device include full history
+        // Re-read AsyncStorage right before merging — a concurrent saveAnalysis may have
+        // written a new entry while the S3 fetch was in-flight.  Never overwrite local
+        // entries with S3 data; only add S3 entries that are not present locally.
         const stored = await AsyncStorage.getItem('mockHistoryData');
         const mockData = stored ? JSON.parse(stored) : {};
-        if (!mockData[userEmail] || mockData[userEmail].length === 0) {
-          mockData[userEmail] = s3History;
+        const localEntries: AnalysisEntry[] = mockData[userEmail] || [];
+        const localIds = new Set(localEntries.map((e: AnalysisEntry) => e.id));
+        const newFromS3 = s3History.filter((e: AnalysisEntry) => !localIds.has(e.id));
+        if (newFromS3.length > 0) {
+          mockData[userEmail] = [...localEntries, ...newFromS3];
           await AsyncStorage.setItem('mockHistoryData', JSON.stringify(mockData));
-          this.local = new MockHistoryAPI(); // re-init so it picks up the populated data
+          this.local = new MockHistoryAPI(); // re-init so it picks up the merged data
         }
       } else {
         // S3 is empty — push existing local data up to S3 (first-time migration)

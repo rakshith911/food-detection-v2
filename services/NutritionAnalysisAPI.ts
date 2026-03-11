@@ -426,16 +426,44 @@ export class NutritionAnalysisAPI {
           }
         }
       } else {
-        console.warn('[Nutrition API] No download_url provided in results');
-        // Fallback: use detected_foods from the main response
-        if ((data as any).detected_foods && Array.isArray((data as any).detected_foods)) {
-          data.items = (data as any).detected_foods.map((item: any) => ({
-            food_name: item.name || 'Unknown',
+        // No S3 JSON fetch — read items from embedded detailed_results (Lambda already includes this in the response)
+        const embedded = data.detailed_results as any;
+        let itemsArray: any[] | null = null;
+
+        if (embedded?.detected_items?.length > 0) {
+          itemsArray = embedded.detected_items;
+        } else if (embedded?.full_results?.nutrition?.items?.length > 0) {
+          itemsArray = embedded.full_results.nutrition.items;
+        } else if (embedded?.nutrition?.items?.length > 0) {
+          itemsArray = embedded.nutrition.items;
+        } else if (Array.isArray((data as any).detected_foods) && (data as any).detected_foods.some((f: any) => f.name)) {
+          // Only use detected_foods if they actually have non-null data
+          itemsArray = (data as any).detected_foods;
+        }
+
+        if (itemsArray && itemsArray.length > 0) {
+          data.items = itemsArray.map((item: any) => ({
+            food_name: item.food_name || item.name || 'Unknown',
             mass_g: item.mass_g || 0,
-            volume_ml: undefined,
-            total_calories: item.calories || 0,
+            volume_ml: item.volume_ml,
+            total_calories: item.total_calories || item.calories || 0,
           }));
-          console.log('[Nutrition API] Using detected_foods from response:', data.items.length, 'items');
+          console.log('[Nutrition API] Extracted', data.items.length, 'items from embedded detailed_results');
+        } else {
+          console.warn('[Nutrition API] No items found in embedded detailed_results');
+        }
+
+        // Extract nutrition summary from embedded results
+        const mealSummary = embedded?.meal_summary || embedded?.full_results?.nutrition?.summary || embedded?.nutrition?.summary;
+        if (mealSummary && Object.keys(mealSummary).length > 0) {
+          data.nutrition_summary = {
+            total_food_volume_ml: mealSummary.total_food_volume_ml || 0,
+            total_mass_g: mealSummary.total_mass_g || 0,
+            total_calories_kcal: mealSummary.total_calories_kcal || 0,
+            num_food_items: mealSummary.num_food_items || (data.items?.length || 0),
+          };
+        } else if (data.nutrition_summary) {
+          // Lambda already set nutrition_summary at the top level — keep it
         }
       }
 

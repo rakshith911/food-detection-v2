@@ -100,14 +100,24 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
   const [resolvedVideoUris, setResolvedVideoUris] = useState<Record<string, string>>({});
   const fetchedVideoIds = useRef<Set<string>>(new Set());
 
-  // Show "we'll notify you" alert after navigating from a new submission (no flash before nav)
+  // Two-step notification: set flag when param arrives (clear param immediately so re-submissions retrigger),
+  // then fire alert once dashboard has items visible (history.length > 0).
+  const [pendingNotification, setPendingNotification] = useState(false);
+
   useEffect(() => {
-    if (route.params?.showSubmittedNotification) {
-      Alert.alert('Submitted!', 'We will notify you when the results are ready.', [{ text: 'OK' }]);
-      // Clear the param so re-focusing the screen doesn't re-show it
-      navigation.setParams({ showSubmittedNotification: false });
-    }
+    if (!route.params?.showSubmittedNotification) return;
+    setPendingNotification(true);
+    navigation.setParams({ showSubmittedNotification: undefined });
   }, [route.params?.showSubmittedNotification]);
+
+  useEffect(() => {
+    if (!pendingNotification) return;
+    const t = setTimeout(() => {
+      setPendingNotification(false); // reset AFTER timer fires, not before (avoids cleanup cancelling the timer)
+      Alert.alert('Submitted!', 'We will notify you when the results are ready.', [{ text: 'OK' }]);
+    }, 600);
+    return () => clearTimeout(t);
+  }, [pendingNotification]);
 
   // Proactively fetch S3 URLs for all video items so playback works even if local file is gone
   useEffect(() => {
@@ -271,7 +281,7 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
     if (state === State.END) {
       const threshold = -100; // Swipe threshold to trigger delete
       const currentValue = (translateX as any)._value || 0;
-      
+
       if (currentValue < threshold) {
         // Swiped enough - show delete confirmation
         if (!deletingRef.current.has(item.id)) {
@@ -424,11 +434,11 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
               disabled={isNonTappable}
             >
           <View style={styles.mediaWrapper}>
-            {isVideo && item.videoUri ? (
+            {isVideo && (resolvedVideoUris[item.id] || item.videoUri?.startsWith('http')) ? (
               <>
                 <Video
                   key={resolvedVideoUris[item.id] || item.id}
-                  source={{ uri: resolvedVideoUris[item.id] || item.videoUri }}
+                  source={{ uri: resolvedVideoUris[item.id] || item.videoUri! }}
                   style={styles.media}
                   resizeMode={ResizeMode.COVER}
                   isLooping={false}
@@ -703,7 +713,7 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
           <View style={styles.emptyState}>
             <Text style={styles.emptyTitle}>Loading...</Text>
           </View>
-        ) : error ? (
+        ) : error && history.length === 0 ? (
           <View style={styles.emptyState}>
             <Text style={styles.emptyTitle}>Error loading history</Text>
             <Text style={styles.emptyText}>{error}</Text>

@@ -17,6 +17,7 @@ import {
   Image,
   KeyboardAvoidingView,
   ActivityIndicator,
+  Dimensions,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { PanGestureHandler, State } from 'react-native-gesture-handler';
@@ -28,6 +29,7 @@ import type { AnalysisEntry, DishContent, SegmentedImages } from '../store/slice
 import { updateAnalysis } from '../store/slices/historySlice';
 import { nutritionAnalysisAPI } from '../services/NutritionAnalysisAPI';
 import { getImagePresignedUrl } from '../services/S3UserDataService';
+import { prefetchSegmentedImage, cacheKeyFor } from '../services/SegmentedImageCache';
 import VectorBackButtonCircle from '../components/VectorBackButtonCircle';
 import OptimizedImage from '../components/OptimizedImage';
 import AppHeader from '../components/AppHeader';
@@ -142,6 +144,13 @@ export default function MealDetailScreen() {
   useEffect(() => {
     setMediaLoading(true);
   }, [effectiveSegmentedImages?.overlay_urls?.[0]?.url]);
+
+  // Eagerly prefetch the overlay into expo-image's disk cache whenever the URL is available
+  useEffect(() => {
+    const remoteUrl = effectiveSegmentedImages?.overlay_urls?.[0]?.url;
+    if (!item?.job_id || !remoteUrl) return;
+    prefetchSegmentedImage(item.job_id, remoteUrl);
+  }, [effectiveSegmentedImages?.overlay_urls?.[0]?.url, item?.job_id]);
 
   // Fetch segmented image URLs on open:
   // - Videos: always refetch (presigned URLs expire after 1h)
@@ -616,8 +625,9 @@ export default function MealDetailScreen() {
                   source={{ uri: displayUri }}
                   style={styles.media}
                   resizeMode="cover"
-                  cachePolicy="memory-disk"
+                  cachePolicy="disk"
                   priority="normal"
+                  cacheKey={item.job_id ? cacheKeyFor(item.job_id) : undefined}
                   onImageLoad={() => setMediaLoading(false)}
                   onError={() => { setMediaLoading(false); setOverlayLoadFailed(true); }}
                 />
@@ -698,17 +708,14 @@ export default function MealDetailScreen() {
                 <Ionicons name="close" size={28} color="#FFFFFF" />
               </TouchableOpacity>
               {fullImageUri ? (
-                <TouchableOpacity
-                  style={styles.fullImageWrapper}
-                  activeOpacity={1}
-                  onPress={() => {}}
-                >
-                  <Image
-                    source={{ uri: fullImageUri }}
-                    style={styles.fullImage}
-                    resizeMode="contain"
-                  />
-                </TouchableOpacity>
+                <OptimizedImage
+                  source={{ uri: fullImageUri }}
+                  style={styles.fullImage}
+                  resizeMode="contain"
+                  cachePolicy="disk"
+                  priority="high"
+                  cacheKey={item.job_id ? cacheKeyFor(item.job_id) : undefined}
+                />
               ) : null}
             </View>
           </TouchableOpacity>
@@ -1254,8 +1261,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   fullImageModalContent: {
-    width: '100%',
-    flex: 1,
+    width: Dimensions.get('window').width,
+    height: Dimensions.get('window').height,
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -1273,8 +1280,9 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   fullImage: {
-    width: '100%',
-    flex: 1,
+    width: Dimensions.get('window').width,
+    height: Dimensions.get('window').height,
+    backgroundColor: 'transparent',
   },
 });
 
