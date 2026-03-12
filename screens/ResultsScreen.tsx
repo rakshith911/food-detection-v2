@@ -115,7 +115,7 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
     const t = setTimeout(() => {
       setPendingNotification(false);
       Alert.alert('Submitted!', 'We will notify you when the results are ready.', [{ text: 'OK' }]);
-    }, 300);
+    }, 1000);
     return () => clearTimeout(t);
   }, [pendingNotification, history.length]);
 
@@ -180,11 +180,11 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
 
   // Profile is loaded by App.tsx — no dispatch needed here
 
-  // Track if history is currently loading (from App.tsx)
+  // Track the initial history load only — do NOT reset hasLoadedHistory on every isLoading change
+  // (addAnalysis, deleteAnalysis, etc. all set isLoading and must not re-trigger the full-screen loader)
   useEffect(() => {
-    if (isLoading) {
+    if (isLoading && !hasLoadedHistory.current) {
       hasStartedLoading.current = true;
-      hasLoadedHistory.current = false;
     }
   }, [isLoading]);
 
@@ -533,8 +533,10 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
                        lastRenderedEmail.current !== user?.email &&
                        profileBelongsToCurrentUser; // Only block if we have a valid profile that matches
 
-  // Show loader until history is confirmed loaded for this session
-  const historyNotReadyYet = !hasLoadedHistory.current || isLoading;
+  // Show loader only until the initial history load completes for this session.
+  // Do NOT block on isLoading here — addAnalysis/deleteAnalysis also set isLoading
+  // and must not re-trigger the full-screen loader once the dashboard is already showing.
+  const historyNotReadyYet = !hasLoadedHistory.current;
 
   const shouldShowLoader = !user?.email ||
                            emailChanged ||
@@ -697,7 +699,7 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
             },
           ]}
         >
-          {/* List - Show only recent 5 entries */}
+          {/* List */}
           <ScrollView
             style={styles.list}
             contentContainerStyle={{ paddingBottom: 100, flexGrow: 1 }}
@@ -718,7 +720,7 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
             <Text style={styles.emptyText}>{error}</Text>
           </View>
         ) : history.length === 0 ? null : (
-          history.slice(0, 5).map(renderCard)
+          history.map(renderCard)
         )}
           </ScrollView>
         </Animated.View>
