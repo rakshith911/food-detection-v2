@@ -17,7 +17,6 @@ import { getImagePresignedUrl } from '../services/S3UserDataService';
 import AppHeader from '../components/AppHeader';
 import BottomButtonContainer from '../components/BottomButtonContainer';
 import TutorialScreen from './TutorialScreen';
-import CircularProgressBar from '../components/CircularProgressBar';
 
 // Image component that falls back to S3 presigned URL when the local file is unavailable (e.g. after reinstall)
 function HistoryCardImage({
@@ -253,14 +252,12 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
     if (playingVideoId === itemId) {
       setPlayingVideoId(null);
     } else {
-      // If we don't have an S3 URL yet, fetch it first then play
+      setPlayingVideoId(itemId);
+      // Fetch S3 URL in background for future plays (if local file is gone after reinstall)
       if (!resolvedVideoUris[itemId] && jobId) {
         getImagePresignedUrl(jobId).then(url => {
           if (url) setResolvedVideoUris(prev => ({ ...prev, [itemId]: url }));
-          setPlayingVideoId(itemId);
         });
-      } else {
-        setPlayingVideoId(itemId);
       }
     }
   };
@@ -434,45 +431,33 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
               disabled={isNonTappable}
             >
           <View style={styles.mediaWrapper}>
-            {isVideo && (resolvedVideoUris[item.id] || item.videoUri?.startsWith('http')) ? (
+            {isVideo && item.videoUri ? (
               <>
                 <Video
-                  key={resolvedVideoUris[item.id] || item.id}
-                  source={{ uri: resolvedVideoUris[item.id] || item.videoUri! }}
+                  key={item.id}
+                  source={{ uri: resolvedVideoUris[item.id] || item.videoUri }}
                   style={styles.media}
                   resizeMode={ResizeMode.COVER}
                   isLooping={false}
-                  isMuted={false}
+                  isMuted={true}
                   shouldPlay={isPlaying}
                   useNativeControls={false}
+                  positionMillis={0}
                   onPlaybackStatusUpdate={(status) => {
                     if (status.isLoaded && status.didJustFinish) {
                       setPlayingVideoId(null);
                     }
                   }}
                 />
-                {!isPlaying && (
-                  <TouchableOpacity
-                    style={styles.playOverlay}
-                    onPress={() => handleVideoPlay(item.id, item.videoUri!, item.job_id)}
-                    activeOpacity={0.8}
-                  >
-                    <View style={styles.playCircle}>
-                      <Ionicons name="play" size={28} color="#FFFFFF" />
-                    </View>
-                  </TouchableOpacity>
-                )}
-                {isPlaying && (
-                  <TouchableOpacity
-                    style={styles.playOverlay}
-                    onPress={() => handleVideoPlay(item.id, item.videoUri!, item.job_id)}
-                    activeOpacity={0.8}
-                  >
-                    <View style={styles.playCircle}>
-                      <Ionicons name="pause" size={28} color="#FFFFFF" />
-                    </View>
-                  </TouchableOpacity>
-                )}
+                <TouchableOpacity
+                  style={styles.playOverlay}
+                  onPress={() => handleVideoPlay(item.id, item.videoUri!, item.job_id)}
+                  activeOpacity={0.8}
+                >
+                  <View style={styles.playCircle}>
+                    <Ionicons name={isPlaying ? 'pause' : 'play'} size={28} color="#FFFFFF" />
+                  </View>
+                </TouchableOpacity>
               </>
             ) : item.imageUri ? (
               <HistoryCardImage
@@ -491,13 +476,7 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
               <Text style={styles.cardSubtitle}>{subtitleText}</Text>
             </View>
             {isPendingOrAnalyzing ? (
-              <CircularProgressBar
-                progress={progress}
-                size={18}
-                strokeWidth={2}
-                color="#7BA21B"
-                backgroundColor="#E5E7EB"
-              />
+              <ActivityIndicator size="small" color="#7BA21B" />
             ) : (
               <Group2065Icon width={18} height={18} />
             )}
