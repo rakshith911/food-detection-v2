@@ -83,11 +83,9 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
 function VideoCardPlayer({
   uri, style, isPlaying, onFinish,
 }: { uri: string; style: any; isPlaying: boolean; onFinish: () => void }) {
-  const videoRef = useRef<Video>(null);
-  const didSeek = useRef(false);
   return (
     <Video
-      ref={videoRef}
+      key={uri}
       source={{ uri }}
       style={style}
       resizeMode={ResizeMode.COVER}
@@ -95,13 +93,7 @@ function VideoCardPlayer({
       isMuted={!isPlaying}
       shouldPlay={isPlaying}
       useNativeControls={false}
-      onReadyForDisplay={() => {
-        if (!didSeek.current) {
-          didSeek.current = true;
-          // Seek to 0 to force first-frame render as thumbnail
-          videoRef.current?.setStatusAsync({ positionMillis: 0, shouldPlay: false });
-        }
-      }}
+      positionMillis={0}
       onPlaybackStatusUpdate={(status) => {
         if (status.isLoaded && status.didJustFinish) onFinish();
       }}
