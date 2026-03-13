@@ -2612,16 +2612,26 @@ class NutritionVideoPipeline:
             cap.release()
             logger.warning(f"[{job_id}] Video longer than {max_duration_sec}s; skipping segmented video")
             return
+        # Sample at most 15 frames evenly to avoid SAM2 CPU bottleneck (141 frames → ~15)
+        sample_fps = min(fps, 5.0)
+        sample_step = max(1, round(fps / sample_fps))
+        max_sampled = 15
         frames_list = []
+        frame_num = 0
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
-            aspect_ratio = frame.shape[0] / frame.shape[1]
-            new_h = int(self.config.RESIZE_WIDTH * aspect_ratio)
-            frame_resized = cv2.resize(frame, (self.config.RESIZE_WIDTH, new_h))
-            frames_list.append(cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB))
+            if frame_num % sample_step == 0:
+                aspect_ratio = frame.shape[0] / frame.shape[1]
+                new_h = int(self.config.RESIZE_WIDTH * aspect_ratio)
+                frame_resized = cv2.resize(frame, (self.config.RESIZE_WIDTH, new_h))
+                frames_list.append(cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB))
+                if len(frames_list) >= max_sampled:
+                    break
+            frame_num += 1
         cap.release()
+        logger.info(f"[{job_id}] Sampled {len(frames_list)} frames for segmented video (original fps={fps:.1f}, step={sample_step})")
         if not frames_list:
             logger.warning(f"[{job_id}] No frames read for segmented video")
             return
@@ -2666,7 +2676,7 @@ class NutritionVideoPipeline:
             out_video_path = overlay_dir / "segmented_overlay_video.mp4"
             h, w = frames_list[0].shape[:2]
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            writer = cv2.VideoWriter(str(out_video_path), fourcc, fps, (w, h))
+            writer = cv2.VideoWriter(str(out_video_path), fourcc, sample_fps, (w, h))
             if not writer.isOpened():
                 logger.warning(f"[{job_id}] Could not create video writer: {out_video_path}")
                 return
