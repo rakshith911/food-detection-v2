@@ -134,6 +134,19 @@ class S3UserDataServiceClass {
       return { profile: null, history: null, settings: null };
     }
   }
+
+  async deleteAllUserData(userId: string, jobIds: string[]): Promise<void> {
+    try {
+      await fetch(`${API_BASE}/user-data/${encodeURIComponent(userId)}/account`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job_ids: jobIds }),
+      });
+      console.log('[S3UserData] Account data deleted from S3/DynamoDB');
+    } catch (e) {
+      console.warn('[S3UserData] deleteAllUserData failed (non-fatal):', e);
+    }
+  }
 }
 
 export const s3UserDataService = new S3UserDataServiceClass();

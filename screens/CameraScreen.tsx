@@ -49,6 +49,7 @@ export default function CameraScreen() {
   const recordingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const recordingAutoStopRef = useRef<NodeJS.Timeout | null>(null);
   const recordingStartTimeRef = useRef<number>(0);
+  const isRecordingRef = useRef<boolean>(false);
   const MAX_RECORDING_SECONDS = 5;
   const isTakingPhotoRef = useRef(false);
   const dispatch = useAppDispatch();
@@ -254,6 +255,7 @@ export default function CameraScreen() {
 
     try {
       setIsRecording(true);
+      isRecordingRef.current = true;
       setRecordingTime(0);
       recordingStartTimeRef.current = Date.now();
 
@@ -265,8 +267,12 @@ export default function CameraScreen() {
       // Auto-stop after 5 seconds
       recordingAutoStopRef.current = setTimeout(async () => {
         console.log('[Camera] Auto-stopping recording at 5s limit');
-        if (cameraRef.current) {
-          await cameraRef.current.stopRecording();
+        try {
+          if (cameraRef.current && isRecordingRef.current) {
+            await cameraRef.current.stopRecording();
+          }
+        } catch (e) {
+          console.warn('[Camera] Auto-stop error (non-fatal):', e);
         }
       }, MAX_RECORDING_SECONDS * 1000);
 
@@ -278,6 +284,7 @@ export default function CameraScreen() {
         onRecordingFinished: (video) => {
           console.log('[Camera] Recording completed successfully', video.path);
           setSelectedVideo('file://' + video.path);
+          isRecordingRef.current = false;
           setIsRecording(false);
           setRecordingTime(0);
           if (recordingIntervalRef.current) {
@@ -299,6 +306,7 @@ export default function CameraScreen() {
           captureException(new Error(String(error)), {
             context: 'Camera - Video Recording',
           });
+          isRecordingRef.current = false;
           setIsRecording(false);
           setRecordingTime(0);
           if (recordingIntervalRef.current) {
@@ -313,6 +321,7 @@ export default function CameraScreen() {
       });
     } catch (error) {
       console.error('[Camera] Error starting recording:', error);
+      isRecordingRef.current = false;
       setIsRecording(false);
       setRecordingTime(0);
       if (recordingIntervalRef.current) {
@@ -327,7 +336,7 @@ export default function CameraScreen() {
   };
 
   const stopRecording = async () => {
-    if (!cameraRef.current || !isRecording) {
+    if (!cameraRef.current || !isRecordingRef.current) {
       console.log('[Camera] Cannot stop - camera ref or recording state invalid');
       return;
     }
@@ -336,7 +345,11 @@ export default function CameraScreen() {
       recordingAutoStopRef.current = null;
     }
     console.log('[Camera] Stopping recording...');
-    await cameraRef.current.stopRecording();
+    try {
+      await cameraRef.current.stopRecording();
+    } catch (e) {
+      console.warn('[Camera] stopRecording error (non-fatal):', e);
+    }
   };
 
   const handleClose = () => {

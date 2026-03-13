@@ -368,8 +368,20 @@ export const verifyDeleteAccountOTPAndDelete = createAsyncThunk(
 
 export const deleteAccount = createAsyncThunk(
   'auth/deleteAccount',
-  async (_, { dispatch }) => {
+  async (_, { dispatch, getState }) => {
     try {
+      // Collect all job_ids and userId before wiping local state
+      const state = getState() as { history: { history: Array<{ job_id?: string }> }; profile: { userAccount: { userId: string } | null } };
+      const jobIds = state.history.history
+        .map((e) => e.job_id)
+        .filter((id): id is string => !!id);
+      const userId = state.profile?.userAccount?.userId;
+
+      // Wipe all S3 + DynamoDB data for this user
+      if (userId) {
+        await s3UserDataService.deleteAllUserData(userId, jobIds);
+      }
+
       await userService.deleteUserAccount();
       await cognitoOTPService.logout();
 

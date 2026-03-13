@@ -10,6 +10,9 @@ ROLE_NAME="nutri-analysis-dev-lambda-exec"
 API_ID="qx3i66fa87"
 STAGE="v1"
 BUCKET="ukcal-user-uploads"
+VIDEOS_BUCKET="nutrition-video-analysis-dev-videos-dbenpoj2"
+RESULTS_BUCKET="nutrition-video-analysis-dev-results-dbenpoj2"
+DYNAMO_TABLE="ukcal-business-profiles"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
 echo "=== Deploying User Data Handler Lambda ==="
@@ -44,17 +47,28 @@ POLICY_DOC=$(cat <<POLICY
   "Statement": [
     {
       "Effect": "Allow",
-      "Action": [
-        "s3:GetObject",
-        "s3:PutObject",
-        "s3:DeleteObject"
-      ],
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
       "Resource": "arn:aws:s3:::${BUCKET}/*"
     },
     {
       "Effect": "Allow",
       "Action": "s3:ListBucket",
       "Resource": "arn:aws:s3:::${BUCKET}"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:DeleteObject", "s3:ListBucket"],
+      "Resource": [
+        "arn:aws:s3:::${VIDEOS_BUCKET}",
+        "arn:aws:s3:::${VIDEOS_BUCKET}/*",
+        "arn:aws:s3:::${RESULTS_BUCKET}",
+        "arn:aws:s3:::${RESULTS_BUCKET}/*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": "dynamodb:DeleteItem",
+      "Resource": "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${DYNAMO_TABLE}"
     }
   ]
 }
@@ -85,7 +99,8 @@ if aws lambda get-function --function-name $FUNCTION_NAME --region $REGION > /de
 
   aws lambda update-function-configuration \
     --function-name $FUNCTION_NAME \
-    --environment "Variables={USER_DATA_BUCKET=${BUCKET},S3_PREFIX=UKcal}" \
+    --environment "Variables={USER_DATA_BUCKET=${BUCKET},S3_PREFIX=UKcal,VIDEOS_BUCKET=${VIDEOS_BUCKET},RESULTS_BUCKET=${RESULTS_BUCKET},DYNAMO_TABLE=${DYNAMO_TABLE}}" \
+    --timeout 60 \
     --region $REGION > /dev/null
 else
   echo "   Creating new function..."
@@ -95,9 +110,9 @@ else
     --handler lambda_function.lambda_handler \
     --role "$ROLE_ARN" \
     --zip-file fileb:///tmp/user_data_handler.zip \
-    --timeout 15 \
+    --timeout 60 \
     --memory-size 256 \
-    --environment "Variables={USER_DATA_BUCKET=${BUCKET},S3_PREFIX=UKcal}" \
+    --environment "Variables={USER_DATA_BUCKET=${BUCKET},S3_PREFIX=UKcal,VIDEOS_BUCKET=${VIDEOS_BUCKET},RESULTS_BUCKET=${RESULTS_BUCKET},DYNAMO_TABLE=${DYNAMO_TABLE}}" \
     --region $REGION > /dev/null
 fi
 echo "   Lambda function ready"
@@ -188,9 +203,10 @@ create_method() {
     --region $REGION > /dev/null
 }
 
-# Create GET and PUT methods with Lambda proxy integration
+# Create GET, PUT, DELETE methods with Lambda proxy integration
 create_method "GET"
 create_method "PUT"
+create_method "DELETE"
 
 # Create OPTIONS method for CORS
 echo "   Setting up OPTIONS (CORS)..."
@@ -231,7 +247,7 @@ aws apigateway put-integration-response \
   --status-code 200 \
   --response-parameters '{
     "method.response.header.Access-Control-Allow-Headers": "'"'"'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"'"'",
-    "method.response.header.Access-Control-Allow-Methods": "'"'"'GET,PUT,OPTIONS'"'"'",
+    "method.response.header.Access-Control-Allow-Methods": "'"'"'GET,PUT,DELETE,OPTIONS'"'"'",
     "method.response.header.Access-Control-Allow-Origin": "'"'"'*'"'"'"
   }' \
   --region $REGION > /dev/null

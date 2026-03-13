@@ -555,9 +555,9 @@ export class NutritionAnalysisAPI {
       }
 
       // Step 4: Poll for results (always request detailed to get segmented images)
-      // 36 attempts × 5s = 180 seconds (3 minutes) before timeout
+      // 72 attempts × 5s = 360 seconds (6 minutes) before timeout
       onProgress?.('Processing video...');
-      return await this.pollForResults(uploadData.job_id, onProgress, 36, 5000, true);
+      return await this.pollForResults(uploadData.job_id, onProgress, 72, 5000, true);
     } catch (error: any) {
       console.warn('[Nutrition API] Video analysis failed:', error?.message);
       if (error?.message === 'Analysis timeout') {

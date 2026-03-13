@@ -238,8 +238,9 @@ class NutritionVideoPipeline:
             }
 
             # Step 5: Generate segmented overlay video (same directory as segmented images)
-            num_frames_for_video = getattr(self.config, "VIDEO_NUM_FRAMES", None)
-            if num_frames_for_video and len(frames) == num_frames_for_video and tracking_results.get('objects'):
+            # Use >= 1 instead of == num_frames_for_video so short videos (fewer frames than requested)
+            # still get a segmented overlay generated.
+            if len(frames) >= 1 and tracking_results.get('objects'):
                 try:
                     self._generate_segmented_video(video_path, job_id, tracking_results)
                 except Exception as e:
@@ -1227,7 +1228,7 @@ class NutritionVideoPipeline:
                         "Return ONLY a JSON array like: "
                         "[{\"name\": \"butter\", \"grams\": 14.2, \"kcal\": 102}, ...]. No extra text."
                     )
-                    cal_response = genai.GenerativeModel("gemini-2.5-flash").generate_content(cal_prompt)
+                    cal_response = genai.GenerativeModel("gemini-2.0-flash").generate_content(cal_prompt)
                     cal_text = (cal_response.text or "").strip()
                     if "```" in cal_text:
                         cal_text = cal_text.split("```")[1]
@@ -1798,7 +1799,7 @@ class NutritionVideoPipeline:
                             import time
                             time.sleep(0.2)  # Rate limiting
                             genai.configure(api_key=self.config.GEMINI_API_KEY)
-                            gemini_model = genai.GenerativeModel('models/gemini-2.5-flash')
+                            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
                             
                             prompt = (
                                 f"Extract only the food item names from this text and list them separated by commas. "
@@ -3132,7 +3133,7 @@ class NutritionVideoPipeline:
             # Add small delay to avoid rate limiting
             time.sleep(0.2)
             genai.configure(api_key=self.config.GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
             
             prompt = f"""You are a food portion estimation expert. Analyze this volume calculation:
 
@@ -3231,7 +3232,7 @@ Examples:
             import json
             time.sleep(0.2)  # Rate limiting
             genai.configure(api_key=self.config.GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
             
             # Build prompt with both validation and estimation items
             validation_list = []
@@ -3374,7 +3375,7 @@ Example:
             import json
             time.sleep(0.2)  # Rate limiting
             genai.configure(api_key=self.config.GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
             
             # Build prompt with all items
             items_list = []
@@ -3470,7 +3471,7 @@ Example:
             import json
             time.sleep(0.2)  # Rate limiting
             genai.configure(api_key=self.config.GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
             
             prompt = f"""You are a food portion estimation expert. Estimate the typical serving volume for this food item.
 
@@ -3544,7 +3545,7 @@ Example:
             import json
             time.sleep(0.2)  # Rate limiting
             genai.configure(api_key=self.config.GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
             
             # Create list of detected items
             items_list = ", ".join([f'"{label}"' for label in labels])
@@ -3613,7 +3614,7 @@ Example:
         try:
             import google.generativeai as genai
             genai.configure(api_key=self.config.GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
             
             # Skip non-food items
             skip_keywords = [
@@ -3766,7 +3767,7 @@ If no duplicates, respond: {{"merge_groups": [], "keep_separate": ["ID1", "ID2",
             import json
             time.sleep(0.2)  # Rate limiting
             genai.configure(api_key=self.config.GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
             
             # Build list of all detected objects
             skip_keywords = [
@@ -3933,7 +3934,7 @@ If no duplicates/combinations, respond: {{"merge_groups": [], "combine": [], "ke
             import time
             time.sleep(0.2)  # Rate limiting
             genai.configure(api_key=self.config.GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
             
             # Build list of items with their counts
             item_groups = {}

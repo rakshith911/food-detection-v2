@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
-import { StyleSheet, Text, View, Image, TouchableOpacity, ScrollView, StatusBar, Alert, LayoutAnimation, Platform, UIManager, Animated, Linking } from 'react-native';
+import { StyleSheet, Text, View, Image, TouchableOpacity, ScrollView, StatusBar, Alert, LayoutAnimation, Platform, UIManager, Animated, Linking, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { PanGestureHandler, State } from 'react-native-gesture-handler';
 import { Video, ResizeMode } from 'expo-av';
@@ -712,7 +712,7 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
           >
         {isLoading ? (
           <View style={styles.emptyState}>
-            <Text style={styles.emptyTitle}>Loading...</Text>
+            <ActivityIndicator size="large" color="#7BA21B" />
           </View>
         ) : error && history.length === 0 ? (
           <View style={styles.emptyState}>
