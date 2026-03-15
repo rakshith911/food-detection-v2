@@ -2512,10 +2512,10 @@ class NutritionVideoPipeline:
                 pill_y1 = max(0, ty - th_text - pad)
                 pill_x2 = min(w - 1, tx + tw + pad)
                 pill_y2 = min(h - 1, ty + baseline + pad)
-                # Dark semi-opaque pill background for readability
-                cv2.rectangle(result_bgr, (pill_x1, pill_y1), (pill_x2, pill_y2), (20, 20, 20), -1)
-                # Label text in the food item's assigned colour
-                cv2.putText(result_bgr, display_label, (tx, ty), font, font_scale, bgr_color, thickness, cv2.LINE_AA)
+                # White pill background for readability
+                cv2.rectangle(result_bgr, (pill_x1, pill_y1), (pill_x2, pill_y2), (255, 255, 255), -1)
+                # Label text in black for contrast on white background
+                cv2.putText(result_bgr, display_label, (tx, ty), font, font_scale, (0, 0, 0), thickness, cv2.LINE_AA)
             result = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
 
         overlay_filename = overlay_dir / f"frame_{frame_idx:05d}_all_masks.png"
