@@ -2628,18 +2628,25 @@ class NutritionVideoPipeline:
             )
             _pdata = _json.loads(_probe.stdout or '{}')
             _stream = _pdata.get('streams', [{}])[0] if _pdata.get('streams') else {}
+            _raw_w = _stream.get('width')
+            _raw_h = _stream.get('height')
             # Method 1: explicit rotate stream tag
             _tag_rot = _stream.get('tags', {}).get('rotate', '')
             if _tag_rot:
                 video_rotation = int(_tag_rot)
-            # Method 2: display matrix side_data (rotation value is negative of needed rotation)
+                logger.info(f"[{job_id}] Rotation from stream tag: {video_rotation}°")
+            # Method 2: display matrix side_data (ffprobe reports CCW angle; negate for CW convention)
             if not video_rotation:
                 for sd in _stream.get('side_data_list', []):
                     if 'rotation' in sd:
-                        video_rotation = -int(sd['rotation'])
+                        _dm_rot = int(sd['rotation'])
+                        video_rotation = -_dm_rot  # display matrix -90 → we need +90 correction
+                        logger.info(f"[{job_id}] Rotation from display matrix: side_data={_dm_rot}, computed={video_rotation}°")
                         break
-        except Exception:
+            logger.info(f"[{job_id}] ffprobe raw stored dimensions: {_raw_w}x{_raw_h}, final rotation={video_rotation}°")
+        except Exception as _rot_exc:
             video_rotation = 0
+            logger.warning(f"[{job_id}] Rotation detection failed: {_rot_exc}")
         logger.info(f"[{job_id}] Video rotation detected: {video_rotation}°")
 
         sample_fps = min(fps, 8.0)
@@ -2681,6 +2688,7 @@ class NutritionVideoPipeline:
         obj_id_to_label = {det[0]: det[1] for det in initial_detections}
 
         h, w = frames_list[0].shape[:2]
+        logger.info(f"[{job_id}] cv2 frame dimensions: {w}x{h} (rotation={video_rotation}° will be applied)")
 
         # Output video: same directory as segmented image overlays
         overlay_dir = self.config.OUTPUT_DIR / job_id / "masks_overlay"
@@ -2766,19 +2774,23 @@ class NutritionVideoPipeline:
 
         # Re-encode from mp4v to H.264. Physically rotate frames using transpose so the
         # output plays correctly regardless of whether the player honours rotation metadata.
-        # transpose=1 → 90° CW  (for rotate=90, e.g. iPhone portrait)
-        # transpose=2 → 90° CCW (for rotate=270)
+        #
+        # iPhone portrait stores frames as LANDSCAPE with head at the RIGHT edge.
+        # To display as portrait the frame must rotate 90° CCW → transpose=2.
+        # rotate=90  (stream tag) or display_matrix rotation=-90 → transpose=2
+        # rotate=270 (stream tag) or display_matrix rotation=-270/90 → transpose=1
+        # rotate=180 → two 90° CCW passes
         _tmp = out_video_path.with_suffix('.raw.mp4')
         try:
             out_video_path.rename(_tmp)
             _vf_args = []
             if video_rotation == 90:
-                _vf_args = ['-vf', 'transpose=1']
+                _vf_args = ['-vf', 'transpose=2']   # 90° CCW — iPhone portrait (normal)
             elif video_rotation == 270 or video_rotation == -90:
-                _vf_args = ['-vf', 'transpose=2']
+                _vf_args = ['-vf', 'transpose=1']   # 90° CW  — iPhone portrait (upside-down)
             elif video_rotation == 180:
-                _vf_args = ['-vf', 'transpose=1,transpose=1']
-            logger.info(f"[{job_id}] Applying ffmpeg rotation filter: {_vf_args or 'none (0°)'}")
+                _vf_args = ['-vf', 'transpose=2,transpose=2']  # 180°
+            logger.info(f"[{job_id}] Applying ffmpeg rotation filter: {_vf_args or 'none (0°)'} (detected rotation={video_rotation}°)")
             subprocess.run(
                 ['ffmpeg', '-y',
                  '-i', str(_tmp),
