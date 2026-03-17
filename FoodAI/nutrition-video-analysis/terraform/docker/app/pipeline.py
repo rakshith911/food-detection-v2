@@ -2750,21 +2750,24 @@ class NutritionVideoPipeline:
         writer.release()
         logger.info(f"[{job_id}] Saved segmented overlay video (SAM2 per-frame, mp4v): {out_video_path}")
 
-        # Re-encode from mp4v to H.264. Frames are in cv2-raw orientation (rotation
-        # metadata ignored during read). Copy the original rotation tag into the output
-        # so that iOS/Android players auto-rotate on playback — no transpose filter needed.
+        # Re-encode from mp4v to H.264. Copy ALL metadata (including display matrix /
+        # rotate tag) from the original video so iOS/Android players auto-rotate the
+        # output the same way they rotate the original. No transpose filter needed.
         _tmp = out_video_path.with_suffix('.raw.mp4')
         try:
             out_video_path.rename(_tmp)
-            _ffmpeg_cmd = ['ffmpeg', '-y', '-i', str(_tmp),
-                           '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
-                           '-movflags', '+faststart']
-            if video_rotation:
-                _ffmpeg_cmd += ['-metadata:s:v:0', f'rotate={video_rotation}']
-            _ffmpeg_cmd.append(str(out_video_path))
-            subprocess.run(_ffmpeg_cmd, check=True, capture_output=True)
+            subprocess.run(
+                ['ffmpeg', '-y',
+                 '-i', str(_tmp),           # input 0: overlay video (raw frames)
+                 '-i', str(video_path),     # input 1: original video (source of metadata)
+                 '-map', '0:v',             # video stream from overlay
+                 '-map_metadata', '1',      # all metadata from original
+                 '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
+                 str(out_video_path)],
+                check=True, capture_output=True
+            )
             _tmp.unlink()
-            logger.info(f"[{job_id}] Re-encoded overlay video to H.264 (rotate tag={video_rotation}°)")
+            logger.info(f"[{job_id}] Re-encoded overlay video to H.264 (metadata copied from original)")
         except Exception as _enc_err:
             logger.warning(f"[{job_id}] FFmpeg H.264 re-encode failed ({_enc_err}); uploading mp4v")
             if _tmp.exists():
