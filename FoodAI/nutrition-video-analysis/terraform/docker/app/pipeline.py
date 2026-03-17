@@ -2710,11 +2710,14 @@ class NutritionVideoPipeline:
                         mask = masks[0].astype(bool)  # (H, W)
                         color = colors_bgr.get(obj_id, (128, 128, 128))
 
-                        # Semi-transparent pixel-level mask overlay
+                        # Semi-transparent pixel-level mask overlay (60% color for visibility)
                         color_layer = np.zeros_like(frame_bgr, dtype=np.uint8)
                         color_layer[:] = color
-                        blended = cv2.addWeighted(overlay, 0.55, color_layer, 0.45, 0)
+                        blended = cv2.addWeighted(overlay, 0.4, color_layer, 0.6, 0)
                         overlay[mask] = blended[mask]
+                        # Solid contour border so mask edge is always visible
+                        contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                        cv2.drawContours(overlay, contours, -1, color, 2)
 
                         # White pill label at mask centroid
                         if label:

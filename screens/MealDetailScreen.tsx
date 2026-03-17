@@ -46,6 +46,8 @@ export default function MealDetailScreen() {
   const insets = useSafeAreaInsets();
 
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
+  const overlayVideoRef = useRef<Video>(null);
+  const originalVideoRef = useRef<Video>(null);
   const screenSwipePosition = useRef(new Animated.Value(0)); // For screen-level swipe right gesture
 
   const handleVideoPlay = useCallback(() => {
@@ -570,6 +572,7 @@ export default function MealDetailScreen() {
                   Visibility toggled via opacity to avoid brown-screen loading flash on play. */}
               {videoOverlayUrl && (
                 <Video
+                  ref={overlayVideoRef}
                   key={videoOverlayUrl}
                   source={{ uri: videoOverlayUrl }}
                   style={[styles.media, { position: 'absolute', top: 0, left: 0, opacity: isVideoPlaying ? 1 : 0 }]}
@@ -581,6 +584,7 @@ export default function MealDetailScreen() {
                   onPlaybackStatusUpdate={(status) => {
                     if (status.isLoaded && status.didJustFinish) {
                       setIsVideoPlaying(false);
+                      overlayVideoRef.current?.setStatusAsync({ positionMillis: 0, shouldPlay: false });
                     }
                     if (!status.isLoaded && (status as any).error) {
                       setVideoOverlayError(true);
@@ -589,6 +593,7 @@ export default function MealDetailScreen() {
                 />
               )}
               <Video
+                ref={originalVideoRef}
                 key={originalVideoUri ?? 'original'}
                 source={{ uri: originalVideoUri ?? '' }}
                 style={[styles.media, { opacity: (isVideoPlaying && videoOverlayUrl && !videoOverlayError) ? 0 : 1 }]}
@@ -600,6 +605,7 @@ export default function MealDetailScreen() {
                 onPlaybackStatusUpdate={(status) => {
                   if (status.isLoaded && status.didJustFinish) {
                     setIsVideoPlaying(false);
+                    originalVideoRef.current?.setStatusAsync({ positionMillis: 0, shouldPlay: false });
                   }
                 }}
               />
