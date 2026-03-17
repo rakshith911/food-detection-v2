@@ -2615,18 +2615,32 @@ class NutritionVideoPipeline:
             logger.warning(f"[{job_id}] Video longer than {max_duration_sec}s; skipping segmented video")
             return
 
-        # Read rotation metadata so we can copy it to the output (not apply it as a filter)
+        # Detect rotation from original video (check both stream tag and display matrix side_data).
+        # We will physically rotate the overlay frames so the output plays correctly without
+        # relying on players to honour rotation metadata.
+        video_rotation = 0
         try:
             import json as _json
             _probe = subprocess.run(
-                ['ffprobe', '-v', 'quiet', '-select_streams', 'v:0',
-                 '-show_entries', 'stream_tags=rotate', '-of', 'json', str(video_path)],
+                ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                 '-show_streams', '-of', 'json', str(video_path)],
                 capture_output=True, text=True
             )
-            video_rotation = int(_json.loads(_probe.stdout or '{}').get('streams', [{}])[0].get('tags', {}).get('rotate', 0))
+            _pdata = _json.loads(_probe.stdout or '{}')
+            _stream = _pdata.get('streams', [{}])[0] if _pdata.get('streams') else {}
+            # Method 1: explicit rotate stream tag
+            _tag_rot = _stream.get('tags', {}).get('rotate', '')
+            if _tag_rot:
+                video_rotation = int(_tag_rot)
+            # Method 2: display matrix side_data (rotation value is negative of needed rotation)
+            if not video_rotation:
+                for sd in _stream.get('side_data_list', []):
+                    if 'rotation' in sd:
+                        video_rotation = -int(sd['rotation'])
+                        break
         except Exception:
             video_rotation = 0
-        logger.info(f"[{job_id}] Video rotation metadata: {video_rotation}°")
+        logger.info(f"[{job_id}] Video rotation detected: {video_rotation}°")
 
         sample_fps = min(fps, 8.0)
         sample_step = max(1, round(fps / sample_fps))
@@ -2750,24 +2764,31 @@ class NutritionVideoPipeline:
         writer.release()
         logger.info(f"[{job_id}] Saved segmented overlay video (SAM2 per-frame, mp4v): {out_video_path}")
 
-        # Re-encode from mp4v to H.264. Copy ALL metadata (including display matrix /
-        # rotate tag) from the original video so iOS/Android players auto-rotate the
-        # output the same way they rotate the original. No transpose filter needed.
+        # Re-encode from mp4v to H.264. Physically rotate frames using transpose so the
+        # output plays correctly regardless of whether the player honours rotation metadata.
+        # transpose=1 → 90° CW  (for rotate=90, e.g. iPhone portrait)
+        # transpose=2 → 90° CCW (for rotate=270)
         _tmp = out_video_path.with_suffix('.raw.mp4')
         try:
             out_video_path.rename(_tmp)
+            _vf_args = []
+            if video_rotation == 90:
+                _vf_args = ['-vf', 'transpose=1']
+            elif video_rotation == 270 or video_rotation == -90:
+                _vf_args = ['-vf', 'transpose=2']
+            elif video_rotation == 180:
+                _vf_args = ['-vf', 'transpose=1,transpose=1']
+            logger.info(f"[{job_id}] Applying ffmpeg rotation filter: {_vf_args or 'none (0°)'}")
             subprocess.run(
                 ['ffmpeg', '-y',
-                 '-i', str(_tmp),           # input 0: overlay video (raw frames)
-                 '-i', str(video_path),     # input 1: original video (source of metadata)
-                 '-map', '0:v',             # video stream from overlay
-                 '-map_metadata', '1',      # all metadata from original
+                 '-i', str(_tmp),
+                 *_vf_args,
                  '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
                  str(out_video_path)],
                 check=True, capture_output=True
             )
             _tmp.unlink()
-            logger.info(f"[{job_id}] Re-encoded overlay video to H.264 (metadata copied from original)")
+            logger.info(f"[{job_id}] Re-encoded overlay video to H.264 with physical rotation")
         except Exception as _enc_err:
             logger.warning(f"[{job_id}] FFmpeg H.264 re-encode failed ({_enc_err}); uploading mp4v")
             if _tmp.exists():
