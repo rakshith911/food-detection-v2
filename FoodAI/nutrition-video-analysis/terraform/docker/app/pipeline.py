@@ -2615,56 +2615,52 @@ class NutritionVideoPipeline:
             logger.warning(f"[{job_id}] Video longer than {max_duration_sec}s; skipping segmented video")
             return
 
-        # Detect rotation from original video.
-        # iPhones often store rotation ONLY in the tkhd transformation matrix (not in stream tags
-        # or display-matrix side_data), so we check three methods in order.
+        # Detect rotation from the original video. Use print() so output is visible in CloudWatch
+        # (logger.info is suppressed by the ECS container's log level config).
+        # Parse 'ffmpeg -i' stderr which reports rotation from ALL sources: stream tag, display
+        # matrix side_data, AND the tkhd transformation matrix — whichever is present.
         video_rotation = 0
         try:
-            import json as _json
-            _probe = subprocess.run(
-                ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
-                 '-show_streams', '-of', 'json', str(video_path)],
+            _ffinfo = subprocess.run(
+                ['ffmpeg', '-i', str(video_path)],
                 capture_output=True, text=True
             )
-            _pdata = _json.loads(_probe.stdout or '{}')
-            _stream = _pdata.get('streams', [{}])[0] if _pdata.get('streams') else {}
-            _raw_w = _stream.get('width')
-            _raw_h = _stream.get('height')
-            # Method 1: explicit rotate stream tag
-            _tag_rot = _stream.get('tags', {}).get('rotate', '')
-            if _tag_rot:
-                video_rotation = int(_tag_rot)
-                logger.info(f"[{job_id}] Rotation from stream tag: {video_rotation}°")
-            # Method 2: display matrix side_data
-            if not video_rotation:
-                for sd in _stream.get('side_data_list', []):
-                    if 'rotation' in sd:
-                        _dm_rot = int(sd['rotation'])
-                        video_rotation = -_dm_rot
-                        logger.info(f"[{job_id}] Rotation from display matrix side_data: {_dm_rot} → {video_rotation}°")
-                        break
-            logger.info(f"[{job_id}] ffprobe raw stored dimensions: {_raw_w}x{_raw_h}, rotation after methods 1+2: {video_rotation}°")
+            _ffstderr = _ffinfo.stderr
+            print(f"[{job_id}] ffmpeg -i stderr (last 600 chars): {_ffstderr[-600:]}")
+            for _line in _ffstderr.splitlines():
+                _ll = _line.lower().strip()
+                # "    rotate          : 90"
+                if _ll.startswith('rotate') and ':' in _ll:
+                    try:
+                        video_rotation = int(_ll.split(':')[1].strip())
+                        print(f"[{job_id}] Rotation from stream tag line: {_line.strip()} → {video_rotation}°")
+                    except ValueError:
+                        pass
+                # "displaymatrix: rotation of -90.00 degrees"
+                elif 'displaymatrix' in _ll and 'rotation of' in _ll:
+                    try:
+                        _deg = float(_ll.split('rotation of')[1].split('degrees')[0].strip())
+                        video_rotation = int(round(-_deg))  # display matrix is negative of needed
+                        print(f"[{job_id}] Rotation from displaymatrix line: {_line.strip()} → {video_rotation}°")
+                    except (ValueError, IndexError):
+                        pass
         except Exception as _rot_exc:
-            logger.warning(f"[{job_id}] ffprobe rotation detection failed: {_rot_exc}")
+            logger.warning(f"[{job_id}] ffmpeg rotation detection failed: {_rot_exc}")
 
-        # Method 3: parse the tkhd transformation matrix directly from the raw MP4 bytes.
-        # iPhone videos frequently store rotation ONLY here (no stream tag, no side_data).
-        # Matrix layout (9 × int32 big-endian, 16.16 fixed-point):
-        #   [a  b  0]     a=0, b=65536, c=-65536, d=0  →  90° (portrait, home-button down)
-        #   [c  d  0]     a=0, b=-65536, c=65536, d=0  →  270° (portrait, upside-down)
-        #   [tx ty w]     a=-65536, d=-65536            →  180°
+        # Fallback: parse tkhd transformation matrix directly from raw MP4 bytes.
+        # Some ffmpeg builds don't report tkhd-only rotation in -i output.
         if not video_rotation:
             try:
                 import struct as _struct
-                def _find_tkhd(data, depth=0):
+                def _find_tkhd_box(data, depth=0):
                     i = 0
                     while i < len(data) - 8:
                         sz = int.from_bytes(data[i:i+4], 'big')
                         bt = data[i+4:i+8]
                         if sz < 8 or i + sz > len(data):
                             break
-                        if bt in (b'moov', b'trak', b'mdia', b'minf') and depth < 5:
-                            r = _find_tkhd(data[i+8:i+sz], depth+1)
+                        if bt in (b'moov', b'trak', b'mdia', b'minf') and depth < 6:
+                            r = _find_tkhd_box(data[i+8:i+sz], depth+1)
                             if r is not None:
                                 return r
                         elif bt == b'tkhd':
@@ -2672,30 +2668,31 @@ class NutritionVideoPipeline:
                         i += sz
                     return None
                 _raw_bytes = video_path.read_bytes()
-                _tkhd = _find_tkhd(_raw_bytes)
+                _tkhd = _find_tkhd_box(_raw_bytes)
                 if _tkhd:
                     _ver = _tkhd[0]
                     _mbase = (4 + 20 + 8 + 2 + 2 + 2 + 2) if _ver == 0 else (4 + 32 + 8 + 2 + 2 + 2 + 2)
                     if _mbase + 20 <= len(_tkhd):
-                        _ma = _struct.unpack_from('>i', _tkhd, _mbase)[0]       # a
-                        _mb = _struct.unpack_from('>i', _tkhd, _mbase + 4)[0]   # b
-                        _mc = _struct.unpack_from('>i', _tkhd, _mbase + 12)[0]  # c
-                        _md = _struct.unpack_from('>i', _tkhd, _mbase + 16)[0]  # d
+                        _ma = _struct.unpack_from('>i', _tkhd, _mbase)[0]
+                        _mb = _struct.unpack_from('>i', _tkhd, _mbase + 4)[0]
+                        _mc = _struct.unpack_from('>i', _tkhd, _mbase + 12)[0]
+                        _md = _struct.unpack_from('>i', _tkhd, _mbase + 16)[0]
+                        print(f"[{job_id}] tkhd matrix: a={_ma} b={_mb} c={_mc} d={_md}")
                         if _ma == 0 and _mb > 0 and _mc < 0 and _md == 0:
                             video_rotation = 90
                         elif _ma == 0 and _mb < 0 and _mc > 0 and _md == 0:
                             video_rotation = 270
                         elif _ma < 0 and _md < 0:
                             video_rotation = 180
-                        logger.info(f"[{job_id}] tkhd matrix a={_ma} b={_mb} c={_mc} d={_md} → rotation={video_rotation}°")
+                        print(f"[{job_id}] tkhd matrix rotation: {video_rotation}°")
                     else:
-                        logger.info(f"[{job_id}] tkhd found but too short for matrix ({len(_tkhd)} bytes, need {_mbase+20})")
+                        print(f"[{job_id}] tkhd too short: {len(_tkhd)} bytes")
                 else:
-                    logger.info(f"[{job_id}] tkhd box not found in raw MP4")
+                    print(f"[{job_id}] tkhd box not found in raw MP4")
             except Exception as _tkhd_err:
                 logger.warning(f"[{job_id}] tkhd matrix parse failed: {_tkhd_err}")
 
-        logger.info(f"[{job_id}] Final video rotation: {video_rotation}°")
+        print(f"[{job_id}] Final detected video rotation: {video_rotation}°")
 
         sample_fps = min(fps, 8.0)
         sample_step = max(1, round(fps / sample_fps))
@@ -2838,7 +2835,7 @@ class NutritionVideoPipeline:
                 _vf_args = ['-vf', 'transpose=1']   # 90° CW  — iPhone portrait (upside-down)
             elif video_rotation == 180:
                 _vf_args = ['-vf', 'transpose=2,transpose=2']  # 180°
-            logger.info(f"[{job_id}] Applying ffmpeg rotation filter: {_vf_args or 'none (0°)'} (detected rotation={video_rotation}°)")
+            print(f"[{job_id}] Applying ffmpeg rotation filter: {_vf_args or 'none (0°)'} (rotation={video_rotation}°)")
             subprocess.run(
                 ['ffmpeg', '-y',
                  '-i', str(_tmp),
