@@ -2600,52 +2600,55 @@ class NutritionVideoPipeline:
         if not initial_detections:
             logger.info(f"[{job_id}] No objects with boxes for segmented video; skipping")
             return
-        # Load full video and extract all frames (same resize as pipeline)
-        cap = cv2.VideoCapture(str(video_path))
-        if not cap.isOpened():
-            logger.warning(f"[{job_id}] Could not open video for segmented overlay: {video_path}")
-            return
-        fps = cap.get(cv2.CAP_PROP_FPS) or 15.0
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        # Get video duration and fps via ffprobe (rotation-aware)
+        try:
+            import json as _json
+            _dur_probe = subprocess.run(
+                ['ffprobe', '-v', 'quiet', '-select_streams', 'v:0',
+                 '-show_entries', 'stream=r_frame_rate,nb_frames,duration',
+                 '-of', 'json', str(video_path)],
+                capture_output=True, text=True, check=True
+            )
+            _s = _json.loads(_dur_probe.stdout).get('streams', [{}])[0]
+            _fr = _s.get('r_frame_rate', '15/1').split('/')
+            fps = float(_fr[0]) / float(_fr[1]) if len(_fr) == 2 else 15.0
+            duration = float(_s.get('duration', 0))
+        except Exception:
+            fps, duration = 15.0, 0.0
+
         max_duration_sec = getattr(self.config, "VIDEO_MAX_DURATION_SECONDS", 5.0)
-        if total_frames / max(fps, 1) > max_duration_sec + 0.5:
-            cap.release()
+        if duration > max_duration_sec + 0.5:
             logger.warning(f"[{job_id}] Video longer than {max_duration_sec}s; skipping segmented video")
             return
-        # Detect video rotation metadata (iPhone videos are stored sideways with rotate tag)
-        try:
-            probe = subprocess.run(
-                ['ffprobe', '-v', 'quiet', '-select_streams', 'v:0',
-                 '-show_entries', 'stream_tags=rotate', '-of', 'json', str(video_path)],
-                capture_output=True, text=True
-            )
-            import json as _json
-            _probe_data = _json.loads(probe.stdout or '{}')
-            video_rotation = int(_probe_data.get('streams', [{}])[0].get('tags', {}).get('rotate', 0))
-        except Exception:
-            video_rotation = 0
-        logger.info(f"[{job_id}] Video rotation metadata: {video_rotation}°")
 
-        # Sample at most 40 frames (8fps) — denser than 15 so SAM2 tracking stays accurate
+        # Extract frames using ffmpeg — auto-applies rotation metadata so frames are
+        # always in the correct display orientation (cv2 ignores rotation tags).
         sample_fps = min(fps, 8.0)
-        sample_step = max(1, round(fps / sample_fps))
         max_sampled = 40
+        frame_dir = self.config.OUTPUT_DIR / job_id / "frames_segment_video"
+        frame_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            subprocess.run(
+                ['ffmpeg', '-y', '-i', str(video_path),
+                 '-vf', f'fps={sample_fps},scale={self.config.RESIZE_WIDTH}:-2',
+                 '-frames:v', str(max_sampled), '-q:v', '2',
+                 str(frame_dir / '%05d.jpg')],
+                check=True, capture_output=True
+            )
+        except Exception as e:
+            logger.warning(f"[{job_id}] ffmpeg frame extraction failed: {e}")
+            import shutil; shutil.rmtree(frame_dir, ignore_errors=True)
+            return
+
+        frame_files = sorted(frame_dir.glob('*.jpg'))
         frames_list = []
-        frame_num = 0
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            if frame_num % sample_step == 0:
-                aspect_ratio = frame.shape[0] / frame.shape[1]
-                new_h = int(self.config.RESIZE_WIDTH * aspect_ratio)
-                frame_resized = cv2.resize(frame, (self.config.RESIZE_WIDTH, new_h))
-                frames_list.append(cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB))
-                if len(frames_list) >= max_sampled:
-                    break
-            frame_num += 1
-        cap.release()
-        logger.info(f"[{job_id}] Sampled {len(frames_list)} frames for segmented video (original fps={fps:.1f}, step={sample_step})")
+        for fpath in frame_files:
+            img = cv2.imread(str(fpath))
+            if img is not None:
+                frames_list.append(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        import shutil; shutil.rmtree(frame_dir, ignore_errors=True)
+
+        logger.info(f"[{job_id}] Extracted {len(frames_list)} frames via ffmpeg (fps={fps:.1f}, sample_fps={sample_fps})")
         if not frames_list:
             logger.warning(f"[{job_id}] No frames read for segmented video")
             return
@@ -2749,30 +2752,20 @@ class NutritionVideoPipeline:
         writer.release()
         logger.info(f"[{job_id}] Saved segmented overlay video (SAM2 per-frame, mp4v): {out_video_path}")
 
-        # Re-encode to H.264 so iOS/Android can play it correctly via expo-av.
-        # Also bake in the original video's rotation so the output displays upright
-        # (cv2 ignores rotation metadata; we must apply it explicitly in ffmpeg).
+        # Re-encode from mp4v to H.264 so iOS/Android can play it via expo-av.
+        # Frames are already in the correct display orientation (extracted by ffmpeg
+        # with auto-rotation applied), so no transpose filter is needed here.
         _tmp = out_video_path.with_suffix('.raw.mp4')
         try:
             out_video_path.rename(_tmp)
-            # Build vf filter to rotate frames to match original orientation
-            if video_rotation == 90:
-                _vf = 'transpose=2'      # 90° CCW — undoes the CW storage rotation
-            elif video_rotation == 180:
-                _vf = 'transpose=2,transpose=2'   # 180°
-            elif video_rotation == 270 or video_rotation == -90:
-                _vf = 'transpose=1'      # 90° CW — undoes the CCW storage rotation
-            else:
-                _vf = None
-            _ffmpeg_cmd = ['ffmpeg', '-y', '-i', str(_tmp),
-                           '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
-                           '-movflags', '+faststart']
-            if _vf:
-                _ffmpeg_cmd += ['-vf', _vf]
-            _ffmpeg_cmd.append(str(out_video_path))
-            subprocess.run(_ffmpeg_cmd, check=True, capture_output=True)
+            subprocess.run(
+                ['ffmpeg', '-y', '-i', str(_tmp),
+                 '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
+                 str(out_video_path)],
+                check=True, capture_output=True
+            )
             _tmp.unlink()
-            logger.info(f"[{job_id}] Re-encoded overlay video to H.264 (rotation={video_rotation}°)")
+            logger.info(f"[{job_id}] Re-encoded overlay video to H.264")
         except Exception as _enc_err:
             logger.warning(f"[{job_id}] FFmpeg H.264 re-encode failed ({_enc_err}); uploading mp4v")
             if _tmp.exists():
