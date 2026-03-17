@@ -2615,9 +2615,9 @@ class NutritionVideoPipeline:
             logger.warning(f"[{job_id}] Video longer than {max_duration_sec}s; skipping segmented video")
             return
 
-        # Detect rotation from original video (check both stream tag and display matrix side_data).
-        # We will physically rotate the overlay frames so the output plays correctly without
-        # relying on players to honour rotation metadata.
+        # Detect rotation from original video.
+        # iPhones often store rotation ONLY in the tkhd transformation matrix (not in stream tags
+        # or display-matrix side_data), so we check three methods in order.
         video_rotation = 0
         try:
             import json as _json
@@ -2635,19 +2635,67 @@ class NutritionVideoPipeline:
             if _tag_rot:
                 video_rotation = int(_tag_rot)
                 logger.info(f"[{job_id}] Rotation from stream tag: {video_rotation}°")
-            # Method 2: display matrix side_data (ffprobe reports CCW angle; negate for CW convention)
+            # Method 2: display matrix side_data
             if not video_rotation:
                 for sd in _stream.get('side_data_list', []):
                     if 'rotation' in sd:
                         _dm_rot = int(sd['rotation'])
-                        video_rotation = -_dm_rot  # display matrix -90 → we need +90 correction
-                        logger.info(f"[{job_id}] Rotation from display matrix: side_data={_dm_rot}, computed={video_rotation}°")
+                        video_rotation = -_dm_rot
+                        logger.info(f"[{job_id}] Rotation from display matrix side_data: {_dm_rot} → {video_rotation}°")
                         break
-            logger.info(f"[{job_id}] ffprobe raw stored dimensions: {_raw_w}x{_raw_h}, final rotation={video_rotation}°")
+            logger.info(f"[{job_id}] ffprobe raw stored dimensions: {_raw_w}x{_raw_h}, rotation after methods 1+2: {video_rotation}°")
         except Exception as _rot_exc:
-            video_rotation = 0
-            logger.warning(f"[{job_id}] Rotation detection failed: {_rot_exc}")
-        logger.info(f"[{job_id}] Video rotation detected: {video_rotation}°")
+            logger.warning(f"[{job_id}] ffprobe rotation detection failed: {_rot_exc}")
+
+        # Method 3: parse the tkhd transformation matrix directly from the raw MP4 bytes.
+        # iPhone videos frequently store rotation ONLY here (no stream tag, no side_data).
+        # Matrix layout (9 × int32 big-endian, 16.16 fixed-point):
+        #   [a  b  0]     a=0, b=65536, c=-65536, d=0  →  90° (portrait, home-button down)
+        #   [c  d  0]     a=0, b=-65536, c=65536, d=0  →  270° (portrait, upside-down)
+        #   [tx ty w]     a=-65536, d=-65536            →  180°
+        if not video_rotation:
+            try:
+                import struct as _struct
+                def _find_tkhd(data, depth=0):
+                    i = 0
+                    while i < len(data) - 8:
+                        sz = int.from_bytes(data[i:i+4], 'big')
+                        bt = data[i+4:i+8]
+                        if sz < 8 or i + sz > len(data):
+                            break
+                        if bt in (b'moov', b'trak', b'mdia', b'minf') and depth < 5:
+                            r = _find_tkhd(data[i+8:i+sz], depth+1)
+                            if r is not None:
+                                return r
+                        elif bt == b'tkhd':
+                            return data[i+8:i+sz]
+                        i += sz
+                    return None
+                _raw_bytes = video_path.read_bytes()
+                _tkhd = _find_tkhd(_raw_bytes)
+                if _tkhd:
+                    _ver = _tkhd[0]
+                    _mbase = (4 + 20 + 8 + 2 + 2 + 2 + 2) if _ver == 0 else (4 + 32 + 8 + 2 + 2 + 2 + 2)
+                    if _mbase + 20 <= len(_tkhd):
+                        _ma = _struct.unpack_from('>i', _tkhd, _mbase)[0]       # a
+                        _mb = _struct.unpack_from('>i', _tkhd, _mbase + 4)[0]   # b
+                        _mc = _struct.unpack_from('>i', _tkhd, _mbase + 12)[0]  # c
+                        _md = _struct.unpack_from('>i', _tkhd, _mbase + 16)[0]  # d
+                        if _ma == 0 and _mb > 0 and _mc < 0 and _md == 0:
+                            video_rotation = 90
+                        elif _ma == 0 and _mb < 0 and _mc > 0 and _md == 0:
+                            video_rotation = 270
+                        elif _ma < 0 and _md < 0:
+                            video_rotation = 180
+                        logger.info(f"[{job_id}] tkhd matrix a={_ma} b={_mb} c={_mc} d={_md} → rotation={video_rotation}°")
+                    else:
+                        logger.info(f"[{job_id}] tkhd found but too short for matrix ({len(_tkhd)} bytes, need {_mbase+20})")
+                else:
+                    logger.info(f"[{job_id}] tkhd box not found in raw MP4")
+            except Exception as _tkhd_err:
+                logger.warning(f"[{job_id}] tkhd matrix parse failed: {_tkhd_err}")
+
+        logger.info(f"[{job_id}] Final video rotation: {video_rotation}°")
 
         sample_fps = min(fps, 8.0)
         sample_step = max(1, round(fps / sample_fps))
