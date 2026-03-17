@@ -2649,12 +2649,20 @@ class NutritionVideoPipeline:
         if not frames_list:
             logger.warning(f"[{job_id}] No frames read for segmented video")
             return
-        # Distinct colors per object (BGR for cv2)
-        np.random.seed(42)
+        # Bright saturated colors per object (BGR) — vivid enough to survive H.264 compression
+        _PALETTE_BGR = [
+            (0, 200, 255),   # yellow
+            (0, 255, 100),   # green
+            (255, 80,  80),  # blue
+            (80,  80, 255),  # red
+            (255, 0,  200),  # magenta
+            (0,  220, 180),  # lime
+            (200, 0,  255),  # purple
+            (0,  180, 255),  # orange
+        ]
         colors_bgr = {}
         for i, (obj_id, _, _) in enumerate(initial_detections):
-            r, g, b = np.random.randint(50, 220, size=3)
-            colors_bgr[obj_id] = (int(b), int(g), int(r))
+            colors_bgr[obj_id] = _PALETTE_BGR[i % len(_PALETTE_BGR)]
         obj_id_to_label = {det[0]: det[1] for det in initial_detections}
 
         h, w = frames_list[0].shape[:2]
@@ -2710,10 +2718,10 @@ class NutritionVideoPipeline:
                         mask = masks[0].astype(bool)  # (H, W)
                         color = colors_bgr.get(obj_id, (128, 128, 128))
 
-                        # Semi-transparent pixel-level mask overlay (60% color for visibility)
+                        # Semi-transparent pixel-level mask overlay (75% color for visibility after H.264)
                         color_layer = np.zeros_like(frame_bgr, dtype=np.uint8)
                         color_layer[:] = color
-                        blended = cv2.addWeighted(overlay, 0.4, color_layer, 0.6, 0)
+                        blended = cv2.addWeighted(overlay, 0.25, color_layer, 0.75, 0)
                         overlay[mask] = blended[mask]
                         # Solid contour border so mask edge is always visible
                         contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
