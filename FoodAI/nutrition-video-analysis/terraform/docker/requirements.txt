@@ -24,9 +24,6 @@ mmengine==0.10.2
 mmcv-lite==2.1.0
 timm==0.9.12
 
-# Tracking
-supervision>=0.21.0
-
 # RAG & NLP
 sentence-transformers==3.0.1
 faiss-cpu==1.7.4
