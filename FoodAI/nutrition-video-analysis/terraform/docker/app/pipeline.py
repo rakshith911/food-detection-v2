@@ -2615,84 +2615,100 @@ class NutritionVideoPipeline:
             logger.warning(f"[{job_id}] Video longer than {max_duration_sec}s; skipping segmented video")
             return
 
-        # Detect rotation from the original video. Use print() so output is visible in CloudWatch
-        # (logger.info is suppressed by the ECS container's log level config).
-        # Parse 'ffmpeg -i' stderr which reports rotation from ALL sources: stream tag, display
-        # matrix side_data, AND the tkhd transformation matrix — whichever is present.
+        # Detect rotation from the original video.
+        # Write to stderr (unbuffered) so output appears in CloudWatch regardless of log level.
+        # Primary method: parse tkhd transformation matrix from raw MP4 bytes.
+        # We iterate ALL trak boxes because the audio tkhd (identity matrix) often comes first
+        # and would incorrectly yield rotation=0 if we stop at the first tkhd found.
         video_rotation = 0
         try:
-            _ffinfo = subprocess.run(
-                ['ffmpeg', '-i', str(video_path)],
-                capture_output=True, text=True
-            )
-            _ffstderr = _ffinfo.stderr
-            print(f"[{job_id}] ffmpeg -i stderr (last 600 chars): {_ffstderr[-600:]}")
-            for _line in _ffstderr.splitlines():
-                _ll = _line.lower().strip()
-                # "    rotate          : 90"
-                if _ll.startswith('rotate') and ':' in _ll:
-                    try:
-                        video_rotation = int(_ll.split(':')[1].strip())
-                        print(f"[{job_id}] Rotation from stream tag line: {_line.strip()} → {video_rotation}°")
-                    except ValueError:
-                        pass
-                # "displaymatrix: rotation of -90.00 degrees"
-                elif 'displaymatrix' in _ll and 'rotation of' in _ll:
-                    try:
-                        _deg = float(_ll.split('rotation of')[1].split('degrees')[0].strip())
-                        video_rotation = int(round(-_deg))  # display matrix is negative of needed
-                        print(f"[{job_id}] Rotation from displaymatrix line: {_line.strip()} → {video_rotation}°")
-                    except (ValueError, IndexError):
-                        pass
-        except Exception as _rot_exc:
-            logger.warning(f"[{job_id}] ffmpeg rotation detection failed: {_rot_exc}")
+            import struct as _struct
 
-        # Fallback: parse tkhd transformation matrix directly from raw MP4 bytes.
-        # Some ffmpeg builds don't report tkhd-only rotation in -i output.
+            def _iter_mp4_boxes(data):
+                """Yield (box_type_bytes, box_content_bytes) for boxes at this level."""
+                i = 0
+                while i + 8 <= len(data):
+                    sz = int.from_bytes(data[i:i+4], 'big')
+                    bt = data[i+4:i+8]
+                    if sz < 8 or i + sz > len(data):
+                        break
+                    yield bt, data[i+8:i+sz]
+                    i += sz
+
+            def _tkhd_rotation(tkhd_data):
+                """Return rotation (0/90/180/270) encoded in tkhd transformation matrix, or 0."""
+                if not tkhd_data:
+                    return 0
+                ver = tkhd_data[0]
+                # version(1)+flags(3) + timestamps+track_id+reserved+duration + reserved(8)+layer(2)+altgrp(2)+vol(2)+res(2)
+                mbase = 40 if ver == 0 else 52  # v0: 4+20+16=40, v1: 4+32+16=52
+                if mbase + 36 > len(tkhd_data):
+                    return 0
+                ma = _struct.unpack_from('>i', tkhd_data, mbase)[0]
+                mb = _struct.unpack_from('>i', tkhd_data, mbase + 4)[0]
+                mc = _struct.unpack_from('>i', tkhd_data, mbase + 12)[0]
+                md = _struct.unpack_from('>i', tkhd_data, mbase + 16)[0]
+                sys.stderr.write(f"[{job_id}] tkhd matrix: a={ma} b={mb} c={mc} d={md}\n")
+                sys.stderr.flush()
+                if ma == 0 and mb > 0 and mc < 0 and md == 0:
+                    return 90
+                elif ma == 0 and mb < 0 and mc > 0 and md == 0:
+                    return 270
+                elif ma < 0 and md < 0:
+                    return 180
+                return 0  # identity matrix (no rotation)
+
+            _raw_bytes = video_path.read_bytes()
+            # Walk moov → trak(s) → tkhd, check every tkhd for non-zero rotation
+            for _bt0, _c0 in _iter_mp4_boxes(_raw_bytes):
+                if _bt0 == b'moov':
+                    for _bt1, _c1 in _iter_mp4_boxes(_c0):
+                        if _bt1 == b'trak':
+                            for _bt2, _c2 in _iter_mp4_boxes(_c1):
+                                if _bt2 == b'tkhd':
+                                    _rot = _tkhd_rotation(_c2)
+                                    sys.stderr.write(f"[{job_id}] tkhd found, rotation={_rot}\n")
+                                    sys.stderr.flush()
+                                    if _rot != 0:
+                                        video_rotation = _rot
+                                        break
+                            if video_rotation:
+                                break
+                    break  # only one moov box
+
+        except Exception as _tkhd_err:
+            sys.stderr.write(f"[{job_id}] tkhd rotation detection error: {_tkhd_err}\n")
+            sys.stderr.flush()
+
+        # Fallback: try ffmpeg -i stderr (catches stream-tag and display-matrix rotation sources)
         if not video_rotation:
             try:
-                import struct as _struct
-                def _find_tkhd_box(data, depth=0):
-                    i = 0
-                    while i < len(data) - 8:
-                        sz = int.from_bytes(data[i:i+4], 'big')
-                        bt = data[i+4:i+8]
-                        if sz < 8 or i + sz > len(data):
-                            break
-                        if bt in (b'moov', b'trak', b'mdia', b'minf') and depth < 6:
-                            r = _find_tkhd_box(data[i+8:i+sz], depth+1)
-                            if r is not None:
-                                return r
-                        elif bt == b'tkhd':
-                            return data[i+8:i+sz]
-                        i += sz
-                    return None
-                _raw_bytes = video_path.read_bytes()
-                _tkhd = _find_tkhd_box(_raw_bytes)
-                if _tkhd:
-                    _ver = _tkhd[0]
-                    _mbase = (4 + 20 + 8 + 2 + 2 + 2 + 2) if _ver == 0 else (4 + 32 + 8 + 2 + 2 + 2 + 2)
-                    if _mbase + 20 <= len(_tkhd):
-                        _ma = _struct.unpack_from('>i', _tkhd, _mbase)[0]
-                        _mb = _struct.unpack_from('>i', _tkhd, _mbase + 4)[0]
-                        _mc = _struct.unpack_from('>i', _tkhd, _mbase + 12)[0]
-                        _md = _struct.unpack_from('>i', _tkhd, _mbase + 16)[0]
-                        print(f"[{job_id}] tkhd matrix: a={_ma} b={_mb} c={_mc} d={_md}")
-                        if _ma == 0 and _mb > 0 and _mc < 0 and _md == 0:
-                            video_rotation = 90
-                        elif _ma == 0 and _mb < 0 and _mc > 0 and _md == 0:
-                            video_rotation = 270
-                        elif _ma < 0 and _md < 0:
-                            video_rotation = 180
-                        print(f"[{job_id}] tkhd matrix rotation: {video_rotation}°")
-                    else:
-                        print(f"[{job_id}] tkhd too short: {len(_tkhd)} bytes")
-                else:
-                    print(f"[{job_id}] tkhd box not found in raw MP4")
-            except Exception as _tkhd_err:
-                logger.warning(f"[{job_id}] tkhd matrix parse failed: {_tkhd_err}")
+                _ffinfo = subprocess.run(
+                    ['ffmpeg', '-i', str(video_path)],
+                    capture_output=True
+                )
+                _ffstderr = _ffinfo.stderr.decode('utf-8', errors='replace')
+                for _line in _ffstderr.splitlines():
+                    _ll = _line.lower().strip()
+                    if _ll.startswith('rotate') and ':' in _ll:
+                        try:
+                            video_rotation = int(_ll.split(':')[1].strip())
+                        except ValueError:
+                            pass
+                    elif 'displaymatrix' in _ll and 'rotation of' in _ll:
+                        try:
+                            _deg = float(_ll.split('rotation of')[1].split('degrees')[0].strip())
+                            video_rotation = int(round(-_deg))
+                        except (ValueError, IndexError):
+                            pass
+                sys.stderr.write(f"[{job_id}] ffmpeg stderr rotation: {video_rotation}\n")
+                sys.stderr.flush()
+            except Exception as _ff_err:
+                sys.stderr.write(f"[{job_id}] ffmpeg rotation fallback error: {_ff_err}\n")
+                sys.stderr.flush()
 
-        print(f"[{job_id}] Final detected video rotation: {video_rotation}°")
+        sys.stderr.write(f"[{job_id}] Final video_rotation={video_rotation}\n")
+        sys.stderr.flush()
 
         sample_fps = min(fps, 8.0)
         sample_step = max(1, round(fps / sample_fps))
