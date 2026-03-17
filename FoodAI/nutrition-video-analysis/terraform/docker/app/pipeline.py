@@ -2649,136 +2649,146 @@ class NutritionVideoPipeline:
         if not frames_list:
             logger.warning(f"[{job_id}] No frames read for segmented video")
             return
-        # Write frames to temp dir for SAM2 (expects directory of images)
-        frame_dir = self.config.OUTPUT_DIR / job_id / "frames_segment_video"
-        frame_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            for idx, frame in enumerate(frames_list):
-                Image.fromarray(frame).save(frame_dir / f"{idx:05d}.jpg")
-            video_predictor = self.models.sam2
-            inference_state = video_predictor.init_state(video_path=str(frame_dir))
-            # Add boxes at frame 0 (SAM2 uses 1-based sequential IDs)
-            for sam2_id, (obj_id, label, box) in enumerate(initial_detections, start=1):
-                x1, y1, x2, y2 = box
-                h, w = frames_list[0].shape[:2]
-                x1 = max(0, min(x1, w - 1))
-                y1 = max(0, min(y1, h - 1))
-                x2 = max(x1 + 1, min(x2, w))
-                y2 = max(y1 + 1, min(y2, h))
-                box_sam = np.array([[[x1, y1], [x2, y2]]])
-                try:
-                    video_predictor.add_new_points_or_box(
-                        inference_state=inference_state,
-                        frame_idx=0,
-                        obj_id=sam2_id,
-                        box=box_sam,
-                    )
-                except Exception as e:
-                    logger.warning(f"[{job_id}] SAM2 add box failed for obj {obj_id}: {e}")
-            # Per-frame masks: sam2_id -> obj_id mapping
-            sam2_to_obj = {i: det[0] for i, det in enumerate(initial_detections, start=1)}
-            obj_id_to_label = {det[0]: det[1] for det in initial_detections}
-            # Distinct colors per object (BGR for cv2)
-            np.random.seed(42)
-            colors_bgr = {}
-            for i, (obj_id, _, _) in enumerate(initial_detections):
-                r, g, b = np.random.randint(50, 255, size=3)
-                colors_bgr[obj_id] = (int(b), int(g), int(r))
-            # Output video: same directory as segmented image overlays
-            overlay_dir = self.config.OUTPUT_DIR / job_id / "masks_overlay"
-            overlay_dir.mkdir(parents=True, exist_ok=True)
-            out_video_path = overlay_dir / "segmented_overlay_video.mp4"
-            h, w = frames_list[0].shape[:2]
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            writer = cv2.VideoWriter(str(out_video_path), fourcc, sample_fps, (w, h))
-            if not writer.isOpened():
-                logger.warning(f"[{job_id}] Could not create video writer: {out_video_path}")
-                return
-            for frame_idx in range(len(frames_list)):
-                out_frame_idx, sam2_obj_ids, out_mask_logits = video_predictor.infer_single_frame(
-                    inference_state, frame_idx
-                )
-                frame_bgr = cv2.cvtColor(frames_list[frame_idx], cv2.COLOR_RGB2BGR)
-                overlay = frame_bgr.astype(np.float32) / 255.0
-                for i, sam2_id in enumerate(sam2_obj_ids):
-                    obj_id = sam2_to_obj.get(sam2_id)
-                    if obj_id is None:
-                        continue
-                    mask_logit = out_mask_logits[i]
-                    mask_np = (mask_logit > 0.0).cpu().numpy()
-                    if len(mask_np.shape) == 3:
-                        mask_np = mask_np[0]
-                    if mask_np.shape[:2] != (h, w):
-                        mask_np = cv2.resize(
-                            mask_np.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST
-                        ).astype(bool)
-                    color = colors_bgr.get(obj_id, (128, 128, 128))
-                    color_f = np.array([color[0] / 255.0, color[1] / 255.0, color[2] / 255.0])
-                    for c in range(3):
-                        overlay[:, :, c] = np.where(
-                            mask_np,
-                            overlay[:, :, c] * 0.5 + color_f[c] * 0.5,
-                            overlay[:, :, c],
-                        )
-                overlay_uint8 = (np.clip(overlay, 0, 1) * 255).astype(np.uint8)
-                # Labels are drawn directly on each food item via the mask overlay,
-                # so no need for a stacked label list at the top of the frame.
-                writer.write(overlay_uint8)
-            writer.release()
-            logger.info(f"[{job_id}] Saved segmented overlay video (mp4v): {out_video_path}")
+        # Distinct colors per object (BGR for cv2)
+        np.random.seed(42)
+        colors_bgr = {}
+        for i, (obj_id, _, _) in enumerate(initial_detections):
+            r, g, b = np.random.randint(50, 220, size=3)
+            colors_bgr[obj_id] = (int(b), int(g), int(r))
+        obj_id_to_label = {det[0]: det[1] for det in initial_detections}
+        obj_ids_list = [det[0] for det in initial_detections]
 
-            # Re-encode to H.264 so iOS/Android can play it correctly via expo-av.
-            # Also bake in the original video's rotation so the output displays upright
-            # (cv2 ignores rotation metadata; we must apply it explicitly in ffmpeg).
-            _tmp = out_video_path.with_suffix('.raw.mp4')
+        # Clip initial boxes to frame bounds
+        h, w = frames_list[0].shape[:2]
+        clipped_boxes = []
+        for _, _, box in initial_detections:
+            x1, y1, x2, y2 = box
+            x1 = max(0.0, min(float(x1), w - 1))
+            y1 = max(0.0, min(float(y1), h - 1))
+            x2 = max(x1 + 1, min(float(x2), w))
+            y2 = max(y1 + 1, min(float(y2), h))
+            clipped_boxes.append([x1, y1, x2, y2])
+        boxes_arr = np.array(clipped_boxes, dtype=np.float32)
+        confidence_arr = np.ones(len(initial_detections), dtype=np.float32)
+        class_id_arr = np.arange(len(initial_detections), dtype=int)
+
+        # Initialize ByteTrack — robust Kalman-filter bounding box tracker;
+        # avoids SAM2 VideoPredictor tracking drift on sparse sampled frames.
+        import supervision as sv
+        tracker = sv.ByteTrack(
+            track_activation_threshold=0.25,
+            lost_track_buffer=30,
+            minimum_matching_threshold=0.8,
+            frame_rate=int(sample_fps),
+        )
+
+        # Output video: same directory as segmented image overlays
+        overlay_dir = self.config.OUTPUT_DIR / job_id / "masks_overlay"
+        overlay_dir.mkdir(parents=True, exist_ok=True)
+        out_video_path = overlay_dir / "segmented_overlay_video.mp4"
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        writer = cv2.VideoWriter(str(out_video_path), fourcc, sample_fps, (w, h))
+        if not writer.isOpened():
+            logger.warning(f"[{job_id}] Could not create video writer: {out_video_path}")
+            return
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.55
+        font_thickness = 1
+
+        for frame_rgb in frames_list:
+            frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+
+            # Feed same initial boxes every frame — food is stationary in short clips.
+            # ByteTrack smooths boxes via Kalman prediction and maintains stable track IDs.
+            detections = sv.Detections(
+                xyxy=boxes_arr,
+                confidence=confidence_arr,
+                class_id=class_id_arr,
+            )
+            tracked = tracker.update_with_detections(detections)
+
+            overlay = frame_bgr.copy()
+            alpha = 0.40  # fill transparency
+
+            for i in range(len(tracked)):
+                bx1, by1, bx2, by2 = tracked.xyxy[i].astype(int)
+                cls_idx = int(tracked.class_id[i]) if tracked.class_id is not None else i
+                if cls_idx >= len(obj_ids_list):
+                    continue
+                obj_id = obj_ids_list[cls_idx]
+                color = colors_bgr.get(obj_id, (128, 128, 128))
+                label = obj_id_to_label.get(obj_id, '')
+
+                # Semi-transparent filled bounding box
+                roi = overlay[by1:by2, bx1:bx2]
+                if roi.size > 0:
+                    filled = np.full_like(roi, color, dtype=np.uint8)
+                    cv2.addWeighted(filled, alpha, roi, 1 - alpha, 0, roi)
+                    overlay[by1:by2, bx1:bx2] = roi
+
+                # Solid border
+                cv2.rectangle(overlay, (bx1, by1), (bx2, by2), color, 2)
+
+                # White pill label above box
+                if label:
+                    (tw, th), _ = cv2.getTextSize(label, font, font_scale, font_thickness)
+                    pad = 4
+                    px1, py1 = bx1, max(0, by1 - th - 2 * pad)
+                    px2, py2 = bx1 + tw + 2 * pad, by1
+                    cv2.rectangle(overlay, (px1, py1), (px2, py2), (255, 255, 255), -1)
+                    cv2.putText(overlay, label, (px1 + pad, py2 - pad),
+                                font, font_scale, (0, 0, 0), font_thickness, cv2.LINE_AA)
+
+            writer.write(overlay)
+
+        writer.release()
+        logger.info(f"[{job_id}] Saved segmented overlay video (ByteTrack, mp4v): {out_video_path}")
+
+        # Re-encode to H.264 so iOS/Android can play it correctly via expo-av.
+        # Also bake in the original video's rotation so the output displays upright
+        # (cv2 ignores rotation metadata; we must apply it explicitly in ffmpeg).
+        _tmp = out_video_path.with_suffix('.raw.mp4')
+        try:
+            out_video_path.rename(_tmp)
+            # Build vf filter to rotate frames to match original orientation
+            if video_rotation == 90:
+                _vf = 'transpose=1'      # 90° clockwise
+            elif video_rotation == 180:
+                _vf = 'transpose=2,transpose=2'   # 180°
+            elif video_rotation == 270 or video_rotation == -90:
+                _vf = 'transpose=2'      # 90° counter-clockwise
+            else:
+                _vf = None
+            _ffmpeg_cmd = ['ffmpeg', '-y', '-i', str(_tmp),
+                           '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+                           '-movflags', '+faststart']
+            if _vf:
+                _ffmpeg_cmd += ['-vf', _vf]
+            _ffmpeg_cmd.append(str(out_video_path))
+            subprocess.run(_ffmpeg_cmd, check=True, capture_output=True)
+            _tmp.unlink()
+            logger.info(f"[{job_id}] Re-encoded overlay video to H.264 (rotation={video_rotation}°)")
+        except Exception as _enc_err:
+            logger.warning(f"[{job_id}] FFmpeg H.264 re-encode failed ({_enc_err}); uploading mp4v")
+            if _tmp.exists():
+                _tmp.rename(out_video_path)
+        # Upload to S3 (same prefix as segmented images)
+        if S3_RESULTS_BUCKET and UPLOAD_SEGMENTED_IMAGES and out_video_path.exists():
             try:
-                out_video_path.rename(_tmp)
-                # Build vf filter to rotate frames to match original orientation
-                if video_rotation == 90:
-                    _vf = 'transpose=1'      # 90° clockwise
-                elif video_rotation == 180:
-                    _vf = 'transpose=2,transpose=2'   # 180°
-                elif video_rotation == 270 or video_rotation == -90:
-                    _vf = 'transpose=2'      # 90° counter-clockwise
-                else:
-                    _vf = None
-                _ffmpeg_cmd = ['ffmpeg', '-y', '-i', str(_tmp),
-                               '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
-                               '-movflags', '+faststart']
-                if _vf:
-                    _ffmpeg_cmd += ['-vf', _vf]
-                _ffmpeg_cmd.append(str(out_video_path))
-                subprocess.run(_ffmpeg_cmd, check=True, capture_output=True)
-                _tmp.unlink()
-                logger.info(f"[{job_id}] Re-encoded overlay video to H.264 (rotation={video_rotation}°)")
-            except Exception as _enc_err:
-                logger.warning(f"[{job_id}] FFmpeg H.264 re-encode failed ({_enc_err}); uploading mp4v")
-                if _tmp.exists():
-                    _tmp.rename(out_video_path)
-            # Upload to S3 (same prefix as segmented images)
-            if S3_RESULTS_BUCKET and UPLOAD_SEGMENTED_IMAGES and out_video_path.exists():
-                try:
-                    global s3_client
-                    if s3_client is None:
-                        s3_client = boto3.client('s3')
-                    s3_key = f"segmented_images/{job_id}/segmented_overlay_video.mp4"
-                    s3_client.upload_file(
-                        str(out_video_path),
-                        S3_RESULTS_BUCKET,
-                        s3_key,
-                        ExtraArgs={'ContentType': 'video/mp4'}
-                    )
-                    logger.info(f"[{job_id}] Uploaded segmented video to s3://{S3_RESULTS_BUCKET}/{s3_key}")
-                except Exception as e:
-                    logger.warning(f"[{job_id}] Failed to upload segmented video to S3: {e}")
-        finally:
-            # Clean temp frame dir
-            import shutil
-            if frame_dir.exists():
-                try:
-                    shutil.rmtree(frame_dir)
-                except OSError:
-                    pass
+                global s3_client
+                if s3_client is None:
+                    s3_client = boto3.client('s3')
+                s3_key = f"segmented_images/{job_id}/segmented_overlay_video.mp4"
+                s3_client.upload_file(
+                    str(out_video_path),
+                    S3_RESULTS_BUCKET,
+                    s3_key,
+                    ExtraArgs={'ContentType': 'video/mp4'}
+                )
+                logger.info(f"[{job_id}] Uploaded segmented video to s3://{S3_RESULTS_BUCKET}/{s3_key}")
+            except Exception as e:
+                logger.warning(f"[{job_id}] Failed to upload segmented video to S3: {e}")
     
     def _calculate_iou(self, box1, box2):
         """Calculate Intersection over Union (IoU) between two boxes"""
