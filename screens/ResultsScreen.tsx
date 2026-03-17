@@ -78,15 +78,28 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 
-// Video player for dashboard cards — uses a ref to seek to frame 0 on load so the
-// thumbnail renders immediately without requiring expo-video-thumbnails (no native rebuild).
+// Video player for dashboard cards.
+// Starts with the local URI; falls back to S3 presigned URL only on load error.
+// Never changes `key` proactively — avoids black-screen remount on S3 URL resolution.
 function VideoCardPlayer({
-  uri, style, isPlaying, onFinish,
-}: { uri: string; style: any; isPlaying: boolean; onFinish: () => void }) {
+  uri, jobId, style, isPlaying, onFinish,
+}: { uri: string; jobId?: string; style: any; isPlaying: boolean; onFinish: () => void }) {
+  const [activeUri, setActiveUri] = useState(uri);
+  const hasTriedS3 = useRef(false);
+
+  const handleError = useCallback(async () => {
+    if (jobId && !hasTriedS3.current) {
+      hasTriedS3.current = true;
+      try {
+        const s3Url = await getImagePresignedUrl(jobId);
+        if (s3Url) setActiveUri(s3Url);
+      } catch {}
+    }
+  }, [jobId]);
+
   return (
     <Video
-      key={uri}
-      source={{ uri }}
+      source={{ uri: activeUri }}
       style={style}
       resizeMode={ResizeMode.COVER}
       isLooping={false}
@@ -96,6 +109,7 @@ function VideoCardPlayer({
       positionMillis={0}
       onPlaybackStatusUpdate={(status) => {
         if (status.isLoaded && status.didJustFinish) onFinish();
+        if (!status.isLoaded && (status as any).error) handleError();
       }}
     />
   );
@@ -118,9 +132,6 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
 
   const deletingRef = useRef<Set<string>>(new Set());
   const [playingVideoId, setPlayingVideoId] = useState<string | null>(null);
-  // Resolved S3 URLs for videos whose local file:// URI is no longer on device
-  const [resolvedVideoUris, setResolvedVideoUris] = useState<Record<string, string>>({});
-  const fetchedVideoIds = useRef<Set<string>>(new Set());
 
   // Two-step notification: set flag when param arrives (clear param immediately so re-submissions retrigger),
   // then fire alert once dashboard has items visible (history.length > 0).
@@ -141,17 +152,6 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
     return () => clearTimeout(t);
   }, [pendingNotification, history.length]);
 
-  // Proactively fetch S3 URLs for all video items so playback works even if local file is gone
-  useEffect(() => {
-    history.forEach(histItem => {
-      if (histItem.videoUri && histItem.job_id && !fetchedVideoIds.current.has(histItem.id)) {
-        fetchedVideoIds.current.add(histItem.id);
-        getImagePresignedUrl(histItem.job_id).then(url => {
-          if (url) setResolvedVideoUris(prev => ({ ...prev, [histItem.id]: url }));
-        });
-      }
-    });
-  }, [history]);
 
   const swipePositions = useRef<{ [key: string]: Animated.Value }>({});
   const [canShowTutorial, setCanShowTutorial] = useState(false); // Control when TutorialScreen can be shown
@@ -272,18 +272,8 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
   // No need to navigate to it separately
   // Note: profileBelongsToCurrentUser is calculated at the top of the component (line 50)
 
-  const handleVideoPlay = (itemId: string, videoUri: string, jobId?: string) => {
-    if (playingVideoId === itemId) {
-      setPlayingVideoId(null);
-    } else {
-      setPlayingVideoId(itemId);
-      // Fetch S3 URL in background for future plays (if local file is gone after reinstall)
-      if (!resolvedVideoUris[itemId] && jobId) {
-        getImagePresignedUrl(jobId).then(url => {
-          if (url) setResolvedVideoUris(prev => ({ ...prev, [itemId]: url }));
-        });
-      }
-    }
+  const handleVideoPlay = (itemId: string) => {
+    setPlayingVideoId(prev => prev === itemId ? null : itemId);
   };
 
   // Initialize swipe position for a card
@@ -458,14 +448,15 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
             {isVideo && item.videoUri ? (
               <>
                 <VideoCardPlayer
-                  uri={resolvedVideoUris[item.id] || item.videoUri}
+                  uri={item.videoUri!}
+                  jobId={item.job_id}
                   style={styles.media}
                   isPlaying={isPlaying}
                   onFinish={() => setPlayingVideoId(null)}
                 />
                 <TouchableOpacity
                   style={styles.playOverlay}
-                  onPress={() => handleVideoPlay(item.id, item.videoUri!, item.job_id)}
+                  onPress={() => handleVideoPlay(item.id)}
                   activeOpacity={0.8}
                 >
                   <View style={styles.playCircle}>
