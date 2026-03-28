@@ -9,7 +9,7 @@ cd /Users/leo/FoodProject/food-detection/FoodAI/nutrition-video-analysis/terrafo
 source venv/bin/activate
 
 # Set Gemini API key (if not already set)
-export GEMINI_API_KEY="AIzaSyABeoRan-hko2IUzFuJdxvQRP00Jz4zNiA"
+export GEMINI_API_KEY="your-gemini-api-key-here"
 
 # Run test on the image
 python3 run_pipeline.py /Users/leo/FoodProject/food-detection/unhealthy-fast-food-delivery-menu-featuring-assorted-burgers-cheeseburgers-nuggets-french-fries-soda-high-calorie-low-356045884.jpg-2.jpg

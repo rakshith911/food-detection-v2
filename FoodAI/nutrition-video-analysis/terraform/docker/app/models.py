@@ -1,6 +1,6 @@
 """
 Model Loading and Caching
-Handles initialization of Florence-2, SAM2, Metric3D, and RAG system
+Handles initialization of Florence-2, SAM2, Depth Anything V2, and RAG system
 """
 # CRITICAL: Patch transformers.utils BEFORE importing transformers
 # Florence-2's custom code executes at import time and needs this function
@@ -270,180 +270,53 @@ def load_sam2(config_path: str, checkpoint_path: str, device: str = "cuda"):
     return predictor
 
 
-def _find_decoder_recursive(module, visited=None):
-    """Recursively find decoder module with get_bins method"""
-    if visited is None:
-        visited = set()
-    
-    module_id = id(module)
-    if module_id in visited:
-        return None
-    visited.add(module_id)
-    
-    # Check if this module has get_bins method
-    if hasattr(module, 'get_bins') and callable(getattr(module, 'get_bins')):
-        return module
-    
-    # Recursively search child modules
-    for name, child in module.named_children():
-        result = _find_decoder_recursive(child, visited)
-        if result is not None:
-            return result
-    
-    return None
-
-
-def _patch_torch_linspace_for_cpu():
+def load_depth_anything(model_name: str = "depth-anything/Depth-Anything-V2-Small-hf", device: str = "cpu"):
     """
-    Patch torch.linspace to automatically replace device="cuda" with device="cpu"
-    when CUDA is not available. This fixes Metric3D's hardcoded CUDA usage.
+    Load Depth Anything V2 (Small) depth estimation model via HuggingFace.
+    Returns (processor, model) tuple. Runs well on CPU.
     """
-    if not torch.cuda.is_available():
-        original_linspace = torch.linspace
-        
-        def patched_linspace(*args, device=None, **kwargs):
-            """Patched torch.linspace that replaces CUDA with CPU when CUDA unavailable"""
-            if device == "cuda" or (isinstance(device, torch.device) and device.type == "cuda"):
-                device = "cpu"
-            return original_linspace(*args, device=device, **kwargs)
-        
-        torch.linspace = patched_linspace
-        logger.info("✓ Patched torch.linspace to replace CUDA with CPU")
-
-
-def _patch_metric3d_for_cpu(model, device):
-    """
-    Patch Metric3D model to use CPU instead of hardcoded CUDA.
-    Metric3D's decoder has hardcoded device="cuda" which fails on CPU-only systems.
-    """
-    if device == "cpu":
-        # First, patch torch.linspace globally to intercept CUDA calls
-        _patch_torch_linspace_for_cpu()
-        
-        # Get the actual device from the model
-        model_device = next(model.parameters()).device
-        logger.info(f"Patching Metric3D for CPU - model device: {model_device}")
-        
-        # Try to find decoder recursively
-        decoder = _find_decoder_recursive(model)
-        
-        if decoder is None:
-            # Fallback: try common paths
-            if hasattr(model, 'depth_model'):
-                if hasattr(model.depth_model, 'decoder'):
-                    decoder = model.depth_model.decoder
-                elif hasattr(model.depth_model, 'depth_model') and hasattr(model.depth_model.depth_model, 'decoder'):
-                    decoder = model.depth_model.depth_model.decoder
-        
-        if decoder is not None and hasattr(decoder, 'get_bins'):
-            # Store original for reference
-            original_get_bins = decoder.get_bins
-            
-            def patched_get_bins(self, bins_num):
-                """Patched version that uses model's device instead of hardcoded CUDA"""
-                import math
-                # Use the device of the model's parameters (should be CPU)
-                try:
-                    device_to_use = next(self.parameters()).device if list(self.parameters()) else torch.device('cpu')
-                except:
-                    device_to_use = torch.device('cpu')
-                
-                depth_bins_vec = torch.linspace(
-                    math.log(self.min_val), 
-                    math.log(self.max_val), 
-                    bins_num, 
-                    device=device_to_use
-                )
-                return depth_bins_vec
-            
-            # Bind the patched method to the decoder instance
-            import types
-            decoder.get_bins = types.MethodType(patched_get_bins, decoder)
-            logger.info(f"✓ Patched Metric3D decoder.get_bins to use {model_device} instead of CUDA")
-        else:
-            logger.warning("⚠ Could not find Metric3D decoder with get_bins method - using torch.linspace patch as fallback")
-
-
-def load_metric3d(model_name: str = "metric3d_vit_small", device: str = "cuda"):
-    """
-    Load Metric3D depth estimation model
-    
-    Args:
-        model_name: Metric3D model variant
-        device: Device to load model on
-        
-    Returns:
-        Metric3D model
-    """
-    cache_key = f"metric3d_{model_name}_{device}"
+    cache_key = f"depth_anything_{model_name}_{device}"
     cached = model_cache.get(cache_key)
     if cached:
-        logger.info("Using cached Metric3D model")
+        logger.info("Using cached Depth Anything V2 model")
         return cached
-    
-    logger.info(f"Loading Metric3D model: {model_name}...")
-    
-    try:
-        # CRITICAL: Patch torch.linspace BEFORE loading Metric3D
-        # This intercepts all CUDA device calls and replaces with CPU
-        if device == "cpu":
-            _patch_torch_linspace_for_cpu()
-        
-        # Ensure NumPy is imported and available before loading Metric3D
-        # Metric3D's torch.hub.load checks for NumPy availability
-        import numpy as np
-        assert np is not None, "NumPy must be available for Metric3D"
-        logger.info(f"NumPy version: {np.__version__} - verified before Metric3D load")
-        
-        # Metric3D download can take 2-5 minutes - show progress
-        print(f"⏳ Downloading Metric3D model '{model_name}' from torch.hub...")
-        print("   This may take 2-5 minutes (downloading ~500MB)...")
-        import sys
-        sys.stdout.flush()
-        
-        model = torch.hub.load(
-            'yvanyin/metric3d',
-            model_name,
-            pretrain=True,
-            verbose=True  # Show download progress
-        )
-        print("✓ Metric3D model downloaded")
-        sys.stdout.flush()
-        # Force all components to the specified device
-        model = model.to(device)
-        # Also ensure all buffers and registered buffers are moved
-        for name, buffer in model.named_buffers():
-            buffer.data = buffer.data.to(device)
-        
-        # CRITICAL: Patch Metric3D to use CPU instead of hardcoded CUDA
-        _patch_metric3d_for_cpu(model, device)
-        
-        model.eval()
-        
-        model_cache.set(cache_key, model)
-        logger.info("✓ Metric3D loaded successfully")
-        return model
-        
-    except Exception as e:
-        logger.error(f"Failed to load Metric3D: {e}")
-        raise
+
+    logger.info(f"Loading Depth Anything V2 model: {model_name}...")
+    print(f"Loading Depth Anything V2 '{model_name}' from HuggingFace...")
+    import sys
+    sys.stdout.flush()
+
+    from transformers import AutoImageProcessor, AutoModelForDepthEstimation
+
+    processor = AutoImageProcessor.from_pretrained(model_name)
+    model = AutoModelForDepthEstimation.from_pretrained(model_name)
+    model = model.to(device)
+    model.eval()
+
+    print("Depth Anything V2 model loaded")
+    sys.stdout.flush()
+
+    result = (processor, model)
+    model_cache.set(cache_key, result)
+    logger.info("Depth Anything V2 loaded successfully")
+    return result
 
 
 def load_nutrition_rag(
-    pdf_path: Path,
-    fndds_path: Path,
-    cofid_path: Path,
-    gemini_api_key: Optional[str] = None
+    fao_faiss_path: Path,
+    fao_density_path: Path,
+    fao_names_path: Path,
+    usda_faiss_path: Path,
+    usda_foods_path: Path,
+    usda_names_path: Path,
+    usda_density_faiss_path: Path = None,
+    usda_density_path: Path = None,
+    usda_density_names_path: Path = None,
+    gemini_api_key: str = None,
 ):
     """
-    Load and initialize Nutrition RAG system
-    
-    Args:
-        pdf_path: Path to density PDF
-        fndds_path: Path to FNDDS Excel
-        cofid_path: Path to CoFID Excel
-        gemini_api_key: Optional Gemini API key for fallback
-        
+    Load and initialize Nutrition RAG system using pre-built FAISS indexes.
+
     Returns:
         Initialized NutritionRAG instance
     """
@@ -452,33 +325,29 @@ def load_nutrition_rag(
     if cached:
         logger.info("Using cached NutritionRAG system")
         return cached
-    
+
     logger.info("Loading Nutrition RAG system...")
-    
-    # Import here to avoid circular dependency
+
     import sys
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
     from nutrition_rag_system import NutritionRAG
-    
-    # Set Gemini API key if provided
-    if gemini_api_key:
-        import os
-        os.environ['GEMINI_API_KEY'] = gemini_api_key
-    
+
     rag = NutritionRAG(
-        pdf_path=pdf_path,
-        fndds_path=fndds_path,
-        cofid_path=cofid_path
+        fao_faiss_path=fao_faiss_path,
+        fao_density_path=fao_density_path,
+        fao_names_path=fao_names_path,
+        usda_faiss_path=usda_faiss_path,
+        usda_foods_path=usda_foods_path,
+        usda_names_path=usda_names_path,
+        usda_density_faiss_path=usda_density_faiss_path,
+        usda_density_path=usda_density_path,
+        usda_density_names_path=usda_density_names_path,
+        gemini_api_key=gemini_api_key,
     )
-    
-    # Pre-load databases
-    rag.extract_density_from_pdf()
-    rag.load_calorie_databases()
-    rag.build_faiss_index()
-    
+    rag.load()
+
     model_cache.set(cache_key, rag)
-    logger.info("✓ NutritionRAG loaded successfully")
-    
+    logger.info("NutritionRAG loaded successfully")
     return rag
 
 
@@ -498,7 +367,7 @@ class ModelManager:
         self._florence2 = None
         self._flan_t5 = None
         self._sam2 = None
-        self._metric3d = None
+        self._depth_anything = None
         self._rag = None
     
     @property
@@ -533,41 +402,43 @@ class ModelManager:
         return self._sam2
     
     @property
-    def metric3d(self):
-        """Lazy load Metric3D"""
-        if self._metric3d is None:
-            self._metric3d = load_metric3d(
-                model_name=self.config.METRIC3D_MODEL,
+    def depth_anything(self):
+        """Lazy load Depth Anything V2 Small"""
+        if self._depth_anything is None:
+            self._depth_anything = load_depth_anything(
+                model_name=self.config.DEPTH_ANYTHING_MODEL,
                 device=self.device
             )
-        return self._metric3d
-    
+        return self._depth_anything
+
     @property
     def rag(self):
         """Lazy load NutritionRAG"""
         if self._rag is None:
             self._rag = load_nutrition_rag(
-                pdf_path=self.config.DENSITY_PDF_PATH,
-                fndds_path=self.config.FNDDS_EXCEL_PATH,
-                cofid_path=self.config.COFID_EXCEL_PATH,
-                gemini_api_key=self.config.GEMINI_API_KEY
+                fao_faiss_path=self.config.FAO_FAISS_PATH,
+                fao_density_path=self.config.FAO_DENSITY_PATH,
+                fao_names_path=self.config.FAO_NAMES_PATH,
+                usda_faiss_path=self.config.USDA_FAISS_PATH,
+                usda_foods_path=self.config.USDA_FOODS_PATH,
+                usda_names_path=self.config.USDA_NAMES_PATH,
             )
         return self._rag
-    
+
     def preload_all(self):
         """Preload all models (useful for container warmup)"""
         logger.info("Preloading all models...")
         _ = self.florence2
         _ = self.sam2
-        _ = self.metric3d
+        _ = self.depth_anything
         _ = self.rag
-        logger.info("✓ All models preloaded")
-    
+        logger.info("All models preloaded")
+
     def clear_cache(self):
         """Clear all cached models"""
         self._florence2 = None
         self._sam2 = None
-        self._metric3d = None
+        self._depth_anything = None
         self._rag = None
         model_cache.clear()
         logger.info("Model cache cleared")

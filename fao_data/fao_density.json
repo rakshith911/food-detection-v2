@@ -1,0 +1,2538 @@
+[
+  {
+    "description": "Apple juice, canned or bottled, unsweetened, with added ascorbic acid",
+    "density_g_ml": 1.04
+  },
+  {
+    "description": "Apple juice, canned or bottled, unsweetened, without added ascorbic acid",
+    "density_g_ml": 1.04
+  },
+  {
+    "description": "Beverages, fruit juice drink, reduced sugar, with vitamin E added",
+    "density_g_ml": 1.04
+  },
+  {
+    "description": "Carbonated beverage, tonic water",
+    "density_g_ml": 1.02
+  },
+  {
+    "description": "Cranberry juice cocktail, bottled",
+    "density_g_ml": 1.05
+  },
+  {
+    "description": "Cranberry-apple juice drink, bottled",
+    "density_g_ml": 1.06
+  },
+  {
+    "description": "Fruit drinks, low calories, undiluted",
+    "density_g_ml": 1.02
+  },
+  {
+    "description": "Fruit drinks, undiluted",
+    "density_g_ml": 1.105
+  },
+  {
+    "description": "Fruit juice",
+    "density_g_ml": 1.06
+  },
+  {
+    "description": "Fruit juice drinks",
+    "density_g_ml": 1.04
+  },
+  {
+    "description": "Fruit juice drinks, ready to drink",
+    "density_g_ml": 1.0350000000000001
+  },
+  {
+    "description": "Grape juice",
+    "density_g_ml": 1.054
+  },
+  {
+    "description": "Grape juice, canned or bottled, unsweetened, with added ascorbic acid",
+    "density_g_ml": 1.06
+  },
+  {
+    "description": "Grape juice, canned or bottled, unsweetened, without added ascorbic acid",
+    "density_g_ml": 1.06
+  },
+  {
+    "description": "Guanabana nectar, canned",
+    "density_g_ml": 1.02
+  },
+  {
+    "description": "Guava nectar, canned",
+    "density_g_ml": 1.02
+  },
+  {
+    "description": "Ice, crushed",
+    "density_g_ml": 0.64
+  },
+  {
+    "description": "Juice, apple and grape blend, with added ascorbic acid",
+    "density_g_ml": 1.05
+  },
+  {
+    "description": "Juice, apple, grape and pear blend, with added ascorbic acid and calcium",
+    "density_g_ml": 1.05
+  },
+  {
+    "description": "Lemonade, frozen concentrate, pink",
+    "density_g_ml": 1.24
+  },
+  {
+    "description": "Lemonade, frozen concentrate, white",
+    "density_g_ml": 1.17
+  },
+  {
+    "description": "Lime juice cordial, undiluted",
+    "density_g_ml": 1.102
+  },
+  {
+    "description": "Mango nectar, canned",
+    "density_g_ml": 1.0
+  },
+  {
+    "description": "Meal supplement drink, NESTLE, SUPLIGEN, canned, peanut flavor",
+    "density_g_ml": 1.04
+  },
+  {
+    "description": "Orange juice",
+    "density_g_ml": 1.038
+  },
+  {
+    "description": "Orange juice with calcium",
+    "density_g_ml": 1.038
+  },
+  {
+    "description": "Orange juice, canned, unsweetened",
+    "density_g_ml": 1.04
+  },
+  {
+    "description": "Orange soda (sweetened with sugar)",
+    "density_g_ml": 1.029
+  },
+  {
+    "description": "QUAKER OATS, PROPEL Fitness Water, fruit- flavored, non-carbonated",
+    "density_g_ml": 1.0
+  },
+  {
+    "description": "Soft drinks, cola type",
+    "density_g_ml": 1.04
+  },
+  {
+    "description": "Soft drinks, diet soda",
+    "density_g_ml": 0.988
+  },
+  {
+    "description": "Soft drinks, lemonade type",
+    "density_g_ml": 1.02
+  },
+  {
+    "description": "Soft drinks, lucozade type",
+    "density_g_ml": 1.07
+  },
+  {
+    "description": "Soy drink",
+    "density_g_ml": 1.08
+  },
+  {
+    "description": "Soya + milk + sugar",
+    "density_g_ml": 1.05
+  },
+  {
+    "description": "Soya + sugar",
+    "density_g_ml": 1.05
+  },
+  {
+    "description": "Sports drink, COCA-COLA, POWERADE, lemon- lime flavored, ready-to-drink",
+    "density_g_ml": 1.03
+  },
+  {
+    "description": "Sports drink, PEPSICO QUAKER GATORADE, GATORADE, original, fruit-flavored, ready-to- drink",
+    "density_g_ml": 1.03
+  },
+  {
+    "description": "Tamarind nectar, canned",
+    "density_g_ml": 1.01
+  },
+  {
+    "description": "Water, ice, 0 \u00b0C",
+    "density_g_ml": 0.916
+  },
+  {
+    "description": "Water, ice, 4 \u00b0C",
+    "density_g_ml": 0.999
+  },
+  {
+    "description": "Water, liquid, 20 \u00b0C",
+    "density_g_ml": 0.998
+  },
+  {
+    "description": "Water, mineralwater",
+    "density_g_ml": 1.0375
+  },
+  {
+    "description": "Coffee, brewed",
+    "density_g_ml": 4.1
+  },
+  {
+    "description": "Coffee, expresso",
+    "density_g_ml": 4.1
+  },
+  {
+    "description": "Coffee, green (beans)",
+    "density_g_ml": 0.605
+  },
+  {
+    "description": "Coffee, powder (nescaf\u00e9)",
+    "density_g_ml": 0.25
+  },
+  {
+    "description": "Coffee, roasted (beans)",
+    "density_g_ml": 0.365
+  },
+  {
+    "description": "Miso, broth, ready to drink",
+    "density_g_ml": 1.06
+  },
+  {
+    "description": "Powder, chocolate drinking powder",
+    "density_g_ml": 0.525
+  },
+  {
+    "description": "Powders",
+    "density_g_ml": 0.225
+  },
+  {
+    "description": "Tea, black (tea leaves)",
+    "density_g_ml": 0.48
+  },
+  {
+    "description": "Tea, herbal, Ciakimora leaves",
+    "density_g_ml": 0.23
+  },
+  {
+    "description": "Tea, flakes",
+    "density_g_ml": 0.38
+  },
+  {
+    "description": "Tea, powdered",
+    "density_g_ml": 0.43
+  },
+  {
+    "description": "Tea, liquid",
+    "density_g_ml": 4.1
+  },
+  {
+    "description": "Tea, ready-to-drink, ARIZONA iced tea, with lemon flavor",
+    "density_g_ml": 1.03
+  },
+  {
+    "description": "Tea, ready-to-drink, LIPTON BRISK iced tea, with lemon flavor",
+    "density_g_ml": 1.03
+  },
+  {
+    "description": "Tea, ready-to-drink, NESTLE, COOL NESTEA ice tea lemon flavor",
+    "density_g_ml": 1.03
+  },
+  {
+    "description": "Beer, lager",
+    "density_g_ml": 1.005
+  },
+  {
+    "description": "Beer, light",
+    "density_g_ml": 1.0
+  },
+  {
+    "description": "Beer, light, BUD LIGHT",
+    "density_g_ml": 1.0
+  },
+  {
+    "description": "Beer, light, BUDWEISER SELECT",
+    "density_g_ml": 1.0
+  },
+  {
+    "description": "Beer, light, MICHELOB ULTRA",
+    "density_g_ml": 1.0
+  },
+  {
+    "description": "Beer, local (non specific)",
+    "density_g_ml": 0.96
+  },
+  {
+    "description": "Beer, pale ale",
+    "density_g_ml": 1.003
+  },
+  {
+    "description": "Beer, pilsner",
+    "density_g_ml": 1.007
+  },
+  {
+    "description": "Beer, pilsner, 4 \u00b0C",
+    "density_g_ml": 1.008
+  },
+  {
+    "description": "Beer, regular, all",
+    "density_g_ml": 1.01
+  },
+  {
+    "description": "Beer, regular, BUDWEISER",
+    "density_g_ml": 1.0
+  },
+  {
+    "description": "Beer, stout, bottled",
+    "density_g_ml": 1.014
+  },
+  {
+    "description": "Beer, stout, extra",
+    "density_g_ml": 1.002
+  },
+  {
+    "description": "Beer, strong ale",
+    "density_g_ml": 1.018
+  },
+  {
+    "description": "Beer, type bitter or brown ale",
+    "density_g_ml": 1.008
+  },
+  {
+    "description": "Beer, type draught",
+    "density_g_ml": 1.004
+  },
+  {
+    "description": "Beer, type Keg",
+    "density_g_ml": 1.001
+  },
+  {
+    "description": "Beer, type mild, draught",
+    "density_g_ml": 1.009
+  },
+  {
+    "description": "Beer, commercial (white cap etc.)",
+    "density_g_ml": 0.97
+  },
+  {
+    "description": "Alcohol, ethyl",
+    "density_g_ml": 0.789
+  },
+  {
+    "description": "Amaretto",
+    "density_g_ml": 1.1
+  },
+  {
+    "description": "Amaretto di Saranno",
+    "density_g_ml": 1.08
+  },
+  {
+    "description": "Anisette",
+    "density_g_ml": 1.175
+  },
+  {
+    "description": "Apricot brandy",
+    "density_g_ml": 1.06
+  },
+  {
+    "description": "Apricot liquor",
+    "density_g_ml": 1.09
+  },
+  {
+    "description": "Bailey's irish cream",
+    "density_g_ml": 1.05
+  },
+  {
+    "description": "Benedictine",
+    "density_g_ml": 1.04
+  },
+  {
+    "description": "Benedictine D.O.M.",
+    "density_g_ml": 1.07
+  },
+  {
+    "description": "Blackberry brandy",
+    "density_g_ml": 1.06
+  },
+  {
+    "description": "Blackberry liquor",
+    "density_g_ml": 1.1
+  },
+  {
+    "description": "Blue curacao",
+    "density_g_ml": 1.11
+  },
+  {
+    "description": "Brandy",
+    "density_g_ml": 1.04
+  },
+  {
+    "description": "Campari",
+    "density_g_ml": 1.06
+  },
+  {
+    "description": "Cherry brandy",
+    "density_g_ml": 1.06
+  },
+  {
+    "description": "Cherry liqueur",
+    "density_g_ml": 1.12
+  },
+  {
+    "description": "Coffee liquor",
+    "density_g_ml": 1.13
+  },
+  {
+    "description": "Cointreau",
+    "density_g_ml": 1.04
+  },
+  {
+    "description": "Cr\u00e8me de almond",
+    "density_g_ml": 1.16
+  },
+  {
+    "description": "Cr\u00e8me de banana",
+    "density_g_ml": 1.14
+  },
+  {
+    "description": "Cr\u00e8me de cacao",
+    "density_g_ml": 1.14
+  },
+  {
+    "description": "Creme de cassis",
+    "density_g_ml": 1.18
+  },
+  {
+    "description": "Cr\u00e8me de noyaux",
+    "density_g_ml": 1.165
+  },
+  {
+    "description": "Drambuie",
+    "density_g_ml": 1.08
+  },
+  {
+    "description": "Frangelico",
+    "density_g_ml": 1.08
+  },
+  {
+    "description": "Galliano",
+    "density_g_ml": 1.11
+  },
+  {
+    "description": "Green chartreuse",
+    "density_g_ml": 1.01
+  },
+  {
+    "description": "Green cr\u00e8me de menthe",
+    "density_g_ml": 1.12
+  },
+  {
+    "description": "Kummel",
+    "density_g_ml": 1.04
+  },
+  {
+    "description": "Liqueur",
+    "density_g_ml": 1.0899999999999999
+  },
+  {
+    "description": "Liqueur, type advocaat",
+    "density_g_ml": 1.093
+  },
+  {
+    "description": "Liqueur, type cherry brandy",
+    "density_g_ml": 1.093
+  },
+  {
+    "description": "Liqueur, type curacao",
+    "density_g_ml": 1.052
+  },
+  {
+    "description": "Midori melon liquor",
+    "density_g_ml": 1.05
+  },
+  {
+    "description": "Orange curacao",
+    "density_g_ml": 1.08
+  },
+  {
+    "description": "Parfrait d'amour",
+    "density_g_ml": 1.13
+  },
+  {
+    "description": "Peach brandy",
+    "density_g_ml": 1.06
+  },
+  {
+    "description": "Peach liqueur",
+    "density_g_ml": 1.04
+  },
+  {
+    "description": "Peppermint schnapps",
+    "density_g_ml": 1.04
+  },
+  {
+    "description": "Port",
+    "density_g_ml": 1.026
+  },
+  {
+    "description": "Rock and Rye",
+    "density_g_ml": 1.05
+  },
+  {
+    "description": "Sherry, dry",
+    "density_g_ml": 0.988
+  },
+  {
+    "description": "Sherry, medium",
+    "density_g_ml": 0.998
+  },
+  {
+    "description": "Sherry, sweet",
+    "density_g_ml": 1.009
+  },
+  {
+    "description": "Sloe gin",
+    "density_g_ml": 1.04
+  },
+  {
+    "description": "Southern comfort",
+    "density_g_ml": 0.97
+  },
+  {
+    "description": "Spirits, 40% alcohol",
+    "density_g_ml": 0.95
+  },
+  {
+    "description": "Spirits, 45% alcohol (whiskey)",
+    "density_g_ml": 0.939
+  },
+  {
+    "description": "Spirits, 70% alcohol",
+    "density_g_ml": 0.885
+  },
+  {
+    "description": "Spirits, 75% alcohol",
+    "density_g_ml": 0.873
+  },
+  {
+    "description": "Strawberry liqueur",
+    "density_g_ml": 1.12
+  },
+  {
+    "description": "Tia Maria",
+    "density_g_ml": 1.09
+  },
+  {
+    "description": "Triple sec",
+    "density_g_ml": 1.09
+  },
+  {
+    "description": "Tuaca",
+    "density_g_ml": 0.98
+  },
+  {
+    "description": "Vermouth, dry",
+    "density_g_ml": 1.005
+  },
+  {
+    "description": "Vermouth, sweet",
+    "density_g_ml": 1.046
+  },
+  {
+    "description": "White cr\u00e8me de cacao",
+    "density_g_ml": 1.14
+  },
+  {
+    "description": "White cr\u00e8me de menthe",
+    "density_g_ml": 1.12
+  },
+  {
+    "description": "Yellow chartreuse",
+    "density_g_ml": 1.06
+  },
+  {
+    "description": "Cider, dry",
+    "density_g_ml": 1.007
+  },
+  {
+    "description": "Cider, sweet",
+    "density_g_ml": 1.012
+  },
+  {
+    "description": "Cider, vintage",
+    "density_g_ml": 1.017
+  },
+  {
+    "description": "Wine, red",
+    "density_g_ml": 0.998
+  },
+  {
+    "description": "Wine, rose, medium",
+    "density_g_ml": 1.003
+  },
+  {
+    "description": "Wine, table, all",
+    "density_g_ml": 0.99
+  },
+  {
+    "description": "Wine, table, red",
+    "density_g_ml": 0.99
+  },
+  {
+    "description": "Wine, table, red, Barbera",
+    "density_g_ml": 0.99
+  },
+  {
+    "description": "Wine, table, red, Burgundy",
+    "density_g_ml": 1.0
+  },
+  {
+    "description": "Wine, table, red, Cabernet Franc",
+    "density_g_ml": 0.99
+  },
+  {
+    "description": "Wine, table, red, Cabernet Sauvignon",
+    "density_g_ml": 0.99
+  },
+  {
+    "description": "Wine, table, red, Carignane",
+    "density_g_ml": 0.99
+  },
+  {
+    "description": "Wine, table, red, Claret",
+    "density_g_ml": 0.99
+  },
+  {
+    "description": "Wine, table, red, Gamay",
+    "density_g_ml": 0.99
+  },
+  {
+    "description": "Wine, table, red, Lemberger",
+    "density_g_ml": 0.99
+  },
+  {
+    "description": "Wine, table, red, Merlot",
+    "density_g_ml": 0.99
+  },
+  {
+    "description": "Wine, table, red, Mouvedre",
+    "density_g_ml": 0.99
+  },
+  {
+    "description": "Wine, table, red, Petite Sirah",
+    "density_g_ml": 0.99
+  },
+  {
+    "description": "Wine, table, red, Pinot Noir",
+    "density_g_ml": 0.99
+  },
+  {
+    "description": "Wine, table, red, Sangiovese",
+    "density_g_ml": 0.99
+  },
+  {
+    "description": "Wine, table, red, Syrah",
+    "density_g_ml": 0.99
+  },
+  {
+    "description": "Wine, table, red, Zinfandel",
+    "density_g_ml": 0.99
+  },
+  {
+    "description": "Wine, table, white",
+    "density_g_ml": 0.99
+  },
+  {
+    "description": "Wine, table, white, Chardonnay",
+    "density_g_ml": 0.99
+  },
+  {
+    "description": "Wine, table, white, Chenin Blanc",
+    "density_g_ml": 1.0
+  },
+  {
+    "description": "Wine, table, white, Fume Blanc",
+    "density_g_ml": 0.99
+  },
+  {
+    "description": "Wine, table, white, Gewurztraminer",
+    "density_g_ml": 0.99
+  },
+  {
+    "description": "Wine, table, white, late harvest",
+    "density_g_ml": 1.04
+  },
+  {
+    "description": "Wine, table, white, late harvest, Gewurztraminer",
+    "density_g_ml": 1.03
+  },
+  {
+    "description": "Wine, table, white, Muller Thurgau",
+    "density_g_ml": 1.0
+  },
+  {
+    "description": "Wine, table, white, Muscat",
+    "density_g_ml": 1.01
+  },
+  {
+    "description": "Wine, table, white, Pinot Blanc",
+    "density_g_ml": 0.99
+  },
+  {
+    "description": "Wine, table, white, Pinot Gris (Grigio)",
+    "density_g_ml": 0.99
+  },
+  {
+    "description": "Wine, table, white, Riesling",
+    "density_g_ml": 1.0
+  },
+  {
+    "description": "Wine, table, white, Sauvignon Blanc",
+    "density_g_ml": 0.99
+  },
+  {
+    "description": "Wine, table, white, Semillon",
+    "density_g_ml": 1.0
+  },
+  {
+    "description": "Wine, white",
+    "density_g_ml": 1.02
+  },
+  {
+    "description": "Wine, white, dry or sparkling",
+    "density_g_ml": 0.995
+  },
+  {
+    "description": "Wine, white, medium",
+    "density_g_ml": 1.005
+  },
+  {
+    "description": "Wine, white, sweet",
+    "density_g_ml": 1.016
+  },
+  {
+    "description": "Milk (at 15.6 C)",
+    "density_g_ml": 1.0350000000000001
+  },
+  {
+    "description": "Milk (non-fat dry)",
+    "density_g_ml": 0.56
+  },
+  {
+    "description": "Milk (powdered whole)",
+    "density_g_ml": 0.56
+  },
+  {
+    "description": "Milk (powdered)",
+    "density_g_ml": 0.21
+  },
+  {
+    "description": "Milk shake, fruit and other",
+    "density_g_ml": 4.1
+  },
+  {
+    "description": "Milk, acidophilus cultured",
+    "density_g_ml": 1.01
+  },
+  {
+    "description": "Milk, buttermilk",
+    "density_g_ml": 1.022
+  },
+  {
+    "description": "Milk, chocolate milk, skimmed",
+    "density_g_ml": 1.056
+  },
+  {
+    "description": "Milk, cow, whole",
+    "density_g_ml": 1.04
+  },
+  {
+    "description": "Milk, evaporated",
+    "density_g_ml": 1.07
+  },
+  {
+    "description": "Milk, goat, whole",
+    "density_g_ml": 1.08
+  },
+  {
+    "description": "Milk, liquid (whole, semi-skimmed, skimmed)",
+    "density_g_ml": 1.03
+  },
+  {
+    "description": "Milk, liquid, partially skimmed",
+    "density_g_ml": 1.034
+  },
+  {
+    "description": "Milk, liquid, skimmed",
+    "density_g_ml": 1.033
+  },
+  {
+    "description": "Milk, liquid, skimmed",
+    "density_g_ml": 1.036
+  },
+  {
+    "description": "Milk, liquid, whole",
+    "density_g_ml": 1.03
+  },
+  {
+    "description": "Milk, liquid, whole",
+    "density_g_ml": 1.031
+  },
+  {
+    "description": "Butter",
+    "density_g_ml": 0.911
+  },
+  {
+    "description": "Butter, margarine",
+    "density_g_ml": 0.96
+  },
+  {
+    "description": "Buttermilk, dried",
+    "density_g_ml": 0.5
+  },
+  {
+    "description": "Casein",
+    "density_g_ml": 0.58
+  },
+  {
+    "description": "Cheese, emmentaler, grated",
+    "density_g_ml": 0.34
+  },
+  {
+    "description": "Cream, 13% fat",
+    "density_g_ml": 1.013
+  },
+  {
+    "description": "Cream, 38% fat",
+    "density_g_ml": 0.984
+  },
+  {
+    "description": "Cream, 9% fat",
+    "density_g_ml": 1.017
+  },
+  {
+    "description": "Cream, double (about 40-50% fat)",
+    "density_g_ml": 0.94
+  },
+  {
+    "description": "Cream, heavy",
+    "density_g_ml": 0.994
+  },
+  {
+    "description": "Cream, light",
+    "density_g_ml": 1.012
+  },
+  {
+    "description": "Cream, single (about 20% fat)",
+    "density_g_ml": 1.0
+  },
+  {
+    "description": "Cream, sour (cr\u00e8me fraiche about 18% fat)",
+    "density_g_ml": 1.005
+  },
+  {
+    "description": "Cream, sour (cr\u00e8me fraiche about 38% fat)",
+    "density_g_ml": 0.978
+  },
+  {
+    "description": "Cream, whipped",
+    "density_g_ml": 0.496
+  },
+  {
+    "description": "Cream, whipping (about 40% fat)",
+    "density_g_ml": 0.96
+  },
+  {
+    "description": "Ice cream",
+    "density_g_ml": 0.554
+  },
+  {
+    "description": "Ice cream, dairy",
+    "density_g_ml": 0.61
+  },
+  {
+    "description": "Ice cream, light (formerly ice milk)",
+    "density_g_ml": 0.56
+  },
+  {
+    "description": "Ice cream, light, no sugar added",
+    "density_g_ml": 0.58
+  },
+  {
+    "description": "Ice cream, no sugar added",
+    "density_g_ml": 0.54
+  },
+  {
+    "description": "Ice cream, non dairy",
+    "density_g_ml": 0.51
+  },
+  {
+    "description": "Ice cream, regular",
+    "density_g_ml": 0.56
+  },
+  {
+    "description": "Ice cream, rich",
+    "density_g_ml": 0.62
+  },
+  {
+    "description": "Sour milk, cow, whole",
+    "density_g_ml": 0.98
+  },
+  {
+    "description": "Yoghurt, berry, low fat, artificially sweetened",
+    "density_g_ml": 1.06
+  },
+  {
+    "description": "Yoghurt, fruits",
+    "density_g_ml": 1.0525
+  },
+  {
+    "description": "Yoghurt, low fat, fruit",
+    "density_g_ml": 1.08
+  },
+  {
+    "description": "Yoghurt, plain, unsweetened",
+    "density_g_ml": 1.06
+  },
+  {
+    "description": "Yoghurt, plain, unsweetened",
+    "density_g_ml": 1.031
+  },
+  {
+    "description": "Yoghurt, strawberry, low fat",
+    "density_g_ml": 1.08
+  },
+  {
+    "description": "Cooking oil, elianto oil, salad, golden fry, rina",
+    "density_g_ml": 0.88
+  },
+  {
+    "description": "Cooking oil, sima",
+    "density_g_ml": 0.88
+  },
+  {
+    "description": "Cooking oil, tily, chipo, pura",
+    "density_g_ml": 0.88
+  },
+  {
+    "description": "Oil, cod (at 15.6 C)",
+    "density_g_ml": 0.928
+  },
+  {
+    "description": "Oil, corn (at 15.6 C)",
+    "density_g_ml": 0.924
+  },
+  {
+    "description": "Oil, cotton seed (at 15.6 C)",
+    "density_g_ml": 0.905
+  },
+  {
+    "description": "Oil, lard (at 15.6 C)",
+    "density_g_ml": 0.92
+  },
+  {
+    "description": "Oil, linseed (at 15.6 C)",
+    "density_g_ml": 0.935
+  },
+  {
+    "description": "Oil, olive (at 15.6 C)",
+    "density_g_ml": 0.915
+  },
+  {
+    "description": "Oil, other than palmoil",
+    "density_g_ml": 0.92
+  },
+  {
+    "description": "Oil, palm (at 15.6 C)",
+    "density_g_ml": 0.924
+  },
+  {
+    "description": "Oil, palmoil",
+    "density_g_ml": 0.89
+  },
+  {
+    "description": "Oil, peanut (at 15.6 C)",
+    "density_g_ml": 0.92
+  },
+  {
+    "description": "Oil, rapeseed (at 20 C)",
+    "density_g_ml": 0.92
+  },
+  {
+    "description": "Oil, seasame seed (at 15.6 C)",
+    "density_g_ml": 0.923
+  },
+  {
+    "description": "Oil, sunflower",
+    "density_g_ml": 0.96
+  },
+  {
+    "description": "Oil, vegetable, coconut",
+    "density_g_ml": 0.924
+  },
+  {
+    "description": "Oil, vegetable, corn",
+    "density_g_ml": 0.922
+  },
+  {
+    "description": "Oil, vegetable, olive",
+    "density_g_ml": 0.918
+  },
+  {
+    "description": "Oil, vegetable, palm",
+    "density_g_ml": 0.915
+  },
+  {
+    "description": "Oil, vegetable, peanut",
+    "density_g_ml": 0.914
+  },
+  {
+    "description": "Oil, vegetable, soya",
+    "density_g_ml": 0.927
+  },
+  {
+    "description": "Oil, whale (at 15.6 C)",
+    "density_g_ml": 0.925
+  },
+  {
+    "description": "Animal fat",
+    "density_g_ml": 0.7
+  },
+  {
+    "description": "Lard",
+    "density_g_ml": 0.919
+  },
+  {
+    "description": "Lard (at 15.6 C)",
+    "density_g_ml": 0.96
+  },
+  {
+    "description": "Mayonnaise, traditional",
+    "density_g_ml": 0.91
+  },
+  {
+    "description": "Solid vegetable fat kimbo",
+    "density_g_ml": 0.6
+  },
+  {
+    "description": "Solid vegetable fat rina",
+    "density_g_ml": 0.67
+  },
+  {
+    "description": "Barley",
+    "density_g_ml": 0.62
+  },
+  {
+    "description": "Barley malt, flour",
+    "density_g_ml": 0.72
+  },
+  {
+    "description": "Barley, fine ground",
+    "density_g_ml": 0.74
+  },
+  {
+    "description": "Barley, meal",
+    "density_g_ml": 0.45
+  },
+  {
+    "description": "Barley, flour",
+    "density_g_ml": 0.61
+  },
+  {
+    "description": "Barley, flour, malted",
+    "density_g_ml": 0.64
+  },
+  {
+    "description": "Barley, ground",
+    "density_g_ml": 0.4
+  },
+  {
+    "description": "Barley, malted",
+    "density_g_ml": 0.49
+  },
+  {
+    "description": "Barley, rolled",
+    "density_g_ml": 0.36
+  },
+  {
+    "description": "Barley, scoured",
+    "density_g_ml": 0.66
+  },
+  {
+    "description": "Barley, whole",
+    "density_g_ml": 0.6499999999999999
+  },
+  {
+    "description": "Biscuits",
+    "density_g_ml": 0.47
+  },
+  {
+    "description": "Bran",
+    "density_g_ml": 0.56
+  },
+  {
+    "description": "Bread",
+    "density_g_ml": 0.29
+  },
+  {
+    "description": "Bread, cornbread",
+    "density_g_ml": 0.433
+  },
+  {
+    "description": "Bread, roll, soft",
+    "density_g_ml": 0.18
+  },
+  {
+    "description": "Bread, white",
+    "density_g_ml": 0.42
+  },
+  {
+    "description": "Bread, white, sliced, prepacked",
+    "density_g_ml": 0.29
+  },
+  {
+    "description": "Breadcrumbs",
+    "density_g_ml": 0.45
+  },
+  {
+    "description": "Breakfast cereal, cornflakes (dry cereal)",
+    "density_g_ml": 0.117
+  },
+  {
+    "description": "Breakfast cereal, muesli w/ fruits&nuts",
+    "density_g_ml": 0.37
+  },
+  {
+    "description": "Breakfast cereal, raisin bran",
+    "density_g_ml": 0.26
+  },
+  {
+    "description": "Breakfast cereal, type Cheerios",
+    "density_g_ml": 0.13
+  },
+  {
+    "description": "Breakfast cereal, type Corn flakes",
+    "density_g_ml": 0.1
+  },
+  {
+    "description": "Breakfast cereal, type Crispix",
+    "density_g_ml": 0.13
+  },
+  {
+    "description": "Breakfast cereal, type frosted flakes",
+    "density_g_ml": 0.18
+  },
+  {
+    "description": "Breakfast cereal, type Just Right",
+    "density_g_ml": 0.24
+  },
+  {
+    "description": "Breakfast cereal, type rice krispies",
+    "density_g_ml": 0.12
+  },
+  {
+    "description": "Buckwheat, bran",
+    "density_g_ml": 0.25
+  },
+  {
+    "description": "Buckwheat, flour",
+    "density_g_ml": 0.66
+  },
+  {
+    "description": "Buckwheat, whole",
+    "density_g_ml": 0.625
+  },
+  {
+    "description": "Bulrush mille, fermented flour",
+    "density_g_ml": 0.56
+  },
+  {
+    "description": "Cake",
+    "density_g_ml": 0.415
+  },
+  {
+    "description": "Cake mix",
+    "density_g_ml": 0.7
+  },
+  {
+    "description": "Corn/maize flour, white",
+    "density_g_ml": 0.55
+  },
+  {
+    "description": "Corn/maize starch, loosely packed",
+    "density_g_ml": 0.54
+  },
+  {
+    "description": "Corn/maize sugar",
+    "density_g_ml": 0.33
+  },
+  {
+    "description": "Corn/maize, boiled",
+    "density_g_ml": 0.9
+  },
+  {
+    "description": "Corn/maize, boiled with fat",
+    "density_g_ml": 0.9
+  },
+  {
+    "description": "Corn/maize, bran",
+    "density_g_ml": 0.21
+  },
+  {
+    "description": "Corn/maize, chops (coarse)",
+    "density_g_ml": 0.6699999999999999
+  },
+  {
+    "description": "Corn/maize, chops (fine)",
+    "density_g_ml": 0.6
+  },
+  {
+    "description": "Corn/maize, chops (medium)",
+    "density_g_ml": 0.64
+  },
+  {
+    "description": "Corn/maize, cobs",
+    "density_g_ml": 0.27
+  },
+  {
+    "description": "Corn/maize, cracked (coarse)",
+    "density_g_ml": 0.64
+  },
+  {
+    "description": "Corn/maize, ear",
+    "density_g_ml": 0.9
+  },
+  {
+    "description": "Corn/maize, ear",
+    "density_g_ml": 0.9
+  },
+  {
+    "description": "Corn/maize, fermented flour",
+    "density_g_ml": 0.55
+  },
+  {
+    "description": "Corn/maize, flour",
+    "density_g_ml": 0.82
+  },
+  {
+    "description": "Corn/maize, meal",
+    "density_g_ml": 0.64
+  },
+  {
+    "description": "Corn/maize, flour",
+    "density_g_ml": 0.62
+  },
+  {
+    "description": "Corn/maize, germ flour",
+    "density_g_ml": 0.56
+  },
+  {
+    "description": "Corn/maize, gluten flour",
+    "density_g_ml": 0.6
+  },
+  {
+    "description": "Corn/maize, grits",
+    "density_g_ml": 0.665
+  },
+  {
+    "description": "Corn/maize, ground",
+    "density_g_ml": 0.56
+  },
+  {
+    "description": "Corn/maize, kibbled",
+    "density_g_ml": 0.33499999999999996
+  },
+  {
+    "description": "Corn/maize, mash",
+    "density_g_ml": 0.72
+  },
+  {
+    "description": "Corn/maize, shelled",
+    "density_g_ml": 0.72
+  },
+  {
+    "description": "Corn/maize, starch",
+    "density_g_ml": 0.67
+  },
+  {
+    "description": "Corn/maize, starch, tightly packed",
+    "density_g_ml": 0.63
+  },
+  {
+    "description": "Corn/maize, white, boiled",
+    "density_g_ml": 0.85
+  },
+  {
+    "description": "Corn/maize, white, dry",
+    "density_g_ml": 0.81
+  },
+  {
+    "description": "Corn/maize, whole kernel, dried, cracked (Njenga)",
+    "density_g_ml": 0.81
+  },
+  {
+    "description": "Corn/maize, whole kernel, dried, cracked, boiled (Njenga)",
+    "density_g_ml": 1.07
+  },
+  {
+    "description": "Corn/maize, whole shelled",
+    "density_g_ml": 0.72
+  },
+  {
+    "description": "Donut mix",
+    "density_g_ml": 0.64
+  },
+  {
+    "description": "Dough mix",
+    "density_g_ml": 0.59
+  },
+  {
+    "description": "Finger millet, fermented flour",
+    "density_g_ml": 0.61
+  },
+  {
+    "description": "Millet",
+    "density_g_ml": 0.64
+  },
+  {
+    "description": "Millet",
+    "density_g_ml": 0.64
+  },
+  {
+    "description": "Millet flour, bulrush",
+    "density_g_ml": 0.56
+  },
+  {
+    "description": "Millet flour, finger",
+    "density_g_ml": 0.61
+  },
+  {
+    "description": "Millet, bulrush",
+    "density_g_ml": 0.9
+  },
+  {
+    "description": "Millet, finger",
+    "density_g_ml": 0.81
+  },
+  {
+    "description": "Oat Flour",
+    "density_g_ml": 0.53
+  },
+  {
+    "description": "Oat middlings",
+    "density_g_ml": 0.61
+  },
+  {
+    "description": "Oats",
+    "density_g_ml": 0.41
+  },
+  {
+    "description": "Oats",
+    "density_g_ml": 0.43
+  },
+  {
+    "description": "Oats groats, whole",
+    "density_g_ml": 0.74
+  },
+  {
+    "description": "Oats, ground",
+    "density_g_ml": 0.46
+  },
+  {
+    "description": "Oats, hulls",
+    "density_g_ml": 0.13
+  },
+  {
+    "description": "Oats, rolled",
+    "density_g_ml": 0.33999999999999997
+  },
+  {
+    "description": "Pasta, short macaroni style, boiled",
+    "density_g_ml": 0.55
+  },
+  {
+    "description": "Pasta, short macaroni style, raw",
+    "density_g_ml": 0.39
+  },
+  {
+    "description": "Pasta/ noodles, boiled",
+    "density_g_ml": 0.59
+  },
+  {
+    "description": "Porridge flour bonavist, boiled",
+    "density_g_ml": 0.73
+  },
+  {
+    "description": "Porridge flour bonavist, raw",
+    "density_g_ml": 0.84
+  },
+  {
+    "description": "Porridge flour ken-uji + lemon extract",
+    "density_g_ml": 0.54
+  },
+  {
+    "description": "Porridge flour ken-uji:F.mill, bul, sorg, wheat",
+    "density_g_ml": 0.6
+  },
+  {
+    "description": "Porridge, maize, flour + water",
+    "density_g_ml": 1.05
+  },
+  {
+    "description": "Rice",
+    "density_g_ml": 0.72
+  },
+  {
+    "description": "Rice, boiled",
+    "density_g_ml": 0.73
+  },
+  {
+    "description": "Rice, boiled with fat",
+    "density_g_ml": 0.7
+  },
+  {
+    "description": "Rice, bran",
+    "density_g_ml": 0.42
+  },
+  {
+    "description": "Rice, hulled",
+    "density_g_ml": 0.75
+  },
+  {
+    "description": "Rice, puffed",
+    "density_g_ml": 0.1
+  },
+  {
+    "description": "Rice, raw",
+    "density_g_ml": 0.85
+  },
+  {
+    "description": "Rice, rough",
+    "density_g_ml": 0.58
+  },
+  {
+    "description": "Rice, white, boiled",
+    "density_g_ml": 0.73
+  },
+  {
+    "description": "Rice, white, raw",
+    "density_g_ml": 0.82
+  },
+  {
+    "description": "Rye",
+    "density_g_ml": 0.72
+  },
+  {
+    "description": "Rye, bran",
+    "density_g_ml": 0.28
+  },
+  {
+    "description": "Rye, flour",
+    "density_g_ml": 0.67
+  },
+  {
+    "description": "Rye, malted",
+    "density_g_ml": 0.51
+  },
+  {
+    "description": "Rye, middlings",
+    "density_g_ml": 0.67
+  },
+  {
+    "description": "Rye, shorts",
+    "density_g_ml": 0.54
+  },
+  {
+    "description": "Rye, whole",
+    "density_g_ml": 0.705
+  },
+  {
+    "description": "Semolina, raw",
+    "density_g_ml": 0.78
+  },
+  {
+    "description": "Sorghum, fermented flour",
+    "density_g_ml": 0.54
+  },
+  {
+    "description": "Sorghum, flour",
+    "density_g_ml": 0.54
+  },
+  {
+    "description": "Sorghum, seed",
+    "density_g_ml": 0.535
+  },
+  {
+    "description": "Soy, flour",
+    "density_g_ml": 0.7
+  },
+  {
+    "description": "Soya, flour",
+    "density_g_ml": 0.64
+  },
+  {
+    "description": "Wheat",
+    "density_g_ml": 0.77
+  },
+  {
+    "description": "Wheat, bran",
+    "density_g_ml": 0.22
+  },
+  {
+    "description": "Wheat, cracked",
+    "density_g_ml": 0.56
+  },
+  {
+    "description": "Wheat, cut",
+    "density_g_ml": 0.74
+  },
+  {
+    "description": "Wheat, flour",
+    "density_g_ml": 0.48
+  },
+  {
+    "description": "Wheat, flour",
+    "density_g_ml": 0.58
+  },
+  {
+    "description": "Wheat, flour",
+    "density_g_ml": 0.67
+  },
+  {
+    "description": "Wheat, flour",
+    "density_g_ml": 0.521
+  },
+  {
+    "description": "Wheat, flour, malted",
+    "density_g_ml": 0.66
+  },
+  {
+    "description": "Wheat, flour, white",
+    "density_g_ml": 0.67
+  },
+  {
+    "description": "Wheat, flour, wholemeal",
+    "density_g_ml": 0.55
+  },
+  {
+    "description": "Wheat, gluten",
+    "density_g_ml": 0.69
+  },
+  {
+    "description": "Wheat, hulls",
+    "density_g_ml": 0.7
+  },
+  {
+    "description": "Wheat, middlings",
+    "density_g_ml": 0.24
+  },
+  {
+    "description": "Wheat, shaved",
+    "density_g_ml": 0.54
+  },
+  {
+    "description": "Wheat, whole",
+    "density_g_ml": 0.7749999999999999
+  },
+  {
+    "description": "Whey",
+    "density_g_ml": 0.56
+  },
+  {
+    "description": "Arrowroot/cocoyam, boiled",
+    "density_g_ml": 0.54
+  },
+  {
+    "description": "Arrowroot/cocoyam, raw",
+    "density_g_ml": 0.52
+  },
+  {
+    "description": "Cassava,flour",
+    "density_g_ml": 0.55
+  },
+  {
+    "description": "Cassava, boiled",
+    "density_g_ml": 0.63
+  },
+  {
+    "description": "Cassava, raw",
+    "density_g_ml": 0.63
+  },
+  {
+    "description": "Potato, english, boiled",
+    "density_g_ml": 0.59
+  },
+  {
+    "description": "Potato, english, raw",
+    "density_g_ml": 0.59
+  },
+  {
+    "description": "Potatoes, flakes",
+    "density_g_ml": 0.21
+  },
+  {
+    "description": "Potatoes, powdered",
+    "density_g_ml": 0.77
+  },
+  {
+    "description": "Sweet potato, boiled",
+    "density_g_ml": 0.65
+  },
+  {
+    "description": "Sweet potato, raw",
+    "density_g_ml": 0.44
+  },
+  {
+    "description": "Yam, boiled",
+    "density_g_ml": 0.79
+  },
+  {
+    "description": "Yam, raw",
+    "density_g_ml": 0.66
+  },
+  {
+    "description": "Almonds",
+    "density_g_ml": 0.46
+  },
+  {
+    "description": "Cashews",
+    "density_g_ml": 0.5
+  },
+  {
+    "description": "Coconut Chips",
+    "density_g_ml": 0.61
+  },
+  {
+    "description": "Flaxseed",
+    "density_g_ml": 0.7
+  },
+  {
+    "description": "Nuts",
+    "density_g_ml": 0.63
+  },
+  {
+    "description": "Peanuts",
+    "density_g_ml": 0.53
+  },
+  {
+    "description": "Peanuts, shelled",
+    "density_g_ml": 0.69
+  },
+  {
+    "description": "Peanuts, unshelled",
+    "density_g_ml": 0.325
+  },
+  {
+    "description": "Pistachio, raw, with shell",
+    "density_g_ml": 0.6
+  },
+  {
+    "description": "Pistachio, raw, without shell",
+    "density_g_ml": 0.646
+  },
+  {
+    "description": "Rapeseed",
+    "density_g_ml": 0.77
+  },
+  {
+    "description": "Sunflower, seed",
+    "density_g_ml": 0.62
+  },
+  {
+    "description": "Apple slices, dried",
+    "density_g_ml": 0.24
+  },
+  {
+    "description": "Loquat",
+    "density_g_ml": 0.6
+  },
+  {
+    "description": "Paw Paw, unripe",
+    "density_g_ml": 0.56
+  },
+  {
+    "description": "Alfalfa, leaf, meal",
+    "density_g_ml": 0.23
+  },
+  {
+    "description": "Alfalfa,meal, dehydrated 13%",
+    "density_g_ml": 0.275
+  },
+  {
+    "description": "Alfalfa, meal, dehydrated 17%",
+    "density_g_ml": 0.31999999999999995
+  },
+  {
+    "description": "Alfalfa, meal, fine ground",
+    "density_g_ml": 0.295
+  },
+  {
+    "description": "Alfalfa, meal, suncured 13%",
+    "density_g_ml": 0.22
+  },
+  {
+    "description": "Alfalfa, seed",
+    "density_g_ml": 0.745
+  },
+  {
+    "description": "Alfalfa, stem meal",
+    "density_g_ml": 0.19
+  },
+  {
+    "description": "Carrot, raw, chopped",
+    "density_g_ml": 0.54
+  },
+  {
+    "description": "Carrot, raw, grated",
+    "density_g_ml": 0.71
+  },
+  {
+    "description": "Cauliflower, boiled",
+    "density_g_ml": 0.45
+  },
+  {
+    "description": "Chili, green",
+    "density_g_ml": 0.5
+  },
+  {
+    "description": "Chili, red",
+    "density_g_ml": 0.5
+  },
+  {
+    "description": "French green beans",
+    "density_g_ml": 0.53
+  },
+  {
+    "description": "Fresh green peas (minji)",
+    "density_g_ml": 0.73
+  },
+  {
+    "description": "Leaves, managu, raw (black night shade)",
+    "density_g_ml": 0.2
+  },
+  {
+    "description": "Leaves, onion, spring onion, raw",
+    "density_g_ml": 0.44
+  },
+  {
+    "description": "Corn/maize, green, sweet corn, boiled",
+    "density_g_ml": 0.73
+  },
+  {
+    "description": "Corn/maize, green, sweet corn, raw",
+    "density_g_ml": 0.61
+  },
+  {
+    "description": "Olives, green, with stone",
+    "density_g_ml": 0.65
+  },
+  {
+    "description": "Onions, chopped",
+    "density_g_ml": 0.22
+  },
+  {
+    "description": "Onions, minced",
+    "density_g_ml": 0.13
+  },
+  {
+    "description": "Onions, powdered",
+    "density_g_ml": 0.4
+  },
+  {
+    "description": "Onions, fried, cubed",
+    "density_g_ml": 0.75
+  },
+  {
+    "description": "Onions, raw, cubed",
+    "density_g_ml": 0.55
+  },
+  {
+    "description": "Salad, green, leaves, raw",
+    "density_g_ml": 0.06
+  },
+  {
+    "description": "Spinach, frozen, cooked",
+    "density_g_ml": 1.046
+  },
+  {
+    "description": "Spinach, leaves, raw",
+    "density_g_ml": 0.08
+  },
+  {
+    "description": "Sweet pepper, raw, cubes",
+    "density_g_ml": 0.51
+  },
+  {
+    "description": "Sweet pepper, raw, half rings",
+    "density_g_ml": 0.39
+  },
+  {
+    "description": "Beans, white",
+    "density_g_ml": 0.73
+  },
+  {
+    "description": "Cowpeas",
+    "density_g_ml": 0.72
+  },
+  {
+    "description": "Cowpeas, dried, boiled",
+    "density_g_ml": 0.75
+  },
+  {
+    "description": "Cowpeas, dried, raw",
+    "density_g_ml": 0.96
+  },
+  {
+    "description": "Greengram, boiled",
+    "density_g_ml": 0.76
+  },
+  {
+    "description": "Greengram, raw",
+    "density_g_ml": 0.79
+  },
+  {
+    "description": "Kidney beans, dry, boiled",
+    "density_g_ml": 0.79
+  },
+  {
+    "description": "Kidney beans, dry, raw",
+    "density_g_ml": 0.75
+  },
+  {
+    "description": "Kidney beans, green, boiled",
+    "density_g_ml": 0.7
+  },
+  {
+    "description": "Kidney beans, green, raw",
+    "density_g_ml": 0.68
+  },
+  {
+    "description": "Lentils, green, small, boiled",
+    "density_g_ml": 0.85
+  },
+  {
+    "description": "Lentils, green, small, raw",
+    "density_g_ml": 0.89
+  },
+  {
+    "description": "Pigeon peas, boiled",
+    "density_g_ml": 0.75
+  },
+  {
+    "description": "Pigeon peas, raw",
+    "density_g_ml": 0.84
+  },
+  {
+    "description": "Soybean",
+    "density_g_ml": 0.74
+  },
+  {
+    "description": "Soybean, flakes",
+    "density_g_ml": 0.58
+  },
+  {
+    "description": "Soybean, hulls",
+    "density_g_ml": 0.4
+  },
+  {
+    "description": "Soybean, meal",
+    "density_g_ml": 0.64
+  },
+  {
+    "description": "Soybean, boiled",
+    "density_g_ml": 0.79
+  },
+  {
+    "description": "Soybean, boiled with fat",
+    "density_g_ml": 0.7
+  },
+  {
+    "description": "Cinnamon, powder",
+    "density_g_ml": 0.56
+  },
+  {
+    "description": "Clover, seed",
+    "density_g_ml": 0.77
+  },
+  {
+    "description": "Dry flavoring mix Roiko and other flavorings",
+    "density_g_ml": 0.7
+  },
+  {
+    "description": "Garlic, flakes",
+    "density_g_ml": 0.35
+  },
+  {
+    "description": "Garlic, powder",
+    "density_g_ml": 0.32
+  },
+  {
+    "description": "Sage, leaves",
+    "density_g_ml": 0.29
+  },
+  {
+    "description": "Spice, barbecue",
+    "density_g_ml": 0.48
+  },
+  {
+    "description": "Spice, blend",
+    "density_g_ml": 0.58
+  },
+  {
+    "description": "Prawns, whole, boiled, with shell",
+    "density_g_ml": 0.58
+  },
+  {
+    "description": "Prawns, whole, boiled, without shell",
+    "density_g_ml": 0.77
+  },
+  {
+    "description": "Egg, yoke, powder",
+    "density_g_ml": 0.37
+  },
+  {
+    "description": "Egg, chicken, boiled/poached",
+    "density_g_ml": 0.6
+  },
+  {
+    "description": "Eggs, powdered",
+    "density_g_ml": 0.35
+  },
+  {
+    "description": "Blood, flour",
+    "density_g_ml": 0.48
+  },
+  {
+    "description": "Blood, meal",
+    "density_g_ml": 0.62
+  },
+  {
+    "description": "Bone and meat meal, loose",
+    "density_g_ml": 0.72
+  },
+  {
+    "description": "Bone meal, loose",
+    "density_g_ml": 0.88
+  },
+  {
+    "description": "Cow intestine, boiled",
+    "density_g_ml": 0.58
+  },
+  {
+    "description": "Cow, lean, no bone, raw",
+    "density_g_ml": 0.96
+  },
+  {
+    "description": "Cow, intestine, raw",
+    "density_g_ml": 0.93
+  },
+  {
+    "description": "Goat, intestine, boiled",
+    "density_g_ml": 0.56
+  },
+  {
+    "description": "Goat, intestine, raw",
+    "density_g_ml": 0.83
+  },
+  {
+    "description": "Pork, fatty, with bone, boiled",
+    "density_g_ml": 0.63
+  },
+  {
+    "description": "Pork, fatty, with bone, raw",
+    "density_g_ml": 0.97
+  },
+  {
+    "description": "Pork, medium, with bone, boiled",
+    "density_g_ml": 0.7
+  },
+  {
+    "description": "Pork, medium, with bone, raw",
+    "density_g_ml": 0.93
+  },
+  {
+    "description": "Potato chips",
+    "density_g_ml": 0.09
+  },
+  {
+    "description": "Potato chips, pringles",
+    "density_g_ml": 0.12
+  },
+  {
+    "description": "Snacks, puffed, lowfat",
+    "density_g_ml": 0.11
+  },
+  {
+    "description": "Glucolin, glucose",
+    "density_g_ml": 0.4
+  },
+  {
+    "description": "Glucose (at 15.6 C)",
+    "density_g_ml": 1.395
+  },
+  {
+    "description": "Jam",
+    "density_g_ml": 1.333
+  },
+  {
+    "description": "Jam, sweetened",
+    "density_g_ml": 1.43
+  },
+  {
+    "description": "Jelly",
+    "density_g_ml": 1.245
+  },
+  {
+    "description": "Nutella",
+    "density_g_ml": 1.26
+  },
+  {
+    "description": "Sucrose",
+    "density_g_ml": 0.85
+  },
+  {
+    "description": "Sucrose Octoacetate",
+    "density_g_ml": 0.53
+  },
+  {
+    "description": "Sugar",
+    "density_g_ml": 0.95
+  },
+  {
+    "description": "Sugar, dextrose",
+    "density_g_ml": 0.62
+  },
+  {
+    "description": "Sugar, dextrose",
+    "density_g_ml": 0.58
+  },
+  {
+    "description": "Sugar, granulated",
+    "density_g_ml": 0.7
+  },
+  {
+    "description": "Sugar, powdered",
+    "density_g_ml": 0.56
+  },
+  {
+    "description": "Sugar, white",
+    "density_g_ml": 0.9
+  },
+  {
+    "description": "Sugar, white",
+    "density_g_ml": 0.88
+  },
+  {
+    "description": "Syrup, blackcurrant, undiluted",
+    "density_g_ml": 1.28
+  },
+  {
+    "description": "Syrup, corn",
+    "density_g_ml": 1.38
+  },
+  {
+    "description": "Syrup, corn, light",
+    "density_g_ml": 1.4
+  },
+  {
+    "description": "Syrup, fruit, blackberry",
+    "density_g_ml": 1.34
+  },
+  {
+    "description": "Syrup, grenadine",
+    "density_g_ml": 1.18
+  },
+  {
+    "description": "Syrup, maple",
+    "density_g_ml": 1.32
+  },
+  {
+    "description": "Syrup, pancake",
+    "density_g_ml": 1.312
+  },
+  {
+    "description": "Baking powder",
+    "density_g_ml": 0.9
+  },
+  {
+    "description": "Gelatin",
+    "density_g_ml": 0.72
+  },
+  {
+    "description": "Monosodium glutamate",
+    "density_g_ml": 1.62
+  },
+  {
+    "description": "Mustard powdered",
+    "density_g_ml": 0.26
+  },
+  {
+    "description": "Protein supplement",
+    "density_g_ml": 0.54
+  },
+  {
+    "description": "Salad dressing",
+    "density_g_ml": 1.1
+  },
+  {
+    "description": "Salt, sodium chloride",
+    "density_g_ml": 2.165
+  },
+  {
+    "description": "Salt, fine table",
+    "density_g_ml": 1.38
+  },
+  {
+    "description": "Salt, granulated",
+    "density_g_ml": 1.28
+  },
+  {
+    "description": "Salt, table",
+    "density_g_ml": 1.217
+  },
+  {
+    "description": "Sauce, soy",
+    "density_g_ml": 1.12
+  },
+  {
+    "description": "Sodium bicarbonate",
+    "density_g_ml": 2.2
+  },
+  {
+    "description": "Vitamin additive",
+    "density_g_ml": 0.66
+  },
+  {
+    "description": "Vitamin compound",
+    "density_g_ml": 0.67
+  },
+  {
+    "description": "Vitamin enrichment",
+    "density_g_ml": 0.64
+  },
+  {
+    "description": "Vitamin mix",
+    "density_g_ml": 0.7
+  },
+  {
+    "description": "Vitamin powder",
+    "density_g_ml": 0.56
+  },
+  {
+    "description": "Yeast",
+    "density_g_ml": 0.95
+  },
+  {
+    "description": "Bean soup",
+    "density_g_ml": 1.054
+  },
+  {
+    "description": "Cheddar cheese soup",
+    "density_g_ml": 1.046
+  },
+  {
+    "description": "Egg drop soup",
+    "density_g_ml": 1.017
+  },
+  {
+    "description": "Mushroom soup",
+    "density_g_ml": 1.017
+  },
+  {
+    "description": "Soup, meat",
+    "density_g_ml": 1.04
+  },
+  {
+    "description": "Soup, mixed",
+    "density_g_ml": 1.05
+  },
+  {
+    "description": "Soup, thick (squash, potato)",
+    "density_g_ml": 1.09
+  },
+  {
+    "description": "Soup, vegetable",
+    "density_g_ml": 0.99
+  },
+  {
+    "description": "Tomato soup",
+    "density_g_ml": 1.017
+  },
+  {
+    "description": "Beef and noodles (no sauce)",
+    "density_g_ml": 0.65
+  },
+  {
+    "description": "Beef and noodles in gravy (mixture)",
+    "density_g_ml": 1.04
+  },
+  {
+    "description": "Beef stew, canned",
+    "density_g_ml": 1.05
+  },
+  {
+    "description": "Beef, noodles and vegetables (no sauce)",
+    "density_g_ml": 0.68
+  },
+  {
+    "description": "Broccoli casserole",
+    "density_g_ml": 0.95
+  },
+  {
+    "description": "Cheese tortellini",
+    "density_g_ml": 1.03
+  },
+  {
+    "description": "Chicken and dumplings (mixture)",
+    "density_g_ml": 1.04
+  },
+  {
+    "description": "Eggplant parmesan",
+    "density_g_ml": 0.83
+  },
+  {
+    "description": "Githeri (muthugo + beans) + meat",
+    "density_g_ml": 0.95
+  },
+  {
+    "description": "Githeri (muthugo + beans) + meat + vegetable + potato/banana",
+    "density_g_ml": 0.99
+  },
+  {
+    "description": "Githeri (muthugo + beans) + onion, boiled with fat",
+    "density_g_ml": 0.98
+  },
+  {
+    "description": "Githeri (muthugo + beans) + potato/banana",
+    "density_g_ml": 0.88
+  },
+  {
+    "description": "Githeri (muthugo + beans) + vegetable",
+    "density_g_ml": 1.04
+  },
+  {
+    "description": "Githeri (muthugo + beans) + vegetable + meat",
+    "density_g_ml": 0.94
+  },
+  {
+    "description": "Githeri + meat",
+    "density_g_ml": 0.75
+  },
+  {
+    "description": "Githeri + meat + vegetable + potato/banana",
+    "density_g_ml": 1.05
+  },
+  {
+    "description": "Githeri + onion, boiled with fat",
+    "density_g_ml": 0.83
+  },
+  {
+    "description": "Githeri + peas",
+    "density_g_ml": 1.04
+  },
+  {
+    "description": "Githeri + potato/banana",
+    "density_g_ml": 1.1
+  },
+  {
+    "description": "Githeri + roots + vegetable",
+    "density_g_ml": 1.13
+  },
+  {
+    "description": "Githeri + vegetable",
+    "density_g_ml": 1.3
+  },
+  {
+    "description": "Githeri + vegetable + meat",
+    "density_g_ml": 0.84
+  },
+  {
+    "description": "Githeri + vegetable + potato/banana",
+    "density_g_ml": 0.95
+  },
+  {
+    "description": "Githeri plain (muthugo + beans + water)",
+    "density_g_ml": 0.98
+  },
+  {
+    "description": "Githeri, beans + vegetable + potatoes",
+    "density_g_ml": 0.93
+  },
+  {
+    "description": "Githeri, maize + peas",
+    "density_g_ml": 0.97
+  },
+  {
+    "description": "Githeri, plain (maize + beans + water)",
+    "density_g_ml": 0.71
+  },
+  {
+    "description": "Gitwero, banana + beans",
+    "density_g_ml": 1.2
+  },
+  {
+    "description": "Gitwero, banana + beans + vegetable",
+    "density_g_ml": 1.2
+  },
+  {
+    "description": "Gitwero, banana + potato + beans",
+    "density_g_ml": 1.04
+  },
+  {
+    "description": "Gitwero, banana + vegetable",
+    "density_g_ml": 1.2
+  },
+  {
+    "description": "Gitwero, banana, boiled with fat",
+    "density_g_ml": 1.19
+  },
+  {
+    "description": "Gitwero, banana/potato",
+    "density_g_ml": 1.3
+  },
+  {
+    "description": "Gitwero, banana/potato + meat",
+    "density_g_ml": 1.08
+  },
+  {
+    "description": "Gitwero, banana/potato + vegetable",
+    "density_g_ml": 1.22
+  },
+  {
+    "description": "Gitwero, root (yam, arrowroot, etc.)",
+    "density_g_ml": 1.14
+  },
+  {
+    "description": "Gitwero, roots + banana",
+    "density_g_ml": 1.03
+  },
+  {
+    "description": "Gitwero, roots + banana",
+    "density_g_ml": 1.03
+  },
+  {
+    "description": "Green bean casserole",
+    "density_g_ml": 0.95
+  },
+  {
+    "description": "Lasagna",
+    "density_g_ml": 1.04
+  },
+  {
+    "description": "Macaroni and cheese, canned",
+    "density_g_ml": 1.0
+  },
+  {
+    "description": "Mataha (Maize stew) (Maize stew), maize + peas",
+    "density_g_ml": 0.86
+  },
+  {
+    "description": "Mataha (maize stew), beans + banana",
+    "density_g_ml": 1.22
+  },
+  {
+    "description": "Mataha (maize stew), beans + banana + potato",
+    "density_g_ml": 1.25
+  },
+  {
+    "description": "Mataha (maize stew), beans + banana + potato + vegetable",
+    "density_g_ml": 1.15
+  },
+  {
+    "description": "Mataha (maize stew), beans + potato/banana + vegetable",
+    "density_g_ml": 1.14
+  },
+  {
+    "description": "Mataha (maize stew), beans + vegetable",
+    "density_g_ml": 1.02
+  },
+  {
+    "description": "Mataha (maize stew), maize + banana",
+    "density_g_ml": 1.09
+  },
+  {
+    "description": "Mataha (maize stew), maize + banana/potato + vegetable",
+    "density_g_ml": 1.1
+  },
+  {
+    "description": "Mataha (maize stew), maize + beans + potato",
+    "density_g_ml": 0.75
+  },
+  {
+    "description": "Mataha (maize stew), maize + beans + potato + vegetable",
+    "density_g_ml": 0.95
+  },
+  {
+    "description": "Mataha (maize stew), maize + beans + potato, boiled with fat",
+    "density_g_ml": 0.75
+  },
+  {
+    "description": "Mataha (maize stew), maize + beans + vegetable + banana",
+    "density_g_ml": 0.7
+  },
+  {
+    "description": "Mataha (maize stew), maize + vegetable",
+    "density_g_ml": 0.9
+  },
+  {
+    "description": "Mataha (maize stew), paw paw",
+    "density_g_ml": 1.33
+  },
+  {
+    "description": "Mexican casserole w/beef, beans, cheese, chips",
+    "density_g_ml": 0.6
+  },
+  {
+    "description": "Mini ravioli, canned",
+    "density_g_ml": 1.05
+  },
+  {
+    "description": "Moussaka",
+    "density_g_ml": 0.85
+  },
+  {
+    "description": "Muthugo (maize without germ and cover) only",
+    "density_g_ml": 0.76
+  },
+  {
+    "description": "Noodles/pasta with fat",
+    "density_g_ml": 0.8
+  },
+  {
+    "description": "Rice + beans",
+    "density_g_ml": 0.75
+  },
+  {
+    "description": "Rice + beans + potato/banana",
+    "density_g_ml": 0.85
+  },
+  {
+    "description": "Rice + meat",
+    "density_g_ml": 0.73
+  },
+  {
+    "description": "Rice + meat + vegetable",
+    "density_g_ml": 0.83
+  },
+  {
+    "description": "Rice + potato/banana",
+    "density_g_ml": 0.8
+  },
+  {
+    "description": "Rice + roots (yam, arrowroot etc.)",
+    "density_g_ml": 0.9
+  },
+  {
+    "description": "Rice + vegetable",
+    "density_g_ml": 0.65
+  },
+  {
+    "description": "Rice + vegetable + potato/banana",
+    "density_g_ml": 0.8
+  },
+  {
+    "description": "Rice, plain (rice + water)",
+    "density_g_ml": 0.7
+  },
+  {
+    "description": "Spaghetti and meat balls, canned",
+    "density_g_ml": 1.04
+  },
+  {
+    "description": "Stew, banana",
+    "density_g_ml": 1.07
+  },
+  {
+    "description": "Stew, banana + potato + vegetable",
+    "density_g_ml": 1.06
+  },
+  {
+    "description": "Stew, beans",
+    "density_g_ml": 1.01
+  },
+  {
+    "description": "Stew, beans/ peas + meat + vegetables",
+    "density_g_ml": 0.94
+  },
+  {
+    "description": "Stew, beans/ peas + vegetables",
+    "density_g_ml": 1.07
+  },
+  {
+    "description": "Stew, meat",
+    "density_g_ml": 1.12
+  },
+  {
+    "description": "Stew, pea + potato/banana",
+    "density_g_ml": 1.1
+  },
+  {
+    "description": "Stew, pea + potato/banana + vegetable",
+    "density_g_ml": 1.22
+  },
+  {
+    "description": "Stew, potato",
+    "density_g_ml": 1.1
+  },
+  {
+    "description": "Stew, potato + beans + vegetable",
+    "density_g_ml": 1.08
+  },
+  {
+    "description": "Stew, vegetable",
+    "density_g_ml": 0.68
+  },
+  {
+    "description": "Stew, vegetable + meat",
+    "density_g_ml": 0.86
+  },
+  {
+    "description": "Stew, vegetable + potato",
+    "density_g_ml": 1.1
+  },
+  {
+    "description": "Stew, vegetable + potato + meat",
+    "density_g_ml": 1.08
+  },
+  {
+    "description": "Stew: eggs + veg",
+    "density_g_ml": 0.68
+  },
+  {
+    "description": "Tuna noodle casserole",
+    "density_g_ml": 0.93
+  },
+  {
+    "description": "Ugali + beans",
+    "density_g_ml": 0.8
+  },
+  {
+    "description": "Ugali + beans + vegetable",
+    "density_g_ml": 0.8
+  },
+  {
+    "description": "Ugali + vegetable, crumbed",
+    "density_g_ml": 0.75
+  },
+  {
+    "description": "Ugali + vegetables, boiled with fat",
+    "density_g_ml": 1.2
+  },
+  {
+    "description": "Ugali, plain (flour + water), crumbed",
+    "density_g_ml": 0.75
+  },
+  {
+    "description": "Wieners and sauerkraut (mixture)",
+    "density_g_ml": 0.61
+  },
+  {
+    "description": "Zesty Italian \u2018\u2018hamburger helper\u2019\u2019",
+    "density_g_ml": 1.04
+  },
+  {
+    "description": "FNDDS 4.1",
+    "density_g_ml": 4.1
+  },
+  {
+    "description": "S&W",
+    "density_g_ml": 10.1016
+  }
+]

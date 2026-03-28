@@ -614,9 +614,13 @@ def download_models_from_s3():
         ('gdino_checkpoints/groundingdino_swint_ogc.pth', '/app/gdino_checkpoints/groundingdino_swint_ogc.pth'),
         ('gdino_checkpoints/groundingdino_swinb_cogcoor.pth', '/app/gdino_checkpoints/groundingdino_swinb_cogcoor.pth'),
         # RAG data files for nutrition analysis
-        ('rag/ap815e.pdf', '/app/data/rag/ap815e.pdf'),
-        ('rag/FNDDS.xlsx', '/app/data/rag/FNDDS.xlsx'),
-        ('rag/CoFID.xlsx', '/app/data/rag/CoFID.xlsx'),
+        # RAG data files — FAO density + USDA calorie FAISS indexes
+        ('rag/fao_faiss.index', '/app/data/rag/fao_faiss.index'),
+        ('rag/fao_density.json', '/app/data/rag/fao_density.json'),
+        ('rag/fao_food_names.json', '/app/data/rag/fao_food_names.json'),
+        ('rag/usda_faiss.index', '/app/data/rag/usda_faiss.index'),
+        ('rag/usda_foods.json', '/app/data/rag/usda_foods.json'),
+        ('rag/usda_food_names.json', '/app/data/rag/usda_food_names.json'),
     ]
     
     print(f"Downloading models from s3://{S3_MODELS_BUCKET}...")

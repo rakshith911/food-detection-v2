@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     # When True and media is video, call Gemini video API once for the whole clip; when False, use Gemini image per frame
     USE_GEMINI_VIDEO_DETECTION: bool = True
     FLORENCE2_MODEL: str = "microsoft/Florence-2-large-ft"  # Use large model for better accuracy (heavier: ~3GB vs ~1GB)
-    METRIC3D_MODEL: str = "metric3d_vit_small"
+    DEPTH_ANYTHING_MODEL: str = "depth-anything/Depth-Anything-V2-Small-hf"  # CPU-friendly small variant
     FLAN_T5_MODEL: str = "google/flan-t5-small"  # Small LLM for text formatting (~300MB)
     caption_type: str = "vqa"  # Florence-2 task type: "caption", "detailed_caption", "more_detailed_caption", "object_detection", "hybrid_detection", "detailed_od", or "vqa" (Visual Question Answering - asks questions about food items)
     
@@ -81,11 +81,21 @@ class Settings(BaseSettings):
     REFERENCE_PLATE_DIAMETER_CM: float = 25.0
     REFERENCE_BOWL_DIAMETER_CM: float = 20.0  # Typical bowl diameter (can vary)
     REFERENCE_OBJECTS: list = ['plate', 'bowl', 'platter', 'dish']  # Objects that can be used for calibration
-    DENSITY_PDF_PATH: Path = Path("/app/data/rag/ap815e.pdf")
-    FNDDS_EXCEL_PATH: Path = Path("/app/data/rag/FNDDS.xlsx")
-    COFID_EXCEL_PATH: Path = Path("/app/data/rag/CoFID.xlsx")
     CALORIE_SIMILARITY_THRESHOLD: float = 0.5
-    
+    # Pre-built FAISS indexes (downloaded from S3 models bucket at startup)
+    FAO_FAISS_PATH: Path = Path("/app/data/rag/fao_faiss.index")
+    FAO_DENSITY_PATH: Path = Path("/app/data/rag/fao_density.json")
+    FAO_NAMES_PATH: Path = Path("/app/data/rag/fao_food_names.json")
+    USDA_FAISS_PATH: Path = Path("/app/data/rag/usda_faiss.index")
+    USDA_FOODS_PATH: Path = Path("/app/data/rag/usda_foods.json")
+    USDA_NAMES_PATH: Path = Path("/app/data/rag/usda_food_names.json")
+    # USDA-derived density index (built from cup/volume portion measurements)
+    USDA_DENSITY_FAISS_PATH: Path = Path("/app/data/rag/usda_density_faiss.index")
+    USDA_DENSITY_PATH: Path = Path("/app/data/rag/usda_density.json")
+    USDA_DENSITY_NAMES_PATH: Path = Path("/app/data/rag/usda_density_names.json")
+    # Number of frames to run Depth Anything V2 on for video (averaged)
+    DEPTH_NUM_FRAMES: int = 3
+
     # External APIs
     GEMINI_API_KEY: Optional[str] = None
     
@@ -125,9 +135,17 @@ class Settings(BaseSettings):
             self.UPLOAD_DIR = root / "data" / "uploads"
             self.OUTPUT_DIR = root / "data" / "outputs"
             self.MODEL_CACHE_DIR = root / "models"
-            self.DENSITY_PDF_PATH = root / "data" / "rag" / "ap815e.pdf"
-            self.FNDDS_EXCEL_PATH = root / "data" / "rag" / "FNDDS.xlsx"
-            self.COFID_EXCEL_PATH = root / "data" / "rag" / "CoFID.xlsx"
+            rag_root = root / "data" / "rag"
+            self.FAO_FAISS_PATH = rag_root / "fao_faiss.index"
+            self.FAO_DENSITY_PATH = rag_root / "fao_density.json"
+            self.FAO_NAMES_PATH = rag_root / "fao_food_names.json"
+            self.USDA_FAISS_PATH = rag_root / "usda_faiss.index"
+            self.USDA_FOODS_PATH = rag_root / "usda_foods.json"
+            self.USDA_NAMES_PATH = rag_root / "usda_food_names.json"
+            usda_data = root.parent.parent.parent.parent / "usda_data"
+            self.USDA_DENSITY_FAISS_PATH = usda_data / "usda_density_faiss.index"
+            self.USDA_DENSITY_PATH = usda_data / "usda_density.json"
+            self.USDA_DENSITY_NAMES_PATH = usda_data / "usda_density_names.json"
         return self
 
     @model_validator(mode="after")
@@ -177,7 +195,7 @@ def init_directories():
         settings.UPLOAD_DIR,
         settings.OUTPUT_DIR,
         settings.MODEL_CACHE_DIR,
-        settings.DENSITY_PDF_PATH.parent,
+        settings.FAO_FAISS_PATH.parent,
     ]
     for dir_path in dirs:
         dir_path.mkdir(parents=True, exist_ok=True)

@@ -37,11 +37,11 @@ for mod in ['torch', 'cv2', 'boto3']:
 # Mock numpy properly (needs to be real numpy for PIL)
 import numpy as np
 
-# Mock SAM2/Florence/Metric3D model manager
+# Mock SAM2/Florence/Depth Anything model manager
 mock_models = MagicMock()
 mock_models.sam2 = MagicMock()
 mock_models.florence2 = (MagicMock(), MagicMock())
-mock_models.metric3d = MagicMock()
+mock_models.depth_anything = (MagicMock(), MagicMock())
 
 # Load config with real GEMINI_API_KEY
 os.environ['GEMINI_API_KEY'] = GEMINI_API_KEY

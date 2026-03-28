@@ -30,7 +30,10 @@ class NutritionVideoPipeline:
     """
     Complete pipeline for video-based nutrition analysis
     """
-    
+
+    # Shared Gemini generation config — temperature=0 for deterministic/reproducible outputs
+    _GEMINI_GEN_CONFIG = {"temperature": 0.0}
+
     def __init__(self, model_manager, config):
             """
             Initialize pipeline with models and configuration
@@ -375,7 +378,7 @@ class NutritionVideoPipeline:
         if not self.config.USE_GEMINI_DETECTION:
             florence_processor, florence_model = self.models.florence2
         video_predictor = self.models.sam2
-        metric3d_model = self.models.metric3d
+        # depth_anything loaded lazily on first use via self.models.depth_anything
         
         # Prepare frame directory for SAM2
         frame_dir = self.config.OUTPUT_DIR / job_id / "frames_temp"
@@ -409,6 +412,8 @@ class NutritionVideoPipeline:
         sam2_to_obj_id = {}  # Map SAM2's internal IDs to our persistent obj_ids
         current_window_start = 0
         caption = None  # Store the caption from Florence-2
+        # Frames collected for post-loop depth estimation: (frame_idx, frame_np, masks_dict)
+        depth_candidate_frames = []
         
         # Process frames
         print(f"\n📹 Processing {len(frames)} frame(s)...")
@@ -702,53 +707,20 @@ class NutritionVideoPipeline:
                         except Exception as e:
                             logger.error(f"[{job_id}] Frame {frame_idx}: SAM2 inference failed: {e}")
                         
-                        # Calibration (if not already calibrated)
-                        if not self.calibration['calibrated']:
-                            logger.info(f"[{job_id}] Frame {frame_idx}: Performing calibration...")
-                            depth_map_meters = self._estimate_depth_metric3d(frame, metric3d_model)
-                            self.calibration['pixels_per_cm'] = self.config.DEFAULT_PIXELS_PER_CM
-                            scene_depths = depth_map_meters[depth_map_meters > 0]
-                            if len(scene_depths) > 0:
-                                self.calibration['reference_plane_depth_m'] = np.median(scene_depths)
-                            else:
-                                self.calibration['reference_plane_depth_m'] = self.config.DEFAULT_REFERENCE_PLANE_DEPTH_M
-                            self.calibration['calibrated'] = True
-                            logger.info(f"[{job_id}] Calibration: {self.calibration['pixels_per_cm']:.2f} px/cm, reference plane at {self.calibration['reference_plane_depth_m']:.3f}m")
-                        else:
-                            # Already calibrated, get depth for this frame
-                            depth_map_meters = self._estimate_depth_metric3d(frame, metric3d_model)
-                        
-                        # Calculate volumes for objects in the detection frame
+                        # Collect masks for this detection frame and upload segmented overlay
                         if relative_idx in video_segments:
-                            # Collect masks for saving/uploading
                             masks_dict = {}
                             for obj_id in video_segments[relative_idx]:
                                 if obj_id in tracked_objects:
                                     mask = video_segments[relative_idx][obj_id][0]
-                                    box = tracked_objects[obj_id]['box']
-                                    label = tracked_objects[obj_id]['label']
-                                    
-                                    # Store mask for saving
                                     masks_dict[obj_id] = mask
-                                    
-                                    volume_metrics = self._calculate_volume_metric3d(mask, depth_map_meters, box, label)
-                                    
-                                    if obj_id not in volume_history:
-                                        volume_history[obj_id] = []
-                                    volume_history[obj_id].append({
-                                        'frame': frame_idx,
-                                        'volume_ml': volume_metrics['volume_ml'],
-                                        'height_cm': volume_metrics['avg_height_cm'],
-                                        'area_cm2': volume_metrics['surface_area_cm2'],
-                                        'diameter_cm': volume_metrics.get('diameter_cm', 0.0)  # Store for batch validation
-                                    })
-                                    logger.info(f"[{job_id}] Frame {frame_idx}: ID{obj_id} ({label}) volume={volume_metrics['volume_ml']:.1f}ml")
-                            
-                            # Save and upload segmented images to S3
+
                             if masks_dict:
                                 self._save_segmentation_masks(frame, masks_dict, tracked_objects, frame_idx, job_id)
-            
-            # No additional processing needed - volumes calculated at each detection frame
+                                # Record frame + masks for depth processing after the loop
+                                depth_candidate_frames.append((frame_idx, frame, masks_dict))
+
+            # No additional processing needed — depth and volume are computed after the loop
             
             print(f"✓ Frame {frame_idx} processing complete")
             sys.stdout.flush()
@@ -762,9 +734,76 @@ class NutritionVideoPipeline:
         
         # Final deduplication: merge tracked objects that are duplicates
         tracked_objects = self._deduplicate_tracked_objects(tracked_objects, volume_history)
-        
+
+        # ----------------------------------------------------------------
+        # Post-loop: Depth Anything V2 on up to DEPTH_NUM_FRAMES frames
+        # then Gemini volume estimation pass
+        # ----------------------------------------------------------------
+        gemini_volume_map = {}  # {label_lower: volume_ml}
+        if depth_candidate_frames and tracked_objects and self.config.GEMINI_API_KEY:
+            num_depth = getattr(self.config, "DEPTH_NUM_FRAMES", 3)
+            # Pick evenly-spaced frames from candidates
+            step = max(1, len(depth_candidate_frames) // num_depth)
+            selected = depth_candidate_frames[::step][:num_depth]
+
+            depth_maps = []
+            best_frame = None
+            best_masks = None
+            best_frame_idx = None
+            for fidx, fframe, fmasks in selected:
+                try:
+                    print(f"  Running Depth Anything V2 on frame {fidx}...")
+                    sys.stdout.flush()
+                    dmap = self._estimate_depth_anything(fframe)
+                    depth_maps.append(dmap)
+                    if best_frame is None:
+                        best_frame = fframe
+                        best_masks = fmasks
+                        best_frame_idx = fidx
+                except Exception as e:
+                    logger.warning(f"[{job_id}] Depth Anything failed on frame {fidx}: {e}")
+
+            if depth_maps and best_frame is not None:
+                # Average depth maps across selected frames for stability
+                avg_depth = np.mean(np.stack(depth_maps, axis=0), axis=0)
+
+                # Create masked depth map image
+                depth_image = self._create_masked_depth_map(
+                    best_frame, avg_depth, best_masks, tracked_objects
+                )
+                # Upload masked depth map to S3
+                self._upload_depth_map_to_s3(job_id, best_frame_idx, depth_image)
+
+                # Use standard plate diameter as scale reference for Gemini prompt
+                plate_diameter_cm = self.config.REFERENCE_PLATE_DIAMETER_CM
+
+                # Second Gemini call: volume estimation
+                gemini_volume_map = self._estimate_volume_from_depth_with_gemini(
+                    best_frame, depth_image, tracked_objects,
+                    plate_diameter_cm, job_id, user_context
+                )
+        else:
+            if not depth_candidate_frames:
+                logger.info(f"[{job_id}] No depth candidate frames — skipping depth/volume pass")
+            elif not self.config.GEMINI_API_KEY:
+                logger.info(f"[{job_id}] No Gemini API key — skipping volume estimation pass")
+
+        # Store Gemini volume estimates on tracked objects
+        for obj_id, obj_data in tracked_objects.items():
+            label_lower = obj_data.get("label", "").lower()
+            vol = gemini_volume_map.get(label_lower)
+            if vol is None:
+                # Try partial match
+                for k, v in gemini_volume_map.items():
+                    if k in label_lower or label_lower in k:
+                        vol = v
+                        break
+            if vol is not None and vol > 0:
+                obj_data["gemini_volume_ml"] = float(vol)
+                logger.info(f"[{job_id}] ID{obj_id} ({obj_data['label']}): Gemini volume = {vol:.1f} ml")
+
         # Compile results
-        print("📊 Compiling results...")
+        print("Compiling results...")
         sys.stdout.flush()
         results = {
             'objects': {},
@@ -838,7 +877,8 @@ class NutritionVideoPipeline:
                 label = obj_data['label']
                 box = obj_data['box']
                 box_area = (box[2] - box[0]) * (box[3] - box[1])
-                area_cm2 = box_area / (self.calibration['pixels_per_cm'] ** 2)
+                px_per_cm = self.calibration['pixels_per_cm'] or self.config.DEFAULT_PIXELS_PER_CM
+                area_cm2 = box_area / (px_per_cm ** 2)
                 g = obj_data.get('gemini_grams')
                 gemini_grams_g = float(g) if g is not None and g > 0 else None
                 q = obj_data.get('gemini_quantity')
@@ -898,8 +938,11 @@ class NutritionVideoPipeline:
                 box = tracked_objects[obj_id].get('box')
                 if box is not None:
                     obj_entry['box'] = box.tolist() if hasattr(box, 'tolist') else list(box)
+                gvol = tracked_objects[obj_id].get('gemini_volume_ml')
+                if gvol is not None and gvol > 0:
+                    obj_entry['gemini_volume_ml'] = float(gvol)
             results['objects'][f"ID{obj_id}_{label}"] = obj_entry
-        
+
         # Add untracked items with estimated volumes to results
         for item in untracked_items:
             obj_id = item['obj_id']
@@ -933,6 +976,9 @@ class NutritionVideoPipeline:
                 box = tracked_objects[obj_id].get('box')
                 if box is not None:
                     obj_entry['box'] = box.tolist() if hasattr(box, 'tolist') else list(box)
+                gvol = tracked_objects[obj_id].get('gemini_volume_ml')
+                if gvol is not None and gvol > 0:
+                    obj_entry['gemini_volume_ml'] = float(gvol)
             results['objects'][f"ID{obj_id}_{label}"] = obj_entry
         
         logger.info(f"[{job_id}] Tracked {len(results['objects'])} objects across all frames ({len(objects_with_volume)} with calculated volumes, {len(results['objects']) - len(objects_with_volume)} with estimated volumes)")
@@ -1060,13 +1106,13 @@ class NutritionVideoPipeline:
         )
         prompt += self._build_user_context_suffix(user_context)
         # Try multiple models (404 if model name not available in this API version)
-        gemini_models_try = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro-vision"]
+        gemini_models_try = ["gemini-pro-latest", "gemini-3.1-pro-preview", "gemini-3-pro-preview", "gemini-3-flash-preview", "gemini-2.5-flash"]
         response_text = ""
         for model_name in gemini_models_try:
             try:
                 print(f"  → Calling Gemini for food detection ({model_name})...")
                 sys.stdout.flush()
-                gemini_model = genai.GenerativeModel(model_name)
+                gemini_model = genai.GenerativeModel(model_name, generation_config=self._GEMINI_GEN_CONFIG)
                 response = gemini_model.generate_content([prompt, image_pil])
                 response_text = response.text or ""
                 if response_text:
@@ -3000,23 +3046,197 @@ class NutritionVideoPipeline:
         
         return intersection / union if union > 0 else 0
     
-    def _estimate_depth_metric3d(self, frame_np, model):
-        """Estimate depth using Metric3D (returns meters)"""
-        rgb_input = torch.from_numpy(frame_np).permute(2, 0, 1).unsqueeze(0).float().to(self.device)
-        
+    def _estimate_depth_anything(self, frame_np):
+        """
+        Estimate relative depth using Depth Anything V2 Small.
+        Returns a float32 numpy array (H x W) normalised to [0, 1]
+        where 1 = closest to camera, 0 = furthest.
+        """
+        processor, model = self.models.depth_anything
+        frame_pil = Image.fromarray(cv2.cvtColor(frame_np, cv2.COLOR_BGR2RGB))
+        inputs = processor(images=frame_pil, return_tensors="pt")
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
         with torch.no_grad():
-            pred_depth, confidence, output_dict = model.inference({'input': rgb_input})
-        
-        depth_map_meters = pred_depth.squeeze().cpu().numpy()
-        
-        # Resize if needed
-        if depth_map_meters.shape != frame_np.shape[:2]:
-            depth_map_meters = cv2.resize(
-                depth_map_meters, (frame_np.shape[1], frame_np.shape[0]),
-                interpolation=cv2.INTER_LINEAR
+            outputs = model(**inputs)
+            predicted_depth = outputs.predicted_depth  # (1, H, W)
+
+        depth = predicted_depth.squeeze().cpu().numpy()
+
+        # Resize to original frame resolution
+        if depth.shape != frame_np.shape[:2]:
+            depth = cv2.resize(depth, (frame_np.shape[1], frame_np.shape[0]),
+                               interpolation=cv2.INTER_LINEAR)
+
+        # Normalise to [0, 1]: higher value = closer to camera
+        d_min, d_max = depth.min(), depth.max()
+        if d_max - d_min > 1e-6:
+            depth = (depth - d_min) / (d_max - d_min)
+        else:
+            depth = np.zeros_like(depth)
+
+        return depth.astype(np.float32)
+
+    def _create_masked_depth_map(self, frame_np, depth_map, masks_dict, tracked_objects):
+        """
+        Overlay SAM2 masks onto the depth map to create a masked depth image.
+        Background is dark; each food-item region shows its relative depth
+        coloured with the viridis colourmap.
+
+        Returns a PIL Image suitable for sending to Gemini.
+        """
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        h, w = depth_map.shape
+        # RGBA canvas — transparent background
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+
+        cmap = plt.get_cmap("viridis")
+        for obj_id, mask in masks_dict.items():
+            if mask is None:
+                continue
+            mask_bool = mask.astype(bool)
+            # Map depth values through colourmap
+            depth_vals = depth_map[mask_bool]  # float32 [0,1]
+            colours = cmap(depth_vals)          # (N, 4) RGBA float
+            rgba[mask_bool] = (colours * 255).astype(np.uint8)
+
+        # Blend with a dim copy of the original frame for context
+        original_rgb = cv2.cvtColor(frame_np, cv2.COLOR_BGR2RGB)
+        # Darken non-masked area
+        dim_bg = (original_rgb * 0.15).astype(np.uint8)
+        output_rgb = dim_bg.copy()
+        any_mask = rgba[:, :, 3] > 0
+        output_rgb[any_mask] = rgba[any_mask, :3]
+
+        return Image.fromarray(output_rgb)
+
+    def _upload_depth_map_to_s3(self, job_id: str, frame_idx: int, depth_image: "Image"):
+        """Upload masked depth map PNG to S3 under depth_maps/{job_id}/."""
+        if not S3_RESULTS_BUCKET:
+            logger.info(f"[{job_id}] S3_RESULTS_BUCKET not set — skipping depth map upload")
+            return None
+        try:
+            import io
+            buf = io.BytesIO()
+            depth_image.save(buf, format="PNG")
+            buf.seek(0)
+            frame_folder = f"frame_{frame_idx:05d}"
+            s3_key = f"depth_maps/{job_id}/{frame_folder}/masked_depth.png"
+            s3.put_object(
+                Bucket=S3_RESULTS_BUCKET,
+                Key=s3_key,
+                Body=buf,
+                ContentType="image/png",
             )
-        
-        return depth_map_meters
+            logger.info(f"[{job_id}] Uploaded depth map to s3://{S3_RESULTS_BUCKET}/{s3_key}")
+            return s3_key
+        except Exception as e:
+            logger.error(f"[{job_id}] Failed to upload depth map: {e}")
+            return None
+
+    def _estimate_volume_from_depth_with_gemini(
+        self,
+        frame_np,
+        depth_image,
+        tracked_objects,
+        plate_diameter_cm: float,
+        job_id: str,
+        user_context: dict = None,
+    ) -> dict:
+        """
+        Second Gemini pass: send original image + masked depth map.
+        Ask Gemini to estimate volume in ml per food ingredient.
+        Returns {label: volume_ml} dict.
+        """
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=self.config.GEMINI_API_KEY)
+        except Exception as e:
+            logger.warning(f"[{job_id}] Gemini volume pass: init failed: {e}")
+            return {}
+
+        labels = [obj["label"] for obj in tracked_objects.values()]
+        if not labels:
+            return {}
+
+        food_list = ", ".join(f'"{l}"' for l in labels)
+        scale_note = (
+            f"For scale reference, the plate/bowl in the image has an estimated diameter of "
+            f"{plate_diameter_cm:.1f} cm."
+            if plate_diameter_cm > 0
+            else "No plate or bowl was detected; use your best visual judgement for scale."
+        )
+
+        prompt = (
+            "You are given TWO images of the same food dish:\n"
+            "  Image 1: the original photo taken by the user.\n"
+            "  Image 2: a masked depth map of the same dish — brighter / yellow-green areas "
+            "are closer to the camera, darker / purple areas are further away. Each coloured "
+            "region corresponds to a separate food item that has been segmented.\n\n"
+            f"{scale_note}\n\n"
+            f"The detected food items are: {food_list}.\n\n"
+            "Using the 3-D shape information visible in the depth map together with the "
+            "original image, estimate the volume in millilitres (ml) for each food item. "
+            "Consider the surface area of each coloured region and its apparent height/depth "
+            "to compute a volume. Be realistic — a typical restaurant portion of rice is "
+            "150–250 ml, a chicken breast 200–300 ml, a sauce 30–60 ml.\n\n"
+        )
+        prompt += self._build_user_context_suffix(user_context)
+        prompt += (
+            "\nReturn ONLY valid JSON — an array of objects:\n"
+            '[{"name": "<food item>", "volume_ml": <number>}, ...]\n'
+            "Include every item from the detected list. No extra text."
+        )
+
+        original_pil = Image.fromarray(cv2.cvtColor(frame_np, cv2.COLOR_BGR2RGB))
+        gemini_models = ["gemini-pro-latest", "gemini-3.1-pro-preview", "gemini-3-pro-preview", "gemini-3-flash-preview", "gemini-2.5-flash"]
+        response_text = ""
+        for model_name in gemini_models:
+            try:
+                print(f"  Calling Gemini for volume estimation ({model_name})...")
+                sys.stdout.flush()
+                gm = genai.GenerativeModel(model_name, generation_config=self._GEMINI_GEN_CONFIG)
+                response = gm.generate_content([prompt, original_pil, depth_image])
+                response_text = response.text or ""
+                if response_text:
+                    break
+            except Exception as e:
+                logger.warning(f"[{job_id}] Gemini volume {model_name} failed: {e}")
+
+        if not response_text:
+            logger.warning(f"[{job_id}] Gemini volume estimation failed — using empty volumes")
+            return {}
+
+        # Parse JSON
+        try:
+            if "```json" in response_text:
+                s = response_text.find("```json") + 7
+                e_idx = response_text.find("```", s)
+                json_str = response_text[s:e_idx].strip()
+            elif "```" in response_text:
+                s = response_text.find("```") + 3
+                e_idx = response_text.find("```", s)
+                json_str = response_text[s:e_idx].strip()
+            else:
+                s = response_text.find("[")
+                e_idx = response_text.rfind("]") + 1
+                json_str = response_text[s:e_idx] if s >= 0 else ""
+
+            data = json.loads(json_str)
+            volumes = {}
+            for item in data:
+                name = (item.get("name") or "").strip().lower()
+                vol = item.get("volume_ml")
+                if name and vol is not None:
+                    volumes[name] = float(vol)
+            logger.info(f"[{job_id}] Gemini volume estimates: {volumes}")
+            return volumes
+        except Exception as e:
+            logger.warning(f"[{job_id}] Gemini volume JSON parse failed: {e}")
+            return {}
     
     def _calibrate_from_reference_object(self, ref_box, depth_map_meters, frame_width, ref_type='plate'):
         """
@@ -4160,72 +4380,91 @@ Example:
             return tracking_results
     
     def _analyze_nutrition(self, tracking_results, job_id):
-        """Run nutrition analysis using RAG system"""
+        """
+        Nutrition analysis pipeline:
+          1. Gemini volume (from depth pass) x FAO density -> mass_g
+          2. USDA RAG -> kcal/100g -> total_kcal
+          3. Fallback to Gemini detection grams if no volume available
+        """
         logger.info(f"[{job_id}] Running nutrition analysis...")
-        
-        # Step 1 & 2: Deduplicate and combine items in one Gemini call (optimized)
+
+        # Deduplicate and combine items
         if self.config.GEMINI_API_KEY:
             tracking_results = self._deduplicate_and_combine_with_gemini(tracking_results, job_id)
-        
+
         rag = self.models.rag
-        
+
+        import re as _re
+        # Use whole-word matching to avoid false positives like
+        # 'mat' → 'kalamata', 'table' → 'vegetable', 'cup' → 'cupcake'
         skip_keywords = [
             'plate', 'platter', 'fork', 'knife', 'spoon', 'glass', 'cup', 'mug', 'bottle',
-            'table', 'bowl', 'water', 'sprinkle', 'surface', 'wooden', 'board', 'cutting board',
-            'background', 'setting', 'scene', 'some other', 'other objects', 'object',
-            'container', 'napkin', 'tissue', 'placemat', 'mat'
+            'dining table', 'bowl', 'water', 'sprinkle', 'surface', 'wooden', 'board',
+            'cutting board', 'background', 'setting', 'scene', 'some other', 'other objects',
+            'container', 'napkin', 'tissue', 'placemat',
         ]
-        
+        _skip_re = _re.compile(
+            r'\b(' + '|'.join(_re.escape(k) for k in skip_keywords) + r')\b'
+        )
+
         nutrition_items = []
         total_food_volume = 0
         total_mass = 0
         total_calories = 0
-        
+
         for item_key, item_data in tracking_results['objects'].items():
             try:
                 label = item_data['label']
                 max_volume = item_data['statistics']['max_volume_ml']
 
-                # Skip non-food items
-                if any(keyword in label.lower() for keyword in skip_keywords):
+                # Skip non-food items (whole-word match to avoid false positives)
+                if _skip_re.search(label.lower()):
+                    logger.info(f"[{job_id}] Skipping non-food item: '{label}'")
                     continue
 
-                gemini_grams_g = item_data['statistics'].get('gemini_grams_g')
-                gemini_kcal = item_data['statistics'].get('gemini_kcal')
                 quantity = item_data['statistics'].get('quantity', 1)
                 if quantity is None or quantity < 1:
                     quantity = 1
 
-                # When we have both mass and calories from Gemini, use them and skip RAG
-                if gemini_kcal is not None and gemini_kcal > 0 and gemini_grams_g is not None and gemini_grams_g > 0:
-                    mass_g = float(gemini_grams_g)
-                    total_kcal = float(gemini_kcal)
-                    calories_per_100g = (total_kcal / mass_g) * 100.0 if mass_g else 0.0
-                    q = max(1, int(quantity))
-                    display_name = f"{q} × {label}" if q > 1 else label
+                # Priority 1: Gemini volume estimate (from depth pass) + FAO density + USDA kcal
+                gemini_volume_ml = item_data.get('gemini_volume_ml')
+                if gemini_volume_ml and gemini_volume_ml > 0:
+                    density, fao_match, fao_src = rag._get_density_with_match(label)
+                    kcal_per_100g, usda_match, usda_src = rag._get_calories_with_match(label)
+                    mass_g = gemini_volume_ml * density
+                    total_kcal = (mass_g / 100.0) * kcal_per_100g
                     nutrition = {
                         'food_name': label,
-                        'quantity': q,
-                        'volume_ml': max_volume,
-                        'density_g_per_ml': 0.0,
-                        'density_source': 'gemini',
+                        'quantity': int(quantity),
+                        'volume_ml': gemini_volume_ml,
+                        'density_g_per_ml': density,
+                        'density_source': fao_src,
+                        'density_matched': fao_match,
                         'density_similarity': 1.0,
-                        'mass_g': mass_g,
-                        'calories_per_100g': calories_per_100g,
-                        'total_calories': total_kcal,
-                        'calorie_source': 'gemini',
+                        'mass_g': round(mass_g, 1),
+                        'calories_per_100g': round(kcal_per_100g, 1),
+                        'total_calories': round(total_kcal, 1),
+                        'calorie_source': usda_src,
+                        'calorie_matched': usda_match,
                         'calorie_similarity': 1.0,
-                        'matched_food': label
+                        'matched_food': label,
                     }
-                    logger.info(f"[{job_id}] Using Gemini nutrition for '{display_name}': {mass_g:.1f}g, {total_kcal:.0f} kcal (no RAG)")
+                    logger.info(
+                        f"[{job_id}] '{label}': volume={gemini_volume_ml:.1f}ml "
+                        f"density={density:.3f}[{fao_match}] mass={mass_g:.1f}g "
+                        f"kcal={total_kcal:.0f}[{usda_match}] [depth+FAO+USDA]"
+                    )
+
                 else:
-                    # Use RAG: Gemini mass when available; calories from RAG unless we have gemini_kcal
-                    nutrition = rag.get_nutrition_for_food(label, max_volume, mass_g=gemini_grams_g, quantity=quantity)
-                    if gemini_kcal is not None and gemini_kcal > 0:
-                        nutrition['total_calories'] = float(gemini_kcal)
-                        nutrition['calorie_source'] = 'gemini'
-                        if nutrition.get('mass_g') and nutrition['mass_g'] > 0:
-                            nutrition['calories_per_100g'] = (float(gemini_kcal) / nutrition['mass_g']) * 100.0
+                    # Priority 2: fallback to Gemini detection grams + USDA kcal
+                    gemini_grams_g = item_data['statistics'].get('gemini_grams_g')
+                    nutrition = rag.get_nutrition_for_food(
+                        label, max_volume, mass_g=gemini_grams_g, quantity=quantity
+                    )
+                    logger.info(
+                        f"[{job_id}] '{label}': fallback mass={nutrition.get('mass_g', 0):.1f}g "
+                        f"kcal={nutrition.get('total_calories', 0):.0f} [gemini_grams+USDA]"
+                    )
 
                 item_mass = float(nutrition.get('mass_g') or 0.0)
                 item_calories = float(nutrition.get('total_calories') or 0.0)
@@ -4233,7 +4472,7 @@ Example:
                 nutrition['total_calories'] = item_calories
 
                 nutrition_items.append(nutrition)
-                total_food_volume += max_volume
+                total_food_volume += float(nutrition.get('volume_ml') or max_volume)
                 total_mass += item_mass
                 total_calories += item_calories
             except Exception as e:
