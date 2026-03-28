@@ -303,19 +303,13 @@ def load_depth_anything(model_name: str = "depth-anything/Depth-Anything-V2-Smal
 
 
 def load_nutrition_rag(
-    fao_faiss_path: Path,
-    fao_density_path: Path,
-    fao_names_path: Path,
-    usda_faiss_path: Path,
-    usda_foods_path: Path,
-    usda_names_path: Path,
-    usda_density_faiss_path: Path = None,
-    usda_density_path: Path = None,
-    usda_density_names_path: Path = None,
+    unified_faiss_path: Path,
+    unified_foods_path: Path,
+    unified_food_names_path: Path,
     gemini_api_key: str = None,
 ):
     """
-    Load and initialize Nutrition RAG system using pre-built FAISS indexes.
+    Load and initialize Nutrition RAG system using unified FAISS index (FAO+USDA+CoFID).
 
     Returns:
         Initialized NutritionRAG instance
@@ -333,15 +327,9 @@ def load_nutrition_rag(
     from nutrition_rag_system import NutritionRAG
 
     rag = NutritionRAG(
-        fao_faiss_path=fao_faiss_path,
-        fao_density_path=fao_density_path,
-        fao_names_path=fao_names_path,
-        usda_faiss_path=usda_faiss_path,
-        usda_foods_path=usda_foods_path,
-        usda_names_path=usda_names_path,
-        usda_density_faiss_path=usda_density_faiss_path,
-        usda_density_path=usda_density_path,
-        usda_density_names_path=usda_density_names_path,
+        unified_faiss_path=unified_faiss_path,
+        unified_foods_path=unified_foods_path,
+        unified_food_names_path=unified_food_names_path,
         gemini_api_key=gemini_api_key,
     )
     rag.load()
@@ -416,12 +404,10 @@ class ModelManager:
         """Lazy load NutritionRAG"""
         if self._rag is None:
             self._rag = load_nutrition_rag(
-                fao_faiss_path=self.config.FAO_FAISS_PATH,
-                fao_density_path=self.config.FAO_DENSITY_PATH,
-                fao_names_path=self.config.FAO_NAMES_PATH,
-                usda_faiss_path=self.config.USDA_FAISS_PATH,
-                usda_foods_path=self.config.USDA_FOODS_PATH,
-                usda_names_path=self.config.USDA_NAMES_PATH,
+                unified_faiss_path=self.config.UNIFIED_FAISS_PATH,
+                unified_foods_path=self.config.UNIFIED_FOODS_PATH,
+                unified_food_names_path=self.config.UNIFIED_FOOD_NAMES_PATH,
+                gemini_api_key=self.config.GEMINI_API_KEY,
             )
         return self._rag
 

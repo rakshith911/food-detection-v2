@@ -82,17 +82,10 @@ class Settings(BaseSettings):
     REFERENCE_BOWL_DIAMETER_CM: float = 20.0  # Typical bowl diameter (can vary)
     REFERENCE_OBJECTS: list = ['plate', 'bowl', 'platter', 'dish']  # Objects that can be used for calibration
     CALORIE_SIMILARITY_THRESHOLD: float = 0.5
-    # Pre-built FAISS indexes (downloaded from S3 models bucket at startup)
-    FAO_FAISS_PATH: Path = Path("/app/data/rag/fao_faiss.index")
-    FAO_DENSITY_PATH: Path = Path("/app/data/rag/fao_density.json")
-    FAO_NAMES_PATH: Path = Path("/app/data/rag/fao_food_names.json")
-    USDA_FAISS_PATH: Path = Path("/app/data/rag/usda_faiss.index")
-    USDA_FOODS_PATH: Path = Path("/app/data/rag/usda_foods.json")
-    USDA_NAMES_PATH: Path = Path("/app/data/rag/usda_food_names.json")
-    # USDA-derived density index (built from cup/volume portion measurements)
-    USDA_DENSITY_FAISS_PATH: Path = Path("/app/data/rag/usda_density_faiss.index")
-    USDA_DENSITY_PATH: Path = Path("/app/data/rag/usda_density.json")
-    USDA_DENSITY_NAMES_PATH: Path = Path("/app/data/rag/usda_density_names.json")
+    # Unified FAISS index (FAO + USDA + CoFID combined)
+    UNIFIED_FAISS_PATH: Path = Path("/app/data/rag/unified_faiss.index")
+    UNIFIED_FOODS_PATH: Path = Path("/app/data/rag/unified_foods.json")
+    UNIFIED_FOOD_NAMES_PATH: Path = Path("/app/data/rag/unified_food_names.json")
     # Number of frames to run Depth Anything V2 on for video (averaged)
     DEPTH_NUM_FRAMES: int = 3
 
@@ -135,17 +128,10 @@ class Settings(BaseSettings):
             self.UPLOAD_DIR = root / "data" / "uploads"
             self.OUTPUT_DIR = root / "data" / "outputs"
             self.MODEL_CACHE_DIR = root / "models"
-            rag_root = root / "data" / "rag"
-            self.FAO_FAISS_PATH = rag_root / "fao_faiss.index"
-            self.FAO_DENSITY_PATH = rag_root / "fao_density.json"
-            self.FAO_NAMES_PATH = rag_root / "fao_food_names.json"
-            self.USDA_FAISS_PATH = rag_root / "usda_faiss.index"
-            self.USDA_FOODS_PATH = rag_root / "usda_foods.json"
-            self.USDA_NAMES_PATH = rag_root / "usda_food_names.json"
-            usda_data = root.parent.parent.parent.parent / "usda_data"
-            self.USDA_DENSITY_FAISS_PATH = usda_data / "usda_density_faiss.index"
-            self.USDA_DENSITY_PATH = usda_data / "usda_density.json"
-            self.USDA_DENSITY_NAMES_PATH = usda_data / "usda_density_names.json"
+            unified_data = root.parent.parent.parent.parent / "unified_data"
+            self.UNIFIED_FAISS_PATH = unified_data / "unified_faiss.index"
+            self.UNIFIED_FOODS_PATH = unified_data / "unified_foods.json"
+            self.UNIFIED_FOOD_NAMES_PATH = unified_data / "unified_food_names.json"
         return self
 
     @model_validator(mode="after")

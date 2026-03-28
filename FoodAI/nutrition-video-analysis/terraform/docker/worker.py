@@ -613,14 +613,10 @@ def download_models_from_s3():
         ('checkpoints/sam2.1_hiera_tiny.pt', '/app/checkpoints/sam2.1_hiera_tiny.pt'),
         ('gdino_checkpoints/groundingdino_swint_ogc.pth', '/app/gdino_checkpoints/groundingdino_swint_ogc.pth'),
         ('gdino_checkpoints/groundingdino_swinb_cogcoor.pth', '/app/gdino_checkpoints/groundingdino_swinb_cogcoor.pth'),
-        # RAG data files for nutrition analysis
-        # RAG data files — FAO density + USDA calorie FAISS indexes
-        ('rag/fao_faiss.index', '/app/data/rag/fao_faiss.index'),
-        ('rag/fao_density.json', '/app/data/rag/fao_density.json'),
-        ('rag/fao_food_names.json', '/app/data/rag/fao_food_names.json'),
-        ('rag/usda_faiss.index', '/app/data/rag/usda_faiss.index'),
-        ('rag/usda_foods.json', '/app/data/rag/usda_foods.json'),
-        ('rag/usda_food_names.json', '/app/data/rag/usda_food_names.json'),
+        # Unified RAG index (FAO + USDA + CoFID combined)
+        ('rag/unified_faiss.index', '/app/data/rag/unified_faiss.index'),
+        ('rag/unified_foods.json', '/app/data/rag/unified_foods.json'),
+        ('rag/unified_food_names.json', '/app/data/rag/unified_food_names.json'),
     ]
     
     print(f"Downloading models from s3://{S3_MODELS_BUCKET}...")

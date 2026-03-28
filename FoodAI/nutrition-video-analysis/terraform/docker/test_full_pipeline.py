@@ -106,15 +106,9 @@ print("\n[1/4] Loading RAG...")
 from nutrition_rag_system import NutritionRAG
 base = '/Users/rakshithmahishi/Documents/food-detection'
 rag = NutritionRAG(
-    fao_faiss_path=f'{base}/fao_data/fao_faiss.index',
-    fao_density_path=f'{base}/fao_data/fao_density.json',
-    fao_names_path=f'{base}/fao_data/fao_food_names.json',
-    usda_faiss_path=f'{base}/usda_data/usda_faiss.index',
-    usda_foods_path=f'{base}/usda_data/usda_foods.json',
-    usda_names_path=f'{base}/usda_data/usda_food_names.json',
-    usda_density_faiss_path=f'{base}/usda_data/usda_density_faiss.index',
-    usda_density_path=f'{base}/usda_data/usda_density.json',
-    usda_density_names_path=f'{base}/usda_data/usda_density_names.json',
+    unified_faiss_path=f'{base}/unified_data/unified_faiss.index',
+    unified_foods_path=f'{base}/unified_data/unified_foods.json',
+    unified_food_names_path=f'{base}/unified_data/unified_food_names.json',
     gemini_api_key=GEMINI_API_KEY,
 )
 rag.load()
