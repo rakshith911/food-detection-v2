@@ -404,6 +404,74 @@ class NutritionRAG:
         return None
 
     # ──────────────────────────────────────────────────────────────────────────
+    # Single-entry lookup: one FAISS search, both fields from the same entry
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _lookup_best_entry(self, food_name: str, top_k: int = 20):
+        """
+        Find the best matching food entry that has BOTH density and calories.
+        Returns (entry, matched_name, sim, source_tag) or (None, None, None, None).
+
+        One FAISS search; density and calories are read from the same DB entry so
+        they are always nutritionally consistent.
+        """
+        normalized = self._normalize_food_name(food_name)
+        raw_lower  = food_name.strip().lower()
+        variants   = list(dict.fromkeys([normalized, raw_lower]))
+
+        hits = self._faiss_search(self._unified_index, variants, top_k)
+
+        candidates = []
+        for idx, sim in hits:
+            if not (0 <= idx < len(self._unified_foods)):
+                continue
+            entry   = self._unified_foods[idx]
+            density = entry.get('density_g_ml')
+            kcal    = entry.get('calories_per_100g')
+            # Must have both fields
+            if density is None or kcal is None:
+                continue
+            matched = self._unified_names[idx] if idx < len(self._unified_names) else ""
+
+            src = entry.get('source', 'usda')
+            min_sim = _MIN_SIM_BY_SOURCE.get(src, _MIN_FAISS_SIM)
+            if sim < min_sim:
+                continue
+
+            if any(sk in matched.lower() for sk in self._SKIP_WORDS):
+                if not any(sk in normalized for sk in self._SKIP_WORDS):
+                    continue
+
+            method = entry.get('density_method', '')
+            if method == 'macro_only' and sim < _MACRO_ONLY_MIN_SIM:
+                continue
+
+            if not self._words_overlap(normalized, matched.lower()):
+                logger.info(f"Skip (no word overlap): '{food_name}' vs '{matched}'")
+                continue
+
+            candidates.append((idx, sim, entry, matched))
+
+        if not candidates:
+            return None, None, None, None
+
+        # Prefer cup-based density within 0.15 of the best sim
+        best_sim = candidates[0][1]
+        cup_candidates = [
+            c for c in candidates
+            if c[2].get('density_method', '') != 'macro_only'
+            and best_sim - c[1] <= 0.15
+        ]
+        if cup_candidates:
+            candidates = cup_candidates
+
+        idx, sim, entry, matched = candidates[0]
+        src = entry.get('source', 'unified')
+        method = entry.get('density_method', 'unknown')
+        source_tag = f"{src}_faiss(sim={sim:.2f}),{method}"
+        return entry, matched, sim, source_tag
+
+    # ──────────────────────────────────────────────────────────────────────────
     # Public API
     # ──────────────────────────────────────────────────────────────────────────
 
@@ -411,7 +479,7 @@ class NutritionRAG:
         return self._get_density_with_match(food_name)[0]
 
     def _get_density_with_match(self, food_name: str, top_k: int = 20):
-        """Return (density_g_ml, matched_name, source)."""
+        """Return (density_g_ml, matched_name, source). Used standalone if needed."""
         if self._use_unified:
             density, matched, source = self._lookup_unified(food_name, 'density_g_ml', top_k)
         else:
@@ -420,7 +488,6 @@ class NutritionRAG:
         if density is not None:
             return float(density), matched, source
 
-        # Gemini grounding fallback
         density = self._gemini_lookup(food_name, 'density_g_ml')
         if density is not None:
             return density, food_name, "gemini_grounding"
@@ -432,7 +499,7 @@ class NutritionRAG:
         return self._get_calories_with_match(food_name)[0]
 
     def _get_calories_with_match(self, food_name: str, top_k: int = 20):
-        """Return (kcal_per_100g, matched_name, source)."""
+        """Return (kcal_per_100g, matched_name, source). Used standalone if needed."""
         if self._use_unified:
             kcal, matched, source = self._lookup_unified(food_name, 'calories_per_100g', top_k)
         else:
@@ -441,7 +508,6 @@ class NutritionRAG:
         if kcal is not None:
             return float(kcal), matched, source
 
-        # Gemini grounding fallback
         kcal = self._gemini_lookup(food_name, 'calories_per_100g')
         if kcal is not None:
             return kcal, food_name, "gemini_grounding"
@@ -450,18 +516,42 @@ class NutritionRAG:
         return 200.0, "fallback", "fallback_default"
 
     def get_nutrition(self, food_name: str, volume_ml: float) -> dict:
-        density       = self.get_density(food_name)
-        kcal_per_100g = self.get_calories_per_100g(food_name)
-        mass_g        = volume_ml * density
-        total_kcal    = (mass_g / 100.0) * kcal_per_100g
+        density, kcal_per_100g, matched, source = self._resolve_nutrition(food_name)
+        mass_g     = volume_ml * density
+        total_kcal = (mass_g / 100.0) * kcal_per_100g
         return {
-            "food_name":        food_name,
-            "volume_ml":        volume_ml,
-            "density_g_per_ml": density,
-            "mass_g":           round(mass_g, 1),
+            "food_name":         food_name,
+            "volume_ml":         volume_ml,
+            "density_g_per_ml":  density,
+            "mass_g":            round(mass_g, 1),
             "calories_per_100g": round(kcal_per_100g, 1),
-            "total_calories":   round(total_kcal, 1),
+            "total_calories":    round(total_kcal, 1),
         }
+
+    def _resolve_nutrition(self, food_name: str):
+        """
+        One FAISS search → density + calories from the SAME entry.
+        Falls back to Gemini grounding per-field only if the entry is missing a value.
+        Returns (density, kcal_per_100g, matched_name, source_tag).
+        """
+        if self._use_unified:
+            entry, matched, sim, source_tag = self._lookup_best_entry(food_name)
+        else:
+            entry, matched, sim, source_tag = None, None, None, None
+
+        if entry is not None:
+            density      = float(entry['density_g_ml'])
+            kcal_per_100g = float(entry['calories_per_100g'])
+            return density, kcal_per_100g, matched, source_tag
+
+        # Unified entry not found — try Gemini for each field independently
+        density = self._gemini_lookup(food_name, 'density_g_ml')
+        kcal    = self._gemini_lookup(food_name, 'calories_per_100g')
+
+        density = density if density is not None else 0.9
+        kcal    = kcal    if kcal    is not None else 200.0
+        src     = "gemini_grounding" if self._gemini_api_key else "fallback_default"
+        return density, kcal, food_name, src
 
     def get_nutrition_for_food(
         self,
@@ -470,19 +560,20 @@ class NutritionRAG:
         mass_g: Optional[float] = None,
         quantity: int = 1,
     ) -> dict:
-        density       = self.get_density(food_name)
-        kcal_per_100g = self.get_calories_per_100g(food_name)
+        density, kcal_per_100g, matched, source_tag = self._resolve_nutrition(food_name)
         if mass_g is None or mass_g <= 0:
             mass_g = volume_ml * density
         total_kcal = (mass_g / 100.0) * kcal_per_100g
         return {
-            "food_name":        food_name,
-            "quantity":         quantity,
-            "volume_ml":        volume_ml,
-            "density_g_per_ml": density,
-            "mass_g":           round(float(mass_g), 1),
+            "food_name":         food_name,
+            "quantity":          quantity,
+            "volume_ml":         volume_ml,
+            "density_g_per_ml":  density,
+            "mass_g":            round(float(mass_g), 1),
             "calories_per_100g": round(kcal_per_100g, 1),
-            "total_calories":   round(total_kcal, 1),
-            "density_source":   "unified_rag",
-            "calorie_source":   "unified_rag",
+            "total_calories":    round(total_kcal, 1),
+            "density_matched":   matched,
+            "density_source":    source_tag,
+            "calorie_matched":   matched,
+            "calorie_source":    source_tag,
         }
