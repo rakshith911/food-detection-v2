@@ -1099,12 +1099,10 @@ class NutritionVideoPipeline:
             "For each ingredient/component:\n"
             "  - name: specific ingredient name (e.g. 'crumble topping', NOT 'apple crumble bar')\n"
             "  - bounding_box: [x_min, y_min, x_max, y_max] — use the whole dish bounding box if the component cannot be individually located\n"
-            "  - estimated_quantity_grams: total edible mass of that component in grams\n"
-            "  - quantity: count (1 for most; use actual count for small items like nuts, berries)\n"
-            "  - estimated_total_kcal: calories for that component\n\n"
-            "Use realistic weights (crumble topping ~60g, apple filling ~80g, pastry base ~50g, sauce ~40g, fish fillet ~100g).\n\n"
+            "  - quantity: count (1 for most; use actual count for small items like nuts, berries)\n\n"
+            "Do not estimate grams, calories, or volume in this step. We calculate nutrition separately after detection.\n\n"
             "Format as JSON: main_food_item, cuisine_type, cooking_method, "
-            "visible_ingredients (array of {name, bounding_box, estimated_quantity_grams, quantity, estimated_total_kcal}), "
+            "visible_ingredients (array of {name, bounding_box, quantity}), "
             "ingredient_breakdown, nutritional_info, allergens, dietary_tags, additional_notes.\n"
             "Output only valid JSON (you may wrap in ```json)."
         )
@@ -1353,10 +1351,10 @@ class NutritionVideoPipeline:
             "For each ingredient/component:\n"
             "  - name: specific ingredient name (e.g. 'crumble topping', NOT 'apple crumble bar')\n"
             "  - bounding_box: [x_min, y_min, x_max, y_max] — use the whole dish bbox if component cannot be individually located\n"
-            "  - estimated_quantity_grams: total edible mass of that component\n"
             "  - quantity: count (1 for most; actual count for small items like nuts, berries)\n\n"
+            "Do not estimate grams, calories, or volume in this step. We calculate nutrition separately after detection.\n\n"
             "Format as JSON: main_food_item, cuisine_type, cooking_method, "
-            "visible_ingredients (array of {name, bounding_box, estimated_quantity_grams, quantity}), "
+            "visible_ingredients (array of {name, bounding_box, quantity}), "
             "ingredient_breakdown, nutritional_info, allergens, dietary_tags, additional_notes.\n"
             "Output only valid JSON (you may wrap in ```json)."
         )
@@ -1490,10 +1488,10 @@ class NutritionVideoPipeline:
             "  - A pizza → 'pizza dough', 'tomato sauce', 'mozzarella', then each topping separately\n"
             "Never use the dish name as an ingredient label. Always name the actual component.\n\n"
             "Format as JSON: main_food_item, cuisine_type, cooking_method, "
-            "visible_ingredients (list of {name, bounding_box [x_min,y_min,x_max,y_max] at 1280x720, estimated_quantity_grams, quantity, timestamp_seconds}), "
+            "visible_ingredients (list of {name, bounding_box [x_min,y_min,x_max,y_max] at 1280x720, quantity, timestamp_seconds}), "
             "ingredient_breakdown, nutritional_info, allergens, dietary_tags, additional_notes.\n"
-            "estimated_quantity_grams: total edible mass of that component. quantity: 1 for most; actual count for small items.\n"
-            "Use realistic weights (crumble topping ~60g, filling ~80g, sauce ~40g, fillet ~100g).\n"
+            "quantity: 1 for most; actual count for small items.\n"
+            "Do not estimate grams, calories, or volume in this step. We calculate nutrition separately after detection, and volume is estimated in a dedicated follow-up pass.\n"
             "Output only valid JSON (you may wrap in ```json)."
         )
         prompt += self._build_user_context_suffix(user_context)
@@ -4516,4 +4514,3 @@ Example:
             result['unquantified_ingredients'] = unique_unquantified
         
         return result
-
