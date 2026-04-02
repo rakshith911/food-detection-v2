@@ -97,10 +97,9 @@ def build_nutrition_prompt(user_context: dict) -> str:
         )
         if hidden_text:
             additions.append(
-                f"The user has indicated that the following ingredients are present but may not be "
-                f"visible in the image: {hidden_text}. "
-                "Include each of these as a separate item in your analysis and estimate their "
-                "calories based on the quantity provided."
+                f"The user has suggested that the following ingredients may be present but not visible: {hidden_text}. "
+                "Treat these as hypotheses to verify against the dish, not as ground truth. "
+                "Only include them if they are genuinely plausible for this meal."
             )
 
     # Extras / cooking additions
@@ -112,8 +111,9 @@ def build_nutrition_prompt(user_context: dict) -> str:
         )
         if extras_text:
             additions.append(
-                f"The user has indicated these extras or cooking additions that add calories: "
-                f"{extras_text}. Include these in your nutritional calculation."
+                f"The user has suggested these extras or cooking additions: {extras_text}. "
+                "Treat these as hypotheses to verify against the dish, not as ground truth. "
+                "Only include the incremental extra amount if it is plausible and not already accounted for in the visible base dish."
             )
 
     # Recipe / menu description
@@ -129,8 +129,8 @@ def build_nutrition_prompt(user_context: dict) -> str:
         for addition in additions:
             prompt += f"- {addition}\n"
         prompt += (
-            "\nFactor all of the above context into your analysis. "
-            "The user-provided information should take priority over what is visible in the image alone.\n"
+            "\nFactor all of the above context into your analysis, but do not blindly trust it. "
+            "Validate questionnaire claims against the meal itself before including them.\n"
         )
 
     return prompt

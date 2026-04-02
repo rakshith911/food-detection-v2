@@ -274,6 +274,8 @@ class MockHistoryAPI extends HistoryAPI {
             },
             mealName: updates.mealName,
             dishContents: updates.dishContents,
+            dishTables: updates.dishTables,
+            questionnaireContext: updates.questionnaireContext,
             segmented_images: updates.segmented_images,
             feedback: updates.feedback,
             job_id: updates.job_id,

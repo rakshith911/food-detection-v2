@@ -71,13 +71,13 @@ class NutritionVideoPipeline:
             
             # Store Florence-2 detection results for debugging
             self.florence_detections = []
+            self.last_questionnaire_verification = []
     
     @staticmethod
     def _build_user_context_suffix(user_context: dict) -> str:
         """Build a prompt suffix from the user's questionnaire answers.
-        NOTE: extras and hidden_ingredients are injected into results separately —
-        do NOT ask Gemini to add them to visible_ingredients here (would duplicate them).
-        Only pass them as context so Gemini improves its overall analysis of the image.
+        Questionnaire answers are hints, not ground truth. Gemini should use them to
+        reason about the dish, but must not blindly assume they are present.
         """
         if not user_context:
             return ""
@@ -90,8 +90,9 @@ class NutritionVideoPipeline:
             )
             if items:
                 lines.append(
-                    f"- Ingredients present but not fully visible in the image: {items}. "
-                    "Use this to improve your understanding of the dish and portion estimates. "
+                    f"- User-reported possibly hidden ingredients: {items}. "
+                    "Treat these as hypotheses to validate against the dish, not as ground truth. "
+                    "Only consider them if they are plausible for this dish. "
                     "Do NOT add these as separate entries in visible_ingredients."
                 )
         extras = user_context.get('extras', [])
@@ -102,8 +103,10 @@ class NutritionVideoPipeline:
             )
             if items:
                 lines.append(
-                    f"- Extras or cooking additions noted by the user: {items}. "
-                    "These will be accounted for separately — do NOT add them as entries in visible_ingredients."
+                    f"- User-reported extras or cooking additions: {items}. "
+                    "Treat these as possible additions to validate against the dish, not as ground truth. "
+                    "Only consider them if they are plausible and not already clearly accounted for in the visible base dish. "
+                    "Do NOT add these as entries in visible_ingredients."
                 )
         recipe = user_context.get('recipe_description', '').strip()
         if recipe:
@@ -116,8 +119,103 @@ class NutritionVideoPipeline:
         return (
             "\n\nADDITIONAL CONTEXT PROVIDED BY THE USER:\n"
             + "\n".join(lines)
+            + "\n- IMPORTANT: The questionnaire is helpful but not guaranteed to be correct. Validate each claim against the detected dish before relying on it.\n"
             + "\n"
         )
+
+    @staticmethod
+    def _normalize_ingredient_name(name: str) -> str:
+        return re.sub(r'\s+', ' ', re.sub(r'[^a-z0-9\s]', ' ', (name or '').lower())).strip()
+
+    @classmethod
+    def _ingredient_names_match(cls, left: str, right: str) -> bool:
+        left_norm = cls._normalize_ingredient_name(left)
+        right_norm = cls._normalize_ingredient_name(right)
+        if not left_norm or not right_norm:
+            return False
+        return (
+            left_norm == right_norm
+            or left_norm in right_norm
+            or right_norm in left_norm
+        )
+
+    def _verify_questionnaire_items_with_gemini(self, detection_data: dict, user_context: dict, job_id: str) -> List[dict]:
+        """Validate questionnaire items against the detected dish before using them."""
+        items_to_check = []
+        for item in user_context.get('hidden_ingredients', []) or []:
+            name = (item.get('name') or '').strip()
+            if name:
+                items_to_check.append({'name': name, 'quantity': item.get('quantity', ''), 'type': 'hidden'})
+        for item in user_context.get('extras', []) or []:
+            name = (item.get('name') or '').strip()
+            if name:
+                items_to_check.append({'name': name, 'quantity': item.get('quantity', ''), 'type': 'extra'})
+
+        if not items_to_check or not self.config.GEMINI_API_KEY:
+            return []
+
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=self.config.GEMINI_API_KEY)
+
+            visible_names = [
+                (ing.get('name') or '').strip()
+                for ing in (detection_data.get('visible_ingredients') or [])
+                if (ing.get('name') or '').strip()
+            ]
+            ingredient_breakdown = detection_data.get('ingredient_breakdown') or []
+            recipe = (user_context.get('recipe_description') or '').strip()
+            context_payload = {
+                'main_food_item': detection_data.get('main_food_item') or '',
+                'cuisine_type': detection_data.get('cuisine_type') or '',
+                'cooking_method': detection_data.get('cooking_method') or '',
+                'visible_ingredients': visible_names,
+                'ingredient_breakdown': ingredient_breakdown,
+                'additional_notes': detection_data.get('additional_notes') or '',
+                'recipe_description': recipe,
+            }
+            prompt = (
+                "You are validating questionnaire ingredient claims against a detected dish. "
+                "The questionnaire is NOT ground truth.\n\n"
+                f"Detected dish context:\n{json.dumps(context_payload, ensure_ascii=True)}\n\n"
+                f"Questionnaire items to validate:\n{json.dumps(items_to_check, ensure_ascii=True)}\n\n"
+                "For each questionnaire item, decide whether it is actually plausible for this dish. "
+                "Also decide whether it is already visible/accounted for in the base dish. "
+                "Return ONLY a JSON array. Each entry must be:\n"
+                "{"
+                "\"name\": str, "
+                "\"type\": \"hidden\"|\"extra\", "
+                "\"quantity\": str, "
+                "\"plausible\": true|false, "
+                "\"confidence\": number, "
+                "\"already_visible\": true|false, "
+                "\"verdict\": \"include\"|\"reject\", "
+                "\"reason\": str, "
+                "\"estimated_grams\": number|null, "
+                "\"estimated_kcal\": number|null"
+                "}\n\n"
+                "Rules:\n"
+                "- Do not blindly trust the questionnaire.\n"
+                "- Reject ingredients that do not fit the dish context.\n"
+                "- If an ingredient is already visible or clearly already counted in the base dish, set already_visible=true.\n"
+                "- For extras, estimated_grams and estimated_kcal must represent only the additional amount described by the questionnaire, not the full base portion.\n"
+                "- Use confidence between 0 and 1.\n"
+                "- Be conservative when uncertain."
+            )
+            model = genai.GenerativeModel("gemini-2.0-flash")
+            response = model.generate_content(prompt)
+            response_text = (response.text or '').strip()
+            if "```" in response_text:
+                response_text = response_text.split("```")[1]
+                if response_text.startswith("json"):
+                    response_text = response_text[4:]
+            parsed = json.loads(response_text.strip())
+            if isinstance(parsed, list):
+                logger.info(f"[{job_id}] Questionnaire verification results: {parsed}")
+                return parsed
+        except Exception as e:
+            logger.warning(f"[{job_id}] Questionnaire verification failed, falling back to conservative skip logic: {e}")
+        return []
 
     def process_image(self, image_path: Path, job_id: str, user_context: dict = None) -> Dict:
         """
@@ -134,6 +232,7 @@ class NutritionVideoPipeline:
 
         # Reset per-job state so detections from previous jobs don't leak in
         self.florence_detections = []
+        self.last_questionnaire_verification = []
         self.calibration = {
             'pixels_per_cm': None,
             'calibrated': False,
@@ -181,6 +280,7 @@ class NutritionVideoPipeline:
                 'florence_detections': self.florence_detections,  # Store Florence-2 detection results
                 'tracking': tracking_results,
                 'nutrition': nutrition_results,
+                'questionnaire_verification': self.last_questionnaire_verification,
                 'status': 'completed'
             }
 
@@ -206,6 +306,7 @@ class NutritionVideoPipeline:
 
         # Reset per-job state so detections from previous jobs don't leak in
         self.florence_detections = []
+        self.last_questionnaire_verification = []
         self.calibration = {
             'pixels_per_cm': None,
             'calibrated': False,
@@ -237,6 +338,7 @@ class NutritionVideoPipeline:
                 'florence_detections': self.florence_detections,
                 'tracking': tracking_results,
                 'nutrition': nutrition_results,
+                'questionnaire_verification': self.last_questionnaire_verification,
                 'status': 'completed'
             }
 
@@ -1213,8 +1315,7 @@ class NutritionVideoPipeline:
         if data.get("additional_notes"):
             caption = f"{caption}. {data['additional_notes']}" if caption else data["additional_notes"]
 
-        # Inject hidden_ingredients and extras from user_context as ground-truth items.
-        # These are not visually detectable so Gemini won't include them — we force-add them.
+        # Validate questionnaire items against the detected dish before optionally injecting them.
         if user_context:
             def _parse_grams_from_str(qty: str):
                 import re as _re
@@ -1251,65 +1352,63 @@ class NutritionVideoPipeline:
                     return float(m.group(1)) * 1000.0
                 return None
 
-            # Collect all items to inject
-            items_to_inject = []
-            for item in user_context.get('hidden_ingredients', []):
-                name = (item.get('name') or '').strip()
-                if name:
-                    items_to_inject.append({'name': name, 'quantity': item.get('quantity', ''), 'type': 'hidden'})
-            for item in user_context.get('extras', []):
-                name = (item.get('name') or '').strip()
-                if name:
-                    items_to_inject.append({'name': name, 'quantity': item.get('quantity', ''), 'type': 'extra'})
+            verification_results = self._verify_questionnaire_items_with_gemini(data, user_context, job_id)
+            self.last_questionnaire_verification = verification_results
+            visible_names = list(labels)
 
-            # Ask Gemini to estimate calories for all injected items in one call
-            gemini_kcal_map = {}
-            if items_to_inject and self.config.GEMINI_API_KEY:
+            for item in verification_results:
+                name = (item.get('name') or '').strip()
+                if not name:
+                    continue
+
+                confidence = float(item.get('confidence') or 0.0)
+                verdict = (item.get('verdict') or '').strip().lower()
+                plausible = bool(item.get('plausible'))
+                already_visible = bool(item.get('already_visible')) or any(
+                    self._ingredient_names_match(name, visible_name)
+                    for visible_name in visible_names
+                )
+
+                if not plausible or verdict != 'include' or confidence < 0.6:
+                    logger.info(
+                        f"[{job_id}] Skipping questionnaire item '{name}' — "
+                        f"verdict={verdict!r} plausible={plausible} confidence={confidence:.2f}"
+                    )
+                    continue
+
+                if already_visible:
+                    logger.info(
+                        f"[{job_id}] Skipping questionnaire item '{name}' to avoid double counting "
+                        f"(already visible/accounted for in base dish)"
+                    )
+                    continue
+
+                g = item.get('estimated_grams')
                 try:
-                    items_desc = ', '.join(
-                        f"{i['name']} ({i['quantity']})" if i.get('quantity') else i['name']
-                        for i in items_to_inject
-                    )
-                    cal_prompt = (
-                        f"For each of these food items at the given quantities: {items_desc}. "
-                        "Convert the quantity to grams and estimate the calories. "
-                        "Return ONLY a JSON array like: "
-                        "[{\"name\": \"butter\", \"grams\": 14.2, \"kcal\": 102}, ...]. No extra text."
-                    )
-                    cal_response = genai.GenerativeModel("gemini-2.0-flash").generate_content(cal_prompt)
-                    cal_text = (cal_response.text or "").strip()
-                    if "```" in cal_text:
-                        cal_text = cal_text.split("```")[1]
-                        if cal_text.startswith("json"):
-                            cal_text = cal_text[4:]
-                    cal_data = json.loads(cal_text.strip())
-                    for entry in cal_data:
-                        n = (entry.get('name') or '').strip().lower()
-                        k = entry.get('kcal')
-                        g = entry.get('grams')
-                        if n and k is not None:
-                            gemini_kcal_map[n] = float(k)
-                        if n and g is not None:
-                            # Only use Gemini's gram estimate if local parsing returned None
-                            if n not in gemini_kcal_map or True:
-                                gemini_kcal_map[f"{n}__grams"] = float(g)
-                    logger.info(f"[Gemini detection] Calorie estimates for injected items: {gemini_kcal_map}")
-                except Exception as e:
-                    logger.warning(f"[Gemini detection] Could not estimate calories for injected items: {e}")
-
-            for item in items_to_inject:
-                name = item['name']
-                g = _parse_grams_from_str(item.get('quantity', ''))
-                # Fall back to Gemini's gram estimate if local parsing couldn't determine grams
+                    g = float(g) if g is not None else None
+                except (TypeError, ValueError):
+                    g = None
                 if g is None:
-                    g = gemini_kcal_map.get(f"{name.lower()}__grams")
-                kcal = gemini_kcal_map.get(name.lower())
+                    g = _parse_grams_from_str(item.get('quantity', ''))
+
+                kcal = item.get('estimated_kcal')
+                try:
+                    kcal = float(kcal) if kcal is not None else None
+                except (TypeError, ValueError):
+                    kcal = None
+
+                item_type = (item.get('type') or 'hidden').strip().lower()
+                item_label = f"{name} ({'added' if item_type == 'extra' else 'hidden'})"
                 boxes.append([0.0, 0.0, 1.0, 1.0])  # placeholder bbox (bypasses SAM2 via tiny area)
-                labels.append(name)
+                labels.append(item_label)
                 grams_list.append(g)
                 quantity_list.append(1)
                 calories_list.append(kcal)
-                logger.info(f"[Gemini detection] Injected {item['type']}: {name} ({g}g, {kcal} kcal)")
+                visible_names.append(item_label)
+                logger.info(
+                    f"[{job_id}] Injected verified questionnaire item {item_type}: "
+                    f"{item_label} ({g}g, {kcal} kcal, confidence={confidence:.2f})"
+                )
 
         boxes = np.array(boxes, dtype=np.float32) if boxes else np.array([])
         print(f"  ✓ Gemini detection: {len(labels)} objects")

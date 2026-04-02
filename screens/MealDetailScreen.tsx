@@ -25,7 +25,7 @@ import { Video, ResizeMode } from 'expo-av';
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation, useRoute, useFocusEffect } from '@react-navigation/native';
 import { useAppSelector, useAppDispatch } from '../store/hooks';
-import type { AnalysisEntry, DishContent, SegmentedImages } from '../store/slices/historySlice';
+import type { AnalysisEntry, DishContent, DishTableKey, DishTableSection, SegmentedImages } from '../store/slices/historySlice';
 import { updateAnalysis } from '../store/slices/historySlice';
 import { nutritionAnalysisAPI } from '../services/NutritionAnalysisAPI';
 import { getImagePresignedUrl } from '../services/S3UserDataService';
@@ -34,6 +34,13 @@ import VectorBackButtonCircle from '../components/VectorBackButtonCircle';
 import OptimizedImage from '../components/OptimizedImage';
 import AppHeader from '../components/AppHeader';
 import BottomButtonContainer from '../components/BottomButtonContainer';
+import {
+  getBaseDishContents,
+  getMealNameFromTables,
+  getOverallCaloriesFromTables,
+  getTableTotals,
+  hydrateDishTables,
+} from '../utils/mealTables';
 
 
 export default function MealDetailScreen() {
@@ -168,7 +175,7 @@ export default function MealDetailScreen() {
         if (hasResult) {
           setOverlayLoadFailed(false);
           setVideoOverlayError(false);
-          setRefreshedSegmentedImages(fresh.segmented_images);
+          setRefreshedSegmentedImages(fresh.segmented_images || null);
           await dispatch(updateAnalysis({
             userEmail: user.email,
             analysisId: item.id,
@@ -192,7 +199,7 @@ export default function MealDetailScreen() {
         if (fresh?.segmented_images?.overlay_urls?.length || fresh?.segmented_images?.video_overlay_url) {
           setOverlayLoadFailed(false);
           setVideoOverlayError(false);
-          setRefreshedSegmentedImages(fresh.segmented_images);
+          setRefreshedSegmentedImages(fresh.segmented_images || null);
           await dispatch(updateAnalysis({
             userEmail: user.email,
             analysisId: item.id,
@@ -211,18 +218,12 @@ export default function MealDetailScreen() {
     }
   }, [item?.id, item?.job_id, user?.email, dispatch]);
   
-  // Initialize from saved dish contents; empty array when none saved yet — no fake defaults
-  const [dishContents, setDishContents] = useState<DishContent[]>(
-    item?.dishContents ?? []
+  const [dishTables, setDishTables] = useState<DishTableSection[]>(
+    hydrateDishTables(item?.dishTables, item?.dishContents)
   );
   const [mealName, setMealName] = useState(item?.mealName || 'Burger');
-  // Total calories = sum of all dish content rows only; never falls back to API value
-  const totalCalories = useMemo(() => {
-    return dishContents.reduce((acc, row) => {
-      const cal = Number(row.calories);
-      return acc + (Number.isFinite(cal) ? cal : 0);
-    }, 0);
-  }, [dishContents]);
+  const dishContents = useMemo(() => getBaseDishContents(dishTables), [dishTables]);
+  const totalCalories = useMemo(() => getOverallCaloriesFromTables(dishTables), [dishTables]);
 
   // Track which input is currently focused
   const focusedInputRef = useRef<{ rowId: string; field: string } | null>(null);
@@ -355,6 +356,7 @@ export default function MealDetailScreen() {
       const updates = {
         ...item, // Include all existing item data
         mealName,
+        dishTables,
         dishContents,
         nutritionalInfo: {
           ...item.nutritionalInfo,
@@ -379,7 +381,7 @@ export default function MealDetailScreen() {
     } finally {
       setIsSaving(false);
     }
-  }, [item, user?.email, mealName, dishContents, totalCalories, dispatch]);
+  }, [item, user?.email, mealName, dishTables, dishContents, totalCalories, dispatch]);
 
   // Always keep the ref pointing at the latest saveChanges closure
   const saveChangesRef = useRef(saveChanges);
@@ -387,9 +389,9 @@ export default function MealDetailScreen() {
     saveChangesRef.current = saveChanges;
   }, [saveChanges]);
 
-  // Auto-save whenever dishContents or mealName changes.
+  // Auto-save whenever table contents or mealName changes.
   // Skips the initial mount so we don't fire an unnecessary save on screen open.
-  // Uses a ref so the effect deps stay stable and only [dishContents, mealName] retrigger it.
+  // Uses a ref so the effect deps stay stable and only [dishTables, mealName] retrigger it.
   const isFirstRenderRef = useRef(true);
   useEffect(() => {
     if (isFirstRenderRef.current) {
@@ -400,7 +402,7 @@ export default function MealDetailScreen() {
       saveChangesRef.current();
     }, 800);
     return () => clearTimeout(timer);
-  }, [dishContents, mealName]);
+  }, [dishTables, mealName]);
 
   // Reset scroll position when returning to this screen
   useFocusEffect(
@@ -429,7 +431,15 @@ export default function MealDetailScreen() {
     setEditingRowId(rowId);
   };
 
-  const handleDelete = (rowId: string) => {
+  const updateTableRows = (tableKey: DishTableKey, updater: (rows: DishContent[]) => DishContent[]) => {
+    setDishTables((prev) =>
+      prev.map((table) =>
+        table.key === tableKey ? { ...table, rows: updater(table.rows) } : table
+      )
+    );
+  };
+
+  const handleDelete = (tableKey: DishTableKey, rowId: string) => {
     Alert.alert(
       'Delete Item',
       'Are you sure you want to delete this item?',
@@ -439,8 +449,7 @@ export default function MealDetailScreen() {
           text: 'Delete',
           style: 'destructive',
           onPress: () => {
-            const updated = dishContents.filter(item => item.id !== rowId);
-            setDishContents(updated);
+            updateTableRows(tableKey, (rows) => rows.filter((row) => row.id !== rowId));
             setEditingRowId(null);
           },
         },
@@ -448,9 +457,14 @@ export default function MealDetailScreen() {
     );
   };
 
-  const handleUpdateRow = (rowId: string, field: 'name' | 'weight' | 'calories', value: string) => {
-    setDishContents(prev =>
-      prev.map(row => {
+  const handleUpdateRow = (
+    tableKey: DishTableKey,
+    rowId: string,
+    field: 'name' | 'weight' | 'calories',
+    value: string
+  ) => {
+    updateTableRows(tableKey, (rows) =>
+      rows.map((row) => {
         if (row.id !== rowId) return row;
         if (field === 'weight') {
           const updated = { ...row, weight: value };
@@ -472,11 +486,193 @@ export default function MealDetailScreen() {
 
   const handleAddContent = () => {
     const newId = Date.now().toString();
-    setDishContents(prev => [
+    updateTableRows('base', (rows) => [
       { id: newId, name: '', weight: '', calories: '' },
-      ...prev,
+      ...rows,
     ]);
     setEditingRowId(newId);
+  };
+
+  const hasIncompleteRow = useMemo(
+    () =>
+      dishTables.some((table) =>
+        table.rows.some((row) => !row.name.trim() || !row.calories.trim())
+      ),
+    [dishTables]
+  );
+
+  const canAddBaseIngredient = useMemo(
+    () => !dishContents.some((row) => !row.name.trim() || !row.calories.trim()),
+    [dishContents]
+  );
+
+  const renderDishTable = (table: DishTableSection) => {
+    const totals = getTableTotals(table.rows);
+
+    return (
+      <Pressable
+        key={table.key}
+        ref={table.key === 'base' ? tableContainerRef : undefined}
+        style={styles.tableContainer}
+        onPress={() => {
+          if (editingRowId) {
+            setEditingRowId(null);
+            focusedInputRef.current = null;
+          }
+        }}
+      >
+        <Text style={styles.tableTitle}>{table.title}</Text>
+        <View style={styles.tableHeader}>
+          <Text style={[styles.tableHeaderText, { flex: 2 }]}>Dish Contents</Text>
+          <Text style={[styles.tableHeaderText, { flex: 1 }]}>Weight</Text>
+          <Text style={[styles.tableHeaderText, { flex: 1 }]}>Kcal</Text>
+          <Text style={[styles.tableHeaderText, { width: 50 }]}>Action</Text>
+        </View>
+
+        {table.rows.map((row) => {
+          const isEditing = editingRowId === row.id;
+          return (
+            <View
+              key={row.id}
+              ref={(ref) => { rowRefs.current[row.id] = ref; }}
+              style={styles.tableRow}
+            >
+              <View style={[styles.tableCell, { flex: 2 }]} pointerEvents="box-none">
+                {isEditing ? (
+                  <TextInput
+                    ref={(ref) => {
+                      if (!inputRefs.current[row.id]) {
+                        inputRefs.current[row.id] = {};
+                      }
+                      inputRefs.current[row.id].name = ref || undefined;
+                    }}
+                    style={[styles.tableInput, styles.inputFocused]}
+                    value={row.name}
+                    onChangeText={(value) => handleUpdateRow(table.key, row.id, 'name', value)}
+                    onFocus={() => {
+                      handleInputFocus(row.id, 'name');
+                      scrollToInput(row.id);
+                    }}
+                    placeholder="Ingredient name"
+                    placeholderTextColor="#D1D5DB"
+                    keyboardType="default"
+                    editable
+                    blurOnSubmit={false}
+                    returnKeyType="next"
+                    onSubmitEditing={() => {
+                      setTimeout(() => {
+                        inputRefs.current[row.id]?.weight?.focus();
+                      }, 100);
+                    }}
+                  />
+                ) : (
+                  <Text style={styles.tableCellText}>{row.name || '—'}</Text>
+                )}
+              </View>
+              <View style={[styles.tableCell, { flex: 1 }]} pointerEvents="box-none">
+                {isEditing ? (
+                  <TextInput
+                    ref={(ref) => {
+                      if (!inputRefs.current[row.id]) {
+                        inputRefs.current[row.id] = {};
+                      }
+                      inputRefs.current[row.id].weight = ref || undefined;
+                    }}
+                    style={[styles.tableInput, styles.inputFocused]}
+                    value={row.weight}
+                    onChangeText={(value) => handleUpdateRow(table.key, row.id, 'weight', value)}
+                    onFocus={() => {
+                      handleInputFocus(row.id, 'weight');
+                      scrollToInput(row.id);
+                    }}
+                    onSubmitEditing={() => {
+                      setTimeout(() => {
+                        inputRefs.current[row.id]?.calories?.focus();
+                      }, 100);
+                    }}
+                    placeholder="Grams"
+                    placeholderTextColor="#D1D5DB"
+                    keyboardType={Platform.OS === 'ios' ? 'numbers-and-punctuation' : 'numeric'}
+                    editable
+                    blurOnSubmit={false}
+                    returnKeyType="next"
+                  />
+                ) : (
+                  <Text style={styles.tableCellText}>{row.weight && row.weight !== '0' ? `${row.weight} g` : '—'}</Text>
+                )}
+              </View>
+              <View style={[styles.tableCell, { flex: 1 }]} pointerEvents="box-none">
+                {isEditing ? (
+                  <TextInput
+                    ref={(ref) => {
+                      if (!inputRefs.current[row.id]) {
+                        inputRefs.current[row.id] = {};
+                      }
+                      inputRefs.current[row.id].calories = ref || undefined;
+                    }}
+                    style={[styles.tableInput, styles.inputFocused]}
+                    value={row.calories}
+                    onChangeText={(value) => handleUpdateRow(table.key, row.id, 'calories', value)}
+                    onFocus={() => {
+                      handleInputFocus(row.id, 'calories');
+                      scrollToInput(row.id);
+                    }}
+                    onSubmitEditing={() => {
+                      Keyboard.dismiss();
+                      setEditingRowId(null);
+                      focusedInputRef.current = null;
+                    }}
+                    placeholder="KCal"
+                    placeholderTextColor="#D1D5DB"
+                    keyboardType={Platform.OS === 'ios' ? 'numbers-and-punctuation' : 'numeric'}
+                    editable
+                    blurOnSubmit
+                    returnKeyType="done"
+                  />
+                ) : (
+                  <Text style={styles.tableCellText}>{row.calories || '—'}</Text>
+                )}
+              </View>
+              <View style={[styles.tableCell, { width: 50, alignItems: 'center' }]}>
+                <TouchableOpacity
+                  onPress={() => {
+                    if (isEditing) {
+                      handleDelete(table.key, row.id);
+                    } else {
+                      handleEdit(row.id);
+                    }
+                  }}
+                  style={styles.actionButton}
+                >
+                  <Ionicons
+                    name={isEditing ? 'trash' : 'pencil'}
+                    size={20}
+                    color="#7BA21B"
+                  />
+                </TouchableOpacity>
+              </View>
+            </View>
+          );
+        })}
+
+        <View style={[styles.tableRow, styles.tableTotalRow]}>
+          <View style={[styles.tableCell, { flex: 2 }]}>
+            <Text style={styles.tableTotalText}>Total</Text>
+          </View>
+          <View style={[styles.tableCell, { flex: 1 }]}>
+            <Text style={styles.tableTotalText}>{totals.totalWeight > 0 ? `${Math.round(totals.totalWeight)} g` : '—'}</Text>
+          </View>
+          <View style={[styles.tableCell, { flex: 1 }]}>
+            <Text style={styles.tableTotalText}>{Math.round(totals.totalCalories)}</Text>
+          </View>
+          <View style={[styles.tableCell, { width: 50 }]} />
+        </View>
+
+        <Text style={styles.tableSummary}>
+          Total weight: {Math.round(totals.totalWeight)} g | Total kcal: {Math.round(totals.totalCalories)}
+        </Text>
+      </Pressable>
+    );
   };
 
   // Handle swipe right to navigate to TutorialScreen
@@ -761,25 +957,22 @@ export default function MealDetailScreen() {
                 <Text style={styles.mealName}>{mealName}</Text>
               </TouchableOpacity>
             )}
-            <Text style={styles.mealCalories}>{dishContents.length === 0 ? '-' : `${totalCalories} Kcal`}</Text>
+            <Text style={styles.mealCalories}>
+              {dishTables.every((table) => table.rows.length === 0) ? '-' : `${totalCalories} Kcal`}
+            </Text>
           </View>
 
           <View style={styles.mealActions}>
-            {(() => {
-              const canAdd = !dishContents.some(r => !r.name.trim() || !r.calories.trim());
-              return (
-                <TouchableOpacity
-                  style={[styles.addButton, !canAdd && styles.addButtonDisabled]}
-                  onPress={() => canAdd && handleAddContent()}
-                  activeOpacity={canAdd ? 0.8 : 1}
-                >
-                  <View style={styles.addButtonIcon}>
-                    <Text style={styles.addButtonIconText}>+</Text>
-                  </View>
-                  <Text style={styles.addButtonText}>Add Ingredient</Text>
-                </TouchableOpacity>
-              );
-            })()}
+            <TouchableOpacity
+              style={[styles.addButton, !canAddBaseIngredient && styles.addButtonDisabled]}
+              onPress={() => canAddBaseIngredient && handleAddContent()}
+              activeOpacity={canAddBaseIngredient ? 0.8 : 1}
+            >
+              <View style={styles.addButtonIcon}>
+                <Text style={styles.addButtonIconText}>+</Text>
+              </View>
+              <Text style={styles.addButtonText}>Add Base Ingredient</Text>
+            </TouchableOpacity>
             <View style={styles.captureInfo}>
               <Text style={styles.captureValue}>
                 {captureDateText && captureTimeText
@@ -791,157 +984,7 @@ export default function MealDetailScreen() {
         </View>
       </View>
 
-        {/* Dish Contents Table */}
-        <Pressable 
-          ref={tableContainerRef}
-          style={styles.tableContainer}
-          onPress={() => {
-            if (editingRowId) {
-              setEditingRowId(null);
-              focusedInputRef.current = null;
-            }
-          }}
-        >
-          {/* Table Header */}
-          <View style={styles.tableHeader}>
-            <Text style={[styles.tableHeaderText, { flex: 2 }]}>Dish Contents</Text>
-            <Text style={[styles.tableHeaderText, { flex: 1 }]}>Weight</Text>
-            <Text style={[styles.tableHeaderText, { flex: 1 }]}>Kcal</Text>
-            <Text style={[styles.tableHeaderText, { width: 50 }]}>Action</Text>
-          </View>
-
-          {/* Table Rows */}
-          {dishContents.map((row) => {
-            const isEditing = editingRowId === row.id;
-            return (
-              <View 
-                key={row.id} 
-                ref={(ref) => { rowRefs.current[row.id] = ref; }}
-                style={styles.tableRow}
-              >
-                <View style={[styles.tableCell, { flex: 2 }]} pointerEvents="box-none">
-                  {isEditing ? (
-                    <TextInput
-                      ref={(ref) => {
-                        if (!inputRefs.current[row.id]) {
-                          inputRefs.current[row.id] = {};
-                        }
-                        inputRefs.current[row.id].name = ref || undefined;
-                      }}
-                      style={[styles.tableInput, styles.inputFocused]}
-                      value={row.name}
-                      onChangeText={(value) => handleUpdateRow(row.id, 'name', value)}
-                      onFocus={() => {
-                        handleInputFocus(row.id, 'name');
-                        scrollToInput(row.id);
-                      }}
-                      placeholder="Ingredient name"
-                      placeholderTextColor="#D1D5DB"
-                      keyboardType="default"
-                      editable={true}
-                      blurOnSubmit={false}
-                      returnKeyType="next"
-                      onSubmitEditing={() => {
-                        // Focus the weight input when "next" is pressed
-                        setTimeout(() => {
-                          inputRefs.current[row.id]?.weight?.focus();
-                        }, 100);
-                      }}
-                      pointerEvents="auto"
-                    />
-                  ) : (
-                    <Text style={styles.tableCellText}>{row.name || '—'}</Text>
-                  )}
-                </View>
-                <View style={[styles.tableCell, { flex: 1 }]} pointerEvents="box-none">
-                  {isEditing ? (
-                    <TextInput
-                      ref={(ref) => {
-                        if (!inputRefs.current[row.id]) {
-                          inputRefs.current[row.id] = {};
-                        }
-                        inputRefs.current[row.id].weight = ref || undefined;
-                      }}
-                      style={[styles.tableInput, styles.inputFocused]}
-                      value={row.weight}
-                      onChangeText={(value) => handleUpdateRow(row.id, 'weight', value)}
-                      onFocus={() => {
-                        handleInputFocus(row.id, 'weight');
-                        scrollToInput(row.id);
-                      }}
-                      onSubmitEditing={() => {
-                        // Focus the calories input when "next" is pressed
-                        setTimeout(() => {
-                          inputRefs.current[row.id]?.calories?.focus();
-                        }, 100);
-                      }}
-                      placeholder="Grams"
-                      placeholderTextColor="#D1D5DB"
-                      keyboardType={Platform.OS === 'ios' ? 'numbers-and-punctuation' : 'numeric'}
-                      editable={true}
-                      blurOnSubmit={false}
-                      returnKeyType="next"
-                      pointerEvents="auto"
-                    />
-                  ) : (
-                    <Text style={styles.tableCellText}>{row.weight && row.weight !== '0' ? `${row.weight} g` : '—'}</Text>
-                  )}
-                </View>
-                <View style={[styles.tableCell, { flex: 1 }]} pointerEvents="box-none">
-                  {isEditing ? (
-                    <TextInput
-                      ref={(ref) => {
-                        if (!inputRefs.current[row.id]) {
-                          inputRefs.current[row.id] = {};
-                        }
-                        inputRefs.current[row.id].calories = ref || undefined;
-                      }}
-                      style={[styles.tableInput, styles.inputFocused]}
-                      value={row.calories}
-                      onChangeText={(value) => handleUpdateRow(row.id, 'calories', value)}
-                      onFocus={() => {
-                        handleInputFocus(row.id, 'calories');
-                        scrollToInput(row.id);
-                      }}
-                      onSubmitEditing={() => {
-                        Keyboard.dismiss();
-                        setEditingRowId(null);
-                        focusedInputRef.current = null;
-                      }}
-                      placeholder="KCal"
-                      placeholderTextColor="#D1D5DB"
-                      keyboardType={Platform.OS === 'ios' ? 'numbers-and-punctuation' : 'numeric'}
-                      editable={true}
-                      blurOnSubmit={true}
-                      returnKeyType="done"
-                      pointerEvents="auto"
-                    />
-                  ) : (
-                    <Text style={styles.tableCellText}>{row.calories || '—'}</Text>
-                  )}
-                </View>
-                <View style={[styles.tableCell, { width: 50, alignItems: 'center' }]}>
-                  <TouchableOpacity
-                    onPress={() => {
-                      if (isEditing) {
-                        handleDelete(row.id);
-                      } else {
-                        handleEdit(row.id);
-                      }
-                    }}
-                    style={styles.actionButton}
-                  >
-                    <Ionicons
-                      name={isEditing ? 'trash' : 'pencil'}
-                      size={20}
-                      color="#7BA21B"
-                    />
-                  </TouchableOpacity>
-                </View>
-              </View>
-            );
-          })}
-        </Pressable>
+        {dishTables.map((table) => renderDishTable(table))}
             </ScrollView>
           </View>
         </TouchableWithoutFeedback>
@@ -949,14 +992,10 @@ export default function MealDetailScreen() {
 
       {/* Next Button - Fixed at Bottom */}
       <BottomButtonContainer>
-        {(() => {
-          const hasIncompleteRow = dishContents.some(r => !r.name.trim() || !r.calories.trim());
-          const canProceed = !hasIncompleteRow;
-          return (
         <TouchableOpacity
-          style={[styles.nextButton, !canProceed && styles.nextButtonDisabled]}
+          style={[styles.nextButton, hasIncompleteRow && styles.nextButtonDisabled]}
           onPress={() => {
-            if (!canProceed) return;
+            if (hasIncompleteRow) return;
 
             setEditingRowId(null);
             Keyboard.dismiss();
@@ -965,6 +1004,7 @@ export default function MealDetailScreen() {
             const updatedItem = {
               ...item,
               mealName,
+              dishTables,
               dishContents,
               nutritionalInfo: {
                 ...item.nutritionalInfo,
@@ -974,12 +1014,10 @@ export default function MealDetailScreen() {
             (navigation as any).navigate('Feedback', { item: updatedItem });
             saveChanges();
           }}
-          disabled={!canProceed}
+          disabled={hasIncompleteRow}
         >
           <Text style={styles.nextButtonText}>Next</Text>
         </TouchableOpacity>
-          );
-        })()}
       </BottomButtonContainer>
         </Animated.View>
       </PanGestureHandler>
@@ -1154,6 +1192,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 16,
   },
+  tableTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1F2937',
+    marginBottom: 8,
+  },
   tableHeader: {
     flexDirection: 'row',
     paddingVertical: 12,
@@ -1177,6 +1221,21 @@ const styles = StyleSheet.create({
   tableCell: {
     paddingHorizontal: 8,
     justifyContent: 'center',
+  },
+  tableTotalRow: {
+    backgroundColor: '#F9FAFB',
+    borderBottomColor: '#E5E7EB',
+  },
+  tableTotalText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1F2937',
+  },
+  tableSummary: {
+    marginTop: 10,
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#4B5563',
   },
   tableCellText: {
     fontSize: 14,
@@ -1305,4 +1364,3 @@ const styles = StyleSheet.create({
     backgroundColor: 'transparent',
   },
 });
-

@@ -22,6 +22,12 @@ import { loadProfile } from './store/slices/profileSlice';
 import { nutritionAnalysisAPI } from './services/NutritionAnalysisAPI';
 import { userService } from './services/UserService';
 import { initSentry, setSentryUser, addBreadcrumb } from './utils/sentry';
+import {
+  buildDishTablesFromItems,
+  getBaseDishContents,
+  getMealNameFromTables,
+  getOverallCaloriesFromTables,
+} from './utils/mealTables';
 import { ErrorBoundary } from './components/ErrorBoundary';
 
 // Allow the OS to present notifications (sound + banner).
@@ -549,20 +555,14 @@ function AppContent() {
 
             const items = results.items ?? [];
             const summary = results.nutrition_summary;
-            const totalCalories = items.reduce(
-              (sum: number, item: any) => sum + (item.total_calories || 0), 0
-            ) || summary?.total_calories_kcal || 0;
-
+            const dishTables = buildDishTablesFromItems(items, (currentEntry as any)?.questionnaireContext);
             const dishContents = items.length > 0
-              ? items.map((item: any, idx: number) => ({
-                  id: `${Date.now()}_${idx}`,
-                  name: item.food_name || 'Unknown Food',
-                  weight: item.mass_g ? Math.round(item.mass_g).toString() : '',
-                  calories: Math.round(item.total_calories || 0).toString(),
-                }))
+              ? getBaseDishContents(dishTables)
               : [{ id: `${Date.now()}_0`, name: 'No food detected', weight: '', calories: '0' }];
-
-            const mealName = items.length > 0 ? (items[0]?.food_name || 'Analyzed Meal') : 'No food detected';
+            const totalCalories = getOverallCaloriesFromTables(dishTables) || summary?.total_calories_kcal || 0;
+            const mealName = items.length > 0
+              ? getMealNameFromTables(dishTables, 'Analyzed Meal')
+              : 'No food detected';
 
             if (userRef.current?.email) {
               await dispatch(updateAnalysis({
@@ -571,6 +571,7 @@ function AppContent() {
                 updates: {
                   analysisStatus: 'completed',
                   analysisProgress: 100,
+                  dishTables,
                   dishContents,
                   mealName,
                   nutritionalInfo: { calories: totalCalories, protein: 0, carbs: 0, fat: 0 },

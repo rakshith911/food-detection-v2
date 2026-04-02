@@ -20,6 +20,7 @@ import { useVideoPlayer, VideoView } from 'expo-video';
 import * as Notifications from 'expo-notifications';
 import { Ionicons } from '@expo/vector-icons';
 import { useAppDispatch, useAppSelector } from '../store/hooks';
+import type { QuestionnaireContext } from '../store/slices/historySlice';
 import { addAnalysis, updateAnalysis, updateAnalysisProgress } from '../store/slices/historySlice';
 import { nutritionAnalysisAPI } from '../services/NutritionAnalysisAPI';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -29,6 +30,12 @@ import OptimizedImage from '../components/OptimizedImage';
 import VectorBackButtonCircle from '../components/VectorBackButtonCircle';
 import AppHeader from '../components/AppHeader';
 import BottomButtonContainer from '../components/BottomButtonContainer';
+import {
+  buildDishTablesFromItems,
+  getBaseDishContents,
+  getMealNameFromTables,
+  getOverallCaloriesFromTables,
+} from '../utils/mealTables';
 
 async function scheduleAnalysisCompleteNotification() {
   try {
@@ -218,6 +225,32 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
       let analysisResult;
       let result;
 
+      const userContext: QuestionnaireContext = {};
+
+      if (hiddenIngrYes) {
+        const filledHidden = hiddenIngredients.filter((r) => r.name.trim());
+        if (filledHidden.length > 0) {
+          userContext.hidden_ingredients = filledHidden.map((r) => ({
+            name: r.name.trim(),
+            quantity: r.quantity.trim(),
+          }));
+        }
+      }
+
+      if (extrasYes) {
+        const filledExtras = extras.filter((r) => r.name.trim());
+        if (filledExtras.length > 0) {
+          userContext.extras = filledExtras.map((r) => ({
+            name: r.name.trim(),
+            quantity: r.quantity.trim(),
+          }));
+        }
+      }
+
+      if (textInput.trim()) {
+        userContext.recipe_description = textInput.trim();
+      }
+
       if (user?.email) {
         const tempAnalysis = {
           type: analysisType,
@@ -231,6 +264,7 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
             carbs: 0,
             fat: 0,
           },
+          questionnaireContext: userContext,
           analysisStatus: 'analyzing' as const,
           analysisProgress: 0,
         };
@@ -254,33 +288,6 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
       if (videoUri || imageUri) {
         const mediaType = videoUri ? 'video' : 'image';
         console.log(`[PreviewScreen] Starting real ${mediaType} analysis...`);
-
-        // Build user context from questionnaire answers
-        const userContext: Record<string, any> = {};
-
-        if (hiddenIngrYes) {
-          const filledHidden = hiddenIngredients.filter((r) => r.name.trim());
-          if (filledHidden.length > 0) {
-            userContext.hidden_ingredients = filledHidden.map((r) => ({
-              name: r.name.trim(),
-              quantity: r.quantity.trim(),
-            }));
-          }
-        }
-
-        if (extrasYes) {
-          const filledExtras = extras.filter((r) => r.name.trim());
-          if (filledExtras.length > 0) {
-            userContext.extras = filledExtras.map((r) => ({
-              name: r.name.trim(),
-              quantity: r.quantity.trim(),
-            }));
-          }
-        }
-
-        if (textInput.trim()) {
-          userContext.recipe_description = textInput.trim();
-        }
 
         console.log('[PreviewScreen] User context:', JSON.stringify(userContext));
 
@@ -349,42 +356,37 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
           console.log('[PreviewScreen] API Result nutrition_summary:', apiResult.nutrition_summary);
           console.log('[PreviewScreen] API Result items:', apiResult.items);
 
+          let dishTables;
           let dishContents;
           let mealName = 'Analyzed Meal';
 
           if (apiResult.items && apiResult.items.length > 0) {
             console.log('[PreviewScreen] Using extracted items:', apiResult.items.length, 'items');
-            dishContents = apiResult.items.map((item: any, index: number) => ({
-              id: `${Date.now()}_${index}`,
-              name: item.food_name || 'Unknown Food',
-              weight: item.mass_g && Math.round(item.mass_g) > 0 ? Math.round(item.mass_g).toString() : '',
-              calories: Math.round(item.total_calories || item.calories || 0).toString(),
-            }));
-            mealName = apiResult.items[0]?.food_name || 'Analyzed Meal';
+            dishTables = buildDishTablesFromItems(apiResult.items, userContext);
+            dishContents = getBaseDishContents(dishTables);
+            mealName = getMealNameFromTables(dishTables, 'Analyzed Meal');
           } else if (apiResult.detailed_results?.items && apiResult.detailed_results.items.length > 0) {
             console.log('[PreviewScreen] Using detailed_results.items');
-            dishContents = apiResult.detailed_results.items.map((item: any, index: number) => ({
-              id: `${Date.now()}_${index}`,
-              name: item.food_name || 'Unknown Food',
-              weight: item.mass_g && Math.round(item.mass_g) > 0 ? Math.round(item.mass_g).toString() : '',
-              calories: Math.round(item.total_calories || item.calories || 0).toString(),
-            }));
-            mealName = apiResult.detailed_results.items[0]?.food_name || 'Analyzed Meal';
+            dishTables = buildDishTablesFromItems(apiResult.detailed_results.items, userContext);
+            dishContents = getBaseDishContents(dishTables);
+            mealName = getMealNameFromTables(dishTables, 'Analyzed Meal');
           } else {
             console.log('[PreviewScreen] No food items found in response');
+            dishTables = buildDishTablesFromItems([], userContext);
             dishContents = [{ id: `${Date.now()}_0`, name: 'No food detected', weight: '', calories: '0' }];
             mealName = 'No food detected';
           }
 
-          const totalCaloriesFromItems = apiResult.items?.reduce(
-            (sum: number, item: any) => sum + (item.total_calories || item.calories || 0), 0
-          ) || apiResult.nutrition_summary?.total_calories_kcal || 0;
+          const totalCaloriesFromItems = getOverallCaloriesFromTables(dishTables)
+            || apiResult.nutrition_summary?.total_calories_kcal
+            || 0;
 
           analysisResult = {
             totalCalories: totalCaloriesFromItems,
             totalProtein: 0,
             totalCarbs: 0,
             totalFat: 0,
+            dishTables,
             dishContents,
             mealName,
           };
@@ -414,8 +416,10 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
           analysisId: analysisId,
           updates: {
             analysisResult: JSON.parse(JSON.stringify(result)),
+            dishTables: analysisResult.dishTables,
             dishContents: analysisResult.dishContents,
             mealName: analysisResult.mealName,
+            questionnaireContext: userContext,
             nutritionalInfo: {
               calories: Number(analysisResult.totalCalories) || 0,
               protein: Number(analysisResult.totalProtein) || 0,

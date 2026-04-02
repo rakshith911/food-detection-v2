@@ -25,6 +25,7 @@ export interface SegmentedImage {
 export interface SegmentedImages {
   overlay_urls?: SegmentedImage[];
   mask_urls?: SegmentedImage[];
+  video_overlay_url?: string | null;
 }
 
 export interface NutritionAnalysisResult {

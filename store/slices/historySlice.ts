@@ -9,6 +9,25 @@ export interface DishContent {
   calories: string;
 }
 
+export type DishTableKey = 'base' | 'highCalorie' | 'hiddenContent';
+
+export interface DishTableSection {
+  key: DishTableKey;
+  title: string;
+  rows: DishContent[];
+}
+
+export interface QuestionnaireIngredient {
+  name: string;
+  quantity?: string;
+}
+
+export interface QuestionnaireContext {
+  hidden_ingredients?: QuestionnaireIngredient[];
+  extras?: QuestionnaireIngredient[];
+  recipe_description?: string;
+}
+
 export interface FeedbackData {
   ratings: {
     foodDishIdentification: number;
@@ -42,7 +61,7 @@ export interface AnalysisEntry {
   imageUri?: string;
   videoUri?: string;
   textDescription?: string;
-  analysisResult: string;
+  analysisResult: any;
   nutritionalInfo: {
     calories: number;
     protein: number;
@@ -51,6 +70,8 @@ export interface AnalysisEntry {
   };
   mealName?: string;
   dishContents?: DishContent[];
+  dishTables?: DishTableSection[];
+  questionnaireContext?: QuestionnaireContext;
   feedback?: FeedbackData;
   segmented_images?: SegmentedImages;  // Segmented image URLs (may expire; use job_id to refetch)
   job_id?: string;  // Nutrition API job id – used to refetch fresh segmented_images URLs when they expire
@@ -285,4 +306,3 @@ const historySlice = createSlice({
 
 export const { clearError, clearHistoryLocal, updateAnalysisProgress } = historySlice.actions;
 export default historySlice.reducer;
-
