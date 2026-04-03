@@ -36,6 +36,7 @@ export interface NutritionAnalysisResult {
   completed_at?: string;
   filename?: string;
   download_url?: string;
+  meal_name?: string;
   segmented_images?: SegmentedImages;  // New: URLs to segmented images
   nutrition_summary?: {
     total_food_volume_ml: number;
@@ -390,10 +391,19 @@ export class NutritionAnalysisAPI {
               console.log('[Nutrition API] Calculated nutrition_summary from items:', data.nutrition_summary);
             }
             
-            // Extract segmented images from detailed results if available
-            if (detailedResults.segmented_images || detailedResults.tracking?.objects) {
-              // Segmented images might be in detailed_results or we need to construct URLs
-              console.log('[Nutrition API] Segmented images data found in detailed results');
+            // Extract meal name from production_debug (backend always returns it here)
+            const mealName = detailedResults.meal_name
+              || detailedResults.production_debug?.meal_name
+              || detailedResults.full_results?.production_debug?.meal_name;
+            if (mealName) {
+              data.meal_name = mealName;
+              console.log('[Nutrition API] Extracted meal_name:', mealName);
+            }
+
+            // Extract segmented images from detailed results
+            if (detailedResults.segmented_images?.overlay_urls?.length) {
+              data.segmented_images = detailedResults.segmented_images;
+              console.log('[Nutrition API] Segmented images extracted:', detailedResults.segmented_images.overlay_urls.length, 'overlays');
             }
           } else {
             const errorText = await detailsResponse.text();

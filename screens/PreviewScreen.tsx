@@ -364,12 +364,12 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
             console.log('[PreviewScreen] Using extracted items:', apiResult.items.length, 'items');
             dishTables = buildDishTablesFromItems(apiResult.items, userContext);
             dishContents = getBaseDishContents(dishTables);
-            mealName = getMealNameFromTables(dishTables, 'Analyzed Meal');
+            mealName = apiResult.meal_name || getMealNameFromTables(dishTables, 'Analyzed Meal');
           } else if (apiResult.detailed_results?.items && apiResult.detailed_results.items.length > 0) {
             console.log('[PreviewScreen] Using detailed_results.items');
             dishTables = buildDishTablesFromItems(apiResult.detailed_results.items, userContext);
             dishContents = getBaseDishContents(dishTables);
-            mealName = getMealNameFromTables(dishTables, 'Analyzed Meal');
+            mealName = apiResult.meal_name || getMealNameFromTables(dishTables, 'Analyzed Meal');
           } else {
             console.log('[PreviewScreen] No food items found in response');
             dishTables = buildDishTablesFromItems([], userContext);

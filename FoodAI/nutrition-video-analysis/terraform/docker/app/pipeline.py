@@ -1187,7 +1187,9 @@ class NutritionVideoPipeline:
         self.last_questionnaire_verification = verified_questionnaire
         verified_questionnaire = [
             item for item in verified_questionnaire
-            if item.get("verdict") == "include" and float(item.get("confidence") or 0.0) >= 0.6
+            if item.get("verdict") == "include"
+            and float(item.get("confidence") or 0.0) >= 0.6
+            and not item.get("already_visible")  # skip items already counted in base dish
         ]
         questionnaire_nutrition = self._estimate_questionnaire_item_nutrition(verified_questionnaire, job_id)
 
@@ -1209,6 +1211,7 @@ class NutritionVideoPipeline:
 
         return {
             "job_id": job_id,
+            "meal_name": first_pass.get("meal_name"),
             "media_name": image_path.name,
             "media_type": "image",
             "timestamp": datetime.utcnow().isoformat(),

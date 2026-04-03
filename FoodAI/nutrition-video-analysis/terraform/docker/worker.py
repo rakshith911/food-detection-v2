@@ -488,6 +488,32 @@ def process_message(message: dict, pipeline=None):
             # Process media (image or video) — pass user_context so Gemini prompts are enriched
             results = process_media(media_path, job_id, user_context=user_context, pipeline=pipeline)
 
+            # Upload segmentation debug images to S3 and embed presigned URLs in results
+            output_dir = f"/app/data/outputs/production_{job_id}"
+            image_assets = {
+                "sam3_segmentation": f"{output_dir}/sam3_segmentation.png",
+                "zoedepth_colored": f"{output_dir}/zoedepth_colored.png",
+                "rgb": f"{output_dir}/rgb.png",
+            }
+            overlay_urls = []
+            for asset_name, local_path in image_assets.items():
+                if os.path.exists(local_path):
+                    s3_key = f"results/{job_id}/{asset_name}.png"
+                    try:
+                        s3.upload_file(local_path, S3_RESULTS_BUCKET, s3_key, ExtraArgs={"ContentType": "image/png"})
+                        url = s3.generate_presigned_url(
+                            "get_object",
+                            Params={"Bucket": S3_RESULTS_BUCKET, "Key": s3_key},
+                            ExpiresIn=86400 * 30,  # 30-day expiry
+                        )
+                        overlay_urls.append({"name": asset_name, "url": url})
+                        print(f"[Images] Uploaded {asset_name} → s3://{S3_RESULTS_BUCKET}/{s3_key}")
+                    except Exception as img_err:
+                        print(f"[Images] Failed to upload {asset_name}: {img_err}")
+            if overlay_urls:
+                results["segmented_images"] = {"overlay_urls": overlay_urls}
+                print(f"[Images] {len(overlay_urls)} segmented images attached to results")
+
             # Upload results
             results_key = upload_results(job_id, results)
 
