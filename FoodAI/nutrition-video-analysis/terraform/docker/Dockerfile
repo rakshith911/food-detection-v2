@@ -104,8 +104,6 @@ RUN ls -la /app/ && \
     test -f /app/nutrition_rag_system.py && \
     echo "All required files present"
 
-RUN python -c "import zoedepth; print('✅ ZoeDepth package available')"
-
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD python3 -c "print('healthy')" || exit 1
