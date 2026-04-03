@@ -36,7 +36,7 @@ pip install "numpy==1.24.3"
 
 # Install PyTorch CPU version
 echo "📦 Installing PyTorch (CPU version)..."
-pip install torch==2.1.0 torchvision==0.16.0
+pip install torch==2.4.1 torchvision==0.19.1
 
 # Install other dependencies
 echo "📦 Installing other dependencies..."
@@ -51,5 +51,3 @@ echo "To run the test:"
 echo "  source venv/bin/activate"
 echo "  python3 test_worker_simple.py /path/to/image.png"
 echo ""
-
-

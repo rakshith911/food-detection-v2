@@ -5,11 +5,13 @@ Supports environment variables and different deployment modes
 import os
 from pathlib import Path
 from typing import Optional
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 # Root for data paths: parent of app/ (docker dir when local, /app when in container)
 _CONFIG_ROOT = Path(__file__).resolve().parent.parent
+_LOCAL_PRODUCTION_ROOT = _CONFIG_ROOT.parent.parent.parent.parent / "PRODUCTION"
+_DOCKER_PRODUCTION_ROOT = Path("/app/PRODUCTION")
 
 
 class Settings(BaseSettings):
@@ -42,8 +44,15 @@ class Settings(BaseSettings):
     DEFAULT_REFERENCE_PLANE_DEPTH_M: float = 0.5  # Default reference plane depth: 50cm (0.5m)
 
     # Model Settings
+    USE_PRODUCTION_IMAGE_PIPELINE: bool = True
     SAM2_CHECKPOINT: str = "checkpoints/sam2.1_hiera_base_plus.pt"
     SAM2_CONFIG: str = "configs/sam2.1/sam2.1_hiera_b+.yaml"
+    PRODUCTION_ROOT: Path = _DOCKER_PRODUCTION_ROOT if Path("/app").exists() else _LOCAL_PRODUCTION_ROOT
+    SAM3_MODEL_DIR: Path = PRODUCTION_ROOT / "model_assets" / "sam3_foodseg_final"
+    ZOEDEPTH_CHECKPOINT: Path = PRODUCTION_ROOT / "model_assets" / "zoedepth" / "ZoeD_M12_N.pt"
+    MIDAS_REPO_DIR: Path = PRODUCTION_ROOT / "model_assets" / "midas_repo"
+    ZOE_FX: float = 615.0
+    ZOE_FY: float = 615.0
     # Use Gemini for detection (image/video understanding) instead of Florence-2 when True
     USE_GEMINI_DETECTION: bool = True  # Set False to use Florence-2 for object detection
     # When True and media is video, call Gemini video API once for the whole clip; when False, use Gemini image per frame
@@ -120,6 +129,18 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"  # DEBUG, INFO, WARNING, ERROR
     LOG_FORMAT: str = "json"  # "json" or "text"
 
+    @field_validator("DEBUG", mode="before")
+    @classmethod
+    def parse_debug_flag(cls, value):
+        """Accept common deployment strings like 'release' and 'debug'."""
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"release", "prod", "production"}:
+                return False
+            if normalized in {"debug", "dev", "development"}:
+                return True
+        return value
+
     @model_validator(mode="after")
     def use_local_paths_when_not_in_docker(self):
         """When /app doesn't exist (running locally), use project dir for data paths."""
@@ -128,10 +149,16 @@ class Settings(BaseSettings):
             self.UPLOAD_DIR = root / "data" / "uploads"
             self.OUTPUT_DIR = root / "data" / "outputs"
             self.MODEL_CACHE_DIR = root / "models"
+            self.PRODUCTION_ROOT = _LOCAL_PRODUCTION_ROOT
             unified_data = root.parent.parent.parent.parent / "unified_data"
             self.UNIFIED_FAISS_PATH = unified_data / "unified_faiss.index"
             self.UNIFIED_FOODS_PATH = unified_data / "unified_foods.json"
             self.UNIFIED_FOOD_NAMES_PATH = unified_data / "unified_food_names.json"
+        else:
+            self.PRODUCTION_ROOT = _DOCKER_PRODUCTION_ROOT
+        self.SAM3_MODEL_DIR = self.PRODUCTION_ROOT / "model_assets" / "sam3_foodseg_final"
+        self.ZOEDEPTH_CHECKPOINT = self.PRODUCTION_ROOT / "model_assets" / "zoedepth" / "ZoeD_M12_N.pt"
+        self.MIDAS_REPO_DIR = self.PRODUCTION_ROOT / "model_assets" / "midas_repo"
         return self
 
     @model_validator(mode="after")
@@ -181,7 +208,7 @@ def init_directories():
         settings.UPLOAD_DIR,
         settings.OUTPUT_DIR,
         settings.MODEL_CACHE_DIR,
-        settings.FAO_FAISS_PATH.parent,
+        settings.UNIFIED_FAISS_PATH.parent,
     ]
     for dir_path in dirs:
         dir_path.mkdir(parents=True, exist_ok=True)
@@ -231,4 +258,3 @@ if __name__ == "__main__":
     print(f"  Database: {settings.DATABASE_URL}")
     print(f"  Gemini API: {'✓ Configured' if settings.GEMINI_API_KEY else '✗ Not set'}")
     print(f"\nValidation: {'✓ Passed' if validate_config() else '✗ Failed'}")
-

@@ -54,18 +54,25 @@ BASE_NUTRITION_PROMPT = """You are a nutrition expert. Analyze this food image o
 Return ONLY valid JSON with this exact structure (no markdown, no extra text):
 {
   "meal_name": "Name of the overall meal or dish",
+  "meal_confidence": 0.9,
+  "cuisine_type": "Cuisine type if known",
+  "cuisine_confidence": 0.8,
+  "cooking_method": "Cooking method if known",
+  "cooking_method_confidence": 0.75,
   "items": [
     {
       "food_name": "Specific food item name",
       "mass_g": 150,
-      "total_calories": 320
+      "total_calories": 320,
+      "confidence": 0.88
     }
   ],
   "nutrition_summary": {
     "total_calories_kcal": 320,
     "total_mass_g": 150,
     "num_food_items": 1,
-    "total_food_volume_ml": 150
+    "total_food_volume_ml": 150,
+    "overall_confidence": 0.86
   }
 }
 
@@ -190,6 +197,20 @@ def parse_gemini_json(text: str) -> dict:
     return json.loads(text.strip())
 
 
+def build_gemini_output_entry(stage: str, job_id: str, model_name: str, prompt: str, response_text: str, parsed_output=None, metadata: Optional[dict] = None) -> dict:
+    return {
+        'index': 1,
+        'timestamp': datetime.utcnow().isoformat() + 'Z',
+        'job_id': job_id,
+        'stage': stage,
+        'model': model_name,
+        'prompt': prompt,
+        'response_text': response_text,
+        'parsed_output': parsed_output,
+        'metadata': metadata or {},
+    }
+
+
 def send_expo_push_notification(push_token: str, title: str, body: str, data: Optional[dict] = None):
     """Send push notification via Expo Push API."""
     if not push_token:
@@ -223,8 +244,8 @@ def send_expo_push_notification(push_token: str, title: str, body: str, data: Op
 
 # ── Gemini call ───────────────────────────────────────────────────────────────
 
-def call_gemini(local_path: str, mime: str, prompt: str) -> str:
-    """Send media to Gemini and return raw response text."""
+def call_gemini(local_path: str, mime: str, prompt: str) -> dict:
+    """Send media to Gemini and return model name plus raw response text."""
     try:
         from google import genai as genai_new
         from google.genai import types
@@ -263,7 +284,7 @@ def call_gemini(local_path: str, mime: str, prompt: str) -> str:
             text = (response.text or '').strip()
             if text:
                 print(f'[Gemini] Got response from {model_name} ({len(text)} chars)')
-                return text
+                return {'model_name': model_name, 'response_text': text}
 
         except Exception as e:
             print(f'[Gemini] Model {model_name} error: {e}')
@@ -290,6 +311,7 @@ def normalise_results(data: dict) -> tuple[list, dict, str]:
             'food_name':     item.get('food_name') or item.get('name') or 'Unknown Food',
             'mass_g':        float(item.get('mass_g') or item.get('estimated_quantity_grams') or 0),
             'total_calories': float(item.get('total_calories') or item.get('calories') or 0),
+            'confidence':    float(item.get('confidence') or 0),
         })
 
     ns = data.get('nutrition_summary', {})
@@ -300,6 +322,7 @@ def normalise_results(data: dict) -> tuple[list, dict, str]:
             # Always derive from actual items — Gemini sometimes returns non-zero counts with empty items
             'num_food_items':       len(items),
             'total_food_volume_ml': float(ns.get('total_food_volume_ml') or 0),
+            'overall_confidence':   float(ns.get('overall_confidence') or 0),
         }
     else:
         # Build summary from items if Gemini didn't include it
@@ -310,6 +333,7 @@ def normalise_results(data: dict) -> tuple[list, dict, str]:
             'total_mass_g':         total_mass,
             'num_food_items':       len(items),
             'total_food_volume_ml': total_mass,
+            'overall_confidence':   float(data.get('meal_confidence') or 0),
         }
 
     return items, nutrition_summary, meal_name
@@ -365,7 +389,8 @@ def lambda_handler(event, context):
 
             # 3. Call Gemini
             print(f'[gemini_processor] Calling Gemini...')
-            response_text = call_gemini(local_path, mime, prompt)
+            gemini_response = call_gemini(local_path, mime, prompt)
+            response_text = gemini_response['response_text']
             update_job_status(job_id, 'processing', progress=70)
 
             # 4. Parse response
@@ -390,6 +415,17 @@ def lambda_handler(event, context):
                 'detected_items':    items,           # picked up at Location 1 (fallback)
                 'nutrition_summary': nutrition_summary,
                 'detected_foods':    detected_foods,
+                'gemini_outputs':    [
+                    build_gemini_output_entry(
+                        stage='lambda_direct_nutrition_analysis',
+                        job_id=job_id,
+                        model_name=gemini_response['model_name'],
+                        prompt=prompt,
+                        response_text=response_text,
+                        parsed_output=data,
+                        metadata={'mime_type': mime, 'source_s3_key': s3_key},
+                    )
+                ],
             }
 
             # 7. Upload results.json to S3
@@ -412,6 +448,7 @@ def lambda_handler(event, context):
                 nutrition_summary=nutrition_summary,
                 detected_foods=detected_foods,
                 items=items,
+                gemini_outputs=full_result['gemini_outputs'],
             )
 
             total_kcal = nutrition_summary['total_calories_kcal']

@@ -7,6 +7,7 @@ import torch
 import numpy as np
 from pathlib import Path
 from PIL import Image
+import PIL.PngImagePlugin  # Ensure Pillow registers PNG plugin classes for Gemini image uploads
 from typing import Dict, List, Tuple, Optional
 import io
 import logging
@@ -17,8 +18,11 @@ from datetime import datetime
 import os
 import subprocess
 import boto3
+import tempfile
 
 logger = logging.getLogger(__name__)
+
+from app.production_models import run_sam3_image, run_zoedepth
 
 # Initialize S3 client for uploading segmented images
 s3_client = None
@@ -72,6 +76,7 @@ class NutritionVideoPipeline:
             # Store Florence-2 detection results for debugging
             self.florence_detections = []
             self.last_questionnaire_verification = []
+            self.gemini_outputs = []
     
     @staticmethod
     def _build_user_context_suffix(user_context: dict) -> str:
@@ -210,6 +215,18 @@ class NutritionVideoPipeline:
                 if response_text.startswith("json"):
                     response_text = response_text[4:]
             parsed = json.loads(response_text.strip())
+            self._record_gemini_output(
+                stage="questionnaire_verification",
+                job_id=job_id,
+                model_name="gemini-2.0-flash",
+                prompt=prompt,
+                response_text=response_text,
+                parsed_output=parsed,
+                metadata={
+                    "questionnaire_items": items_to_check,
+                    "detected_main_food_item": detection_data.get("main_food_item") or detection_data.get("meal_name"),
+                },
+            )
             if isinstance(parsed, list):
                 logger.info(f"[{job_id}] Questionnaire verification results: {parsed}")
                 return parsed
@@ -233,11 +250,28 @@ class NutritionVideoPipeline:
         # Reset per-job state so detections from previous jobs don't leak in
         self.florence_detections = []
         self.last_questionnaire_verification = []
+        self.gemini_outputs = []
         self.calibration = {
             'pixels_per_cm': None,
             'calibrated': False,
             'reference_plane_depth_m': None,
         }
+
+        if getattr(self.config, "USE_PRODUCTION_IMAGE_PIPELINE", True):
+            try:
+                logger.info(
+                    f"[{job_id}] Attempting production image pipeline "
+                    f"(Gemini -> SAM3 -> ZoeDepth -> Gemini volume) "
+                    f"using SAM3={self.config.SAM3_MODEL_DIR} "
+                    f"ZoeDepth={self.config.ZOEDEPTH_CHECKPOINT} "
+                    f"MiDaS={self.config.MIDAS_REPO_DIR}"
+                )
+                return self._run_production_image_pipeline(image_path, job_id, user_context=user_context)
+            except Exception as e:
+                logger.warning(
+                    f"[{job_id}] Production image pipeline failed, falling back to legacy pipeline: {e}",
+                    exc_info=True,
+                )
 
         try:
             # Load image as a single frame
@@ -281,6 +315,13 @@ class NutritionVideoPipeline:
                 'tracking': tracking_results,
                 'nutrition': nutrition_results,
                 'questionnaire_verification': self.last_questionnaire_verification,
+                'gemini_outputs': self.gemini_outputs,
+                'pipeline_runtime': {
+                    'image_pipeline': 'legacy',
+                    'fallback_reason': 'production_disabled_or_failed',
+                    'sam2_checkpoint': str(self.config.SAM2_CHECKPOINT),
+                    'device': self.device,
+                },
                 'status': 'completed'
             }
 
@@ -307,6 +348,7 @@ class NutritionVideoPipeline:
         # Reset per-job state so detections from previous jobs don't leak in
         self.florence_detections = []
         self.last_questionnaire_verification = []
+        self.gemini_outputs = []
         self.calibration = {
             'pixels_per_cm': None,
             'calibrated': False,
@@ -339,6 +381,12 @@ class NutritionVideoPipeline:
                 'tracking': tracking_results,
                 'nutrition': nutrition_results,
                 'questionnaire_verification': self.last_questionnaire_verification,
+                'gemini_outputs': self.gemini_outputs,
+                'pipeline_runtime': {
+                    'media_pipeline': 'video_legacy',
+                    'sam2_checkpoint': str(self.config.SAM2_CHECKPOINT),
+                    'device': self.device,
+                },
                 'status': 'completed'
             }
 
@@ -357,6 +405,871 @@ class NutritionVideoPipeline:
         except Exception as e:
             logger.error(f"[{job_id}] Pipeline failed: {e}", exc_info=True)
             raise
+
+    def _gemini_first_pass_image(self, image_pil, job_id: str, user_context: dict = None) -> dict:
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=self.config.GEMINI_API_KEY)
+        except Exception as e:
+            raise RuntimeError(f"Gemini init failed for production first pass: {e}")
+
+        img_width, img_height = image_pil.size
+        prompt = (
+            "Analyze this food image for an image-only nutrition pipeline.\n\n"
+            "Return ONLY valid JSON with this exact structure:\n"
+            "{"
+            "\"meal_name\": str, "
+            "\"meal_confidence\": number, "
+            "\"cuisine_type\": str, "
+            "\"cuisine_confidence\": number, "
+            "\"cooking_method\": str, "
+            "\"cooking_method_confidence\": number, "
+            "\"visible_ingredients\": [{\"name\": str, \"role_tag\": \"base\", \"confidence\": number}], "
+            "\"plate_or_bowl\": {\"name\": str, \"role_tag\": \"plate_or_bowl\", \"vessel_type\": \"plate\"|\"bowl\"|\"unknown\", \"diameter_cm\": number|null, \"confidence\": number} | null, "
+            "\"reference_objects\": [{\"name\": str, \"role_tag\": \"reference_object\", \"width_cm\": number|null, \"height_cm\": number|null, \"confidence\": number}], "
+            "\"notes\": str"
+            "}\n\n"
+            f"Image size: {img_width}x{img_height}.\n"
+            "Rules:\n"
+            "- visible_ingredients must contain only visually present food ingredients/components.\n"
+            "- role_tag for visible ingredients must always be 'base'.\n"
+            "- Detect a plate or bowl if present and estimate its real-world diameter in cm.\n"
+            "- Detect reference objects if present, including cards, utensils, cans, cups, or packaged items, and estimate their real-world width/height in cm.\n"
+            "- Confidence must be between 0 and 1.\n"
+            "- Do not include questionnaire-only hidden or extra items in visible_ingredients.\n"
+        )
+        prompt += self._build_user_context_suffix(user_context)
+
+        gm = genai.GenerativeModel("gemini-2.5-flash", generation_config=self._GEMINI_GEN_CONFIG)
+        response = gm.generate_content([prompt, image_pil])
+        response_text = response.text or ""
+
+        if "```json" in response_text:
+            s = response_text.find("```json") + 7
+            e_idx = response_text.find("```", s)
+            json_str = response_text[s:e_idx].strip()
+        elif "```" in response_text:
+            s = response_text.find("```") + 3
+            e_idx = response_text.find("```", s)
+            json_str = response_text[s:e_idx].strip()
+        else:
+            s = response_text.find("{")
+            e_idx = response_text.rfind("}") + 1
+            json_str = response_text[s:e_idx]
+
+        data = json.loads(json_str)
+        self._record_gemini_output(
+            stage="production_image_first_pass",
+            job_id=job_id,
+            model_name="gemini-2.5-flash",
+            prompt=prompt,
+            response_text=response_text,
+            parsed_output=data,
+            metadata={"image_size": {"width": img_width, "height": img_height}},
+        )
+        data.setdefault("meal_name", "Analyzed Meal")
+        data.setdefault("meal_confidence", 0.0)
+        data.setdefault("cuisine_type", "")
+        data.setdefault("cuisine_confidence", 0.0)
+        data.setdefault("cooking_method", "")
+        data.setdefault("cooking_method_confidence", 0.0)
+        data.setdefault("visible_ingredients", [])
+        data.setdefault("reference_objects", [])
+        data.setdefault("plate_or_bowl", None)
+        return data
+
+    @staticmethod
+    def _json_safe(value):
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, dict):
+            return {str(k): NutritionVideoPipeline._json_safe(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [NutritionVideoPipeline._json_safe(v) for v in value]
+        return str(value)
+
+    def _record_gemini_output(
+        self,
+        stage: str,
+        job_id: str,
+        model_name: str,
+        prompt: str,
+        response_text: str,
+        parsed_output=None,
+        metadata: Optional[dict] = None,
+    ) -> None:
+        if not hasattr(self, "gemini_outputs") or self.gemini_outputs is None:
+            self.gemini_outputs = []
+        self.gemini_outputs.append({
+            "index": len(self.gemini_outputs) + 1,
+            "timestamp": datetime.utcnow().isoformat(),
+            "job_id": job_id,
+            "stage": stage,
+            "model": model_name,
+            "prompt": prompt,
+            "response_text": response_text,
+            "parsed_output": self._json_safe(parsed_output),
+            "metadata": self._json_safe(metadata or {}),
+        })
+
+    @staticmethod
+    def _safe_average(values: list[float], default: float = 0.0) -> float:
+        cleaned = [float(v) for v in values if v is not None]
+        if not cleaned:
+            return default
+        return float(sum(cleaned) / len(cleaned))
+
+    @staticmethod
+    def _source_confidence(source: Optional[str]) -> float:
+        src = (source or "").strip().lower()
+        if not src:
+            return 0.55
+        if "unified" in src or "usda" in src or "fao" in src or "fndds" in src:
+            return 0.9
+        if "gemini_grounding" in src or src == "gemini":
+            return 0.78
+        if "fallback" in src or "default" in src:
+            return 0.5
+        return 0.65
+
+    def _calculate_overall_confidence(
+        self,
+        first_pass: dict,
+        visible_items: list[dict],
+        sam3_results: dict,
+        calibration: dict,
+        volume_map: dict,
+        questionnaire_verification: list[dict],
+        nutrition_results: dict,
+    ) -> dict:
+        weights = {
+            "detection": 0.20,
+            "segmentation": 0.15,
+            "calibration": 0.20,
+            "volume": 0.25,
+            "nutrition_lookup": 0.20,
+        }
+
+        detection_values = [
+            float(item.get("confidence") or 0.0)
+            for item in first_pass.get("visible_ingredients") or []
+        ]
+        detection_confidence = self._safe_average(detection_values, default=0.0)
+
+        segmentation_values = []
+        for item in visible_items:
+            sam_entry = sam3_results.get(item["name"]) or {}
+            score = sam_entry.get("score")
+            if score is not None:
+                segmentation_values.append(float(score))
+        segmentation_confidence = self._safe_average(segmentation_values, default=0.0)
+
+        calibration_method = (calibration.get("method") or "").strip().lower()
+        calibration_reference_conf = float(calibration.get("confidence") or 0.0)
+        if calibration_method == "gemini_reference":
+            calibration_confidence = self._safe_average(
+                [calibration_reference_conf, 0.9],
+                default=0.75,
+            )
+        else:
+            calibration_confidence = 0.35
+
+        volume_values = [
+            float(entry.get("confidence") or 0.0)
+            for entry in volume_map.values()
+        ]
+        volume_confidence = self._safe_average(volume_values, default=0.0)
+
+        nutrition_values = []
+        for item in nutrition_results.get("items") or []:
+            role_tag = (item.get("role_tag") or "base").strip().lower()
+            if role_tag in {"hidden", "high_calorie"}:
+                nutrition_values.append(float(item.get("confidence") or 0.0))
+                continue
+            density_conf = self._source_confidence(item.get("density_source"))
+            calorie_conf = self._source_confidence(item.get("calorie_source"))
+            volume_conf = float(item.get("volume_confidence") or 0.0)
+            nutrition_values.append(self._safe_average([density_conf, calorie_conf, volume_conf], default=0.55))
+        nutrition_lookup_confidence = self._safe_average(nutrition_values, default=0.0)
+
+        weighted_components = {
+            "detection": detection_confidence * weights["detection"],
+            "segmentation": segmentation_confidence * weights["segmentation"],
+            "calibration": calibration_confidence * weights["calibration"],
+            "volume": volume_confidence * weights["volume"],
+            "nutrition_lookup": nutrition_lookup_confidence * weights["nutrition_lookup"],
+        }
+
+        overall_confidence = sum(weighted_components.values())
+        overall_confidence = max(0.0, min(1.0, overall_confidence))
+
+        return {
+            "overall_confidence": round(overall_confidence, 4),
+            "overall_uncertainty": round(1.0 - overall_confidence, 4),
+            "weights": weights,
+            "stages": {
+                "detection": {
+                    "confidence": round(detection_confidence, 4),
+                    "count": len(detection_values),
+                    "values": [round(v, 4) for v in detection_values],
+                },
+                "segmentation": {
+                    "confidence": round(segmentation_confidence, 4),
+                    "count": len(segmentation_values),
+                    "values": [round(v, 4) for v in segmentation_values],
+                },
+                "calibration": {
+                    "confidence": round(calibration_confidence, 4),
+                    "method": calibration.get("method"),
+                    "reference_name": calibration.get("reference_name"),
+                    "reference_confidence": round(calibration_reference_conf, 4),
+                },
+                "volume": {
+                    "confidence": round(volume_confidence, 4),
+                    "count": len(volume_values),
+                    "values": [round(v, 4) for v in volume_values],
+                },
+                "nutrition_lookup": {
+                    "confidence": round(nutrition_lookup_confidence, 4),
+                    "count": len(nutrition_values),
+                    "values": [round(v, 4) for v in nutrition_values],
+                },
+                "questionnaire_verification": {
+                    "count": len(questionnaire_verification or []),
+                    "values": [
+                        round(float(item.get("confidence") or 0.0), 4)
+                        for item in (questionnaire_verification or [])
+                    ],
+                },
+            },
+            "weighted_components": {
+                key: round(value, 4) for key, value in weighted_components.items()
+            },
+        }
+
+    @staticmethod
+    def _mask_bbox(mask: np.ndarray) -> Optional[List[int]]:
+        if mask is None or mask.sum() == 0:
+            return None
+        ys, xs = np.where(mask)
+        if len(xs) == 0 or len(ys) == 0:
+            return None
+        return [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())]
+
+    @staticmethod
+    def _resize_mask_to_shape(mask: Optional[np.ndarray], target_shape: tuple[int, int]) -> Optional[np.ndarray]:
+        if mask is None:
+            return None
+        if mask.shape == target_shape:
+            return mask.astype(bool)
+
+        import cv2
+
+        resized = cv2.resize(
+            mask.astype(np.uint8),
+            (int(target_shape[1]), int(target_shape[0])),
+            interpolation=cv2.INTER_NEAREST,
+        )
+        return resized.astype(bool)
+
+    def _save_sam3_segmentation_overlay(
+        self,
+        image_rgb: np.ndarray,
+        sam3_results: dict,
+        out_path: Path,
+    ) -> None:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.patches as mpatches
+        import matplotlib.pyplot as plt
+
+        palette = [
+            (255, 59, 48), (255, 149, 0), (255, 204, 0), (52, 199, 89),
+            (48, 176, 199), (0, 122, 255), (88, 86, 214), (255, 45, 85),
+            (162, 132, 194), (90, 200, 250), (255, 230, 167), (167, 235, 167),
+        ]
+
+        overlay = image_rgb.copy().astype(np.float32)
+        legend_patches = []
+
+        for idx, (name, data) in enumerate(sam3_results.items()):
+            mask = self._resize_mask_to_shape(data.get("mask"), image_rgb.shape[:2])
+            if mask is None or mask.sum() == 0:
+                continue
+
+            color = np.array(palette[idx % len(palette)], dtype=np.float32)
+            overlay[mask] = 0.45 * overlay[mask] + 0.55 * color
+            legend_patches.append(
+                mpatches.Patch(color=color / 255.0, label=name)
+            )
+
+        overlay = np.clip(overlay, 0, 255).astype(np.uint8)
+        fig, ax = plt.subplots(figsize=(8, 6))
+        ax.imshow(overlay)
+        ax.axis("off")
+        if legend_patches:
+            ax.legend(handles=legend_patches, loc="upper right", fontsize=7, framealpha=0.8, ncol=2)
+        fig.tight_layout(pad=0.5)
+        fig.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+    def _save_zoedepth_outputs(
+        self,
+        depth_map: np.ndarray,
+        color_path: Path,
+        raw_path: Path,
+    ) -> None:
+        from zoedepth.utils.misc import colorize, save_raw_16bit
+
+        colored = colorize(depth_map.astype(np.float32))
+        Image.fromarray(colored).save(color_path)
+        save_raw_16bit(depth_map.astype(np.float32), str(raw_path))
+
+    def _render_depth_image(self, depth_map: np.ndarray, mask: Optional[np.ndarray] = None) -> Image.Image:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        valid = depth_map[np.isfinite(depth_map) & (depth_map > 0)]
+        if valid.size == 0:
+            normalized = np.zeros_like(depth_map, dtype=np.float32)
+        else:
+            d_min = float(np.nanpercentile(valid, 5))
+            d_max = float(np.nanpercentile(valid, 95))
+            if d_max - d_min < 1e-6:
+                normalized = np.zeros_like(depth_map, dtype=np.float32)
+            else:
+                normalized = np.clip((depth_map - d_min) / (d_max - d_min), 0.0, 1.0)
+
+        rgba = (plt.get_cmap("viridis")(normalized) * 255).astype(np.uint8)
+        rgb = rgba[:, :, :3]
+        if mask is not None:
+            mask = self._resize_mask_to_shape(mask, depth_map.shape[:2])
+            output = np.zeros_like(rgb)
+            output[mask.astype(bool)] = rgb[mask.astype(bool)]
+            rgb = output
+        return Image.fromarray(rgb)
+
+    def _save_production_debug_assets(
+        self,
+        job_id: str,
+        image_rgb: np.ndarray,
+        sam3_results: dict,
+        raw_depth: np.ndarray,
+        calibrated_depth: np.ndarray,
+        dish_mask: np.ndarray,
+    ) -> dict:
+        output_dir = self.config.OUTPUT_DIR / f"production_{job_id}"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        Image.fromarray(image_rgb).save(output_dir / "rgb.png")
+
+        self._save_sam3_segmentation_overlay(
+            image_rgb=image_rgb,
+            sam3_results=sam3_results,
+            out_path=output_dir / "sam3_segmentation.png",
+        )
+
+        self._save_zoedepth_outputs(
+            depth_map=raw_depth,
+            color_path=output_dir / "zoedepth_colored.png",
+            raw_path=output_dir / "zoedepth_raw.png",
+        )
+
+        raw_depth_image = self._render_depth_image(raw_depth)
+        raw_depth_image.save(output_dir / "zoe_depth_raw_visual.png")
+
+        calibrated_depth_image = self._render_depth_image(calibrated_depth)
+        calibrated_depth_image.save(output_dir / "zoe_depth_calibrated_visual.png")
+
+        masked_depth_image = self._render_depth_image(calibrated_depth, mask=dish_mask)
+        masked_depth_image.save(output_dir / "dish_masked_depth.png")
+
+        masks_summary = {}
+        for name, entry in sam3_results.items():
+            mask = entry.get("mask")
+            masks_summary[name] = {
+                "score": float(entry.get("score") or 0.0),
+                "mask_pixels": int(mask.sum()) if mask is not None else 0,
+                "bbox": self._mask_bbox(mask) if mask is not None else None,
+            }
+            if mask is not None:
+                Image.fromarray((mask.astype(np.uint8) * 255)).save(output_dir / f"{self._normalize_ingredient_name(name).replace(' ', '_')}_mask.png")
+
+        np.save(output_dir / "zoe_depth_raw.npy", raw_depth.astype(np.float32))
+        np.save(output_dir / "zoe_depth_calibrated.npy", calibrated_depth.astype(np.float32))
+        np.save(output_dir / "dish_mask.npy", dish_mask.astype(np.uint8))
+
+        return {
+            "output_dir": str(output_dir),
+            "rgb_path": str(output_dir / "rgb.png"),
+            "sam3_segmentation_path": str(output_dir / "sam3_segmentation.png"),
+            "zoedepth_colored_path": str(output_dir / "zoedepth_colored.png"),
+            "zoedepth_raw_path": str(output_dir / "zoedepth_raw.png"),
+            "raw_depth_visual_path": str(output_dir / "zoe_depth_raw_visual.png"),
+            "calibrated_depth_visual_path": str(output_dir / "zoe_depth_calibrated_visual.png"),
+            "dish_masked_depth_path": str(output_dir / "dish_masked_depth.png"),
+            "masks": masks_summary,
+        }
+
+    def _calibrate_zoe_depth_from_reference(self, raw_depth: np.ndarray, sam3_results: dict, first_pass: dict) -> tuple[np.ndarray, dict]:
+        scale = 1.0
+        calibration = {
+            "method": "raw_zoe",
+            "scale": 1.0,
+            "reference_name": None,
+            "reference_depth_raw_m": None,
+            "reference_geom_depth_m": None,
+        }
+
+        candidates = []
+        vessel = first_pass.get("plate_or_bowl")
+        if vessel and vessel.get("diameter_cm"):
+            candidates.append({
+                "name": vessel.get("name") or vessel.get("vessel_type") or "plate_or_bowl",
+                "known_size_cm": vessel.get("diameter_cm"),
+                "confidence": float(vessel.get("confidence") or 0.0),
+            })
+        for ref in first_pass.get("reference_objects") or []:
+            size_cm = ref.get("width_cm") or ref.get("height_cm")
+            if size_cm:
+                candidates.append({
+                    "name": ref.get("name") or "reference_object",
+                    "known_size_cm": size_cm,
+                    "confidence": float(ref.get("confidence") or 0.0),
+                })
+
+        candidates.sort(key=lambda x: x["confidence"], reverse=True)
+
+        for candidate in candidates:
+            mask = (sam3_results.get(candidate["name"]) or {}).get("mask")
+            mask = self._resize_mask_to_shape(mask, raw_depth.shape)
+            bbox = self._mask_bbox(mask) if mask is not None else None
+            if mask is None or bbox is None:
+                continue
+            x1, y1, x2, y2 = bbox
+            pixel_size = max(x2 - x1, y2 - y1)
+            if pixel_size <= 0:
+                continue
+            geom_depth_m = (float(candidate["known_size_cm"]) / 100.0) * self.config.ZOE_FX / float(pixel_size)
+            ref_pixels = raw_depth[mask.astype(bool)]
+            ref_pixels = ref_pixels[np.isfinite(ref_pixels) & (ref_pixels > 0.01)]
+            if ref_pixels.size < 20:
+                continue
+            raw_ref_depth_m = float(np.median(ref_pixels))
+            if raw_ref_depth_m <= 0:
+                continue
+            scale = geom_depth_m / raw_ref_depth_m
+            calibration = {
+                "method": "gemini_reference",
+                "scale": scale,
+                "reference_name": candidate["name"],
+                "reference_depth_raw_m": raw_ref_depth_m,
+                "reference_geom_depth_m": geom_depth_m,
+                "reference_size_cm": float(candidate["known_size_cm"]),
+                "bbox": bbox,
+                "confidence": float(candidate["confidence"]),
+            }
+            break
+
+        return (raw_depth * scale).astype(np.float32), calibration
+
+    def _estimate_volume_from_raw_depth_with_gemini(
+        self,
+        image_rgb: np.ndarray,
+        raw_depth_image: Image.Image,
+        visible_items: list[dict],
+        first_pass: dict,
+        job_id: str,
+        user_context: dict = None,
+    ) -> dict:
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=self.config.GEMINI_API_KEY)
+        except Exception as e:
+            logger.warning(f"[{job_id}] Gemini raw-depth volume pass init failed: {e}")
+            return {}
+
+        labels = [item["name"] for item in visible_items]
+        if not labels:
+            return {}
+
+        vessel = first_pass.get("plate_or_bowl") or {}
+        scale_note = (
+            f"A {vessel.get('vessel_type') or 'dish'} is present with estimated diameter {float(vessel.get('diameter_cm') or 0):.1f} cm."
+            if vessel.get("diameter_cm") else
+            "No reliable vessel dimension was detected; use the depth map and image together for scale."
+        )
+
+        prompt = (
+            "You are given two aligned inputs of the same dish.\n"
+            "Image 1 is the raw RGB photo.\n"
+            "Image 2 is the raw ZoeDepth depth visualization of the same scene.\n"
+            "Use them together to estimate ingredient volumes.\n\n"
+            f"{scale_note}\n"
+            f"Visible ingredients: {json.dumps(labels)}.\n\n"
+            "Return ONLY valid JSON as an array like:\n"
+            "[{\"name\": \"rice\", \"volume_ml\": 180, \"confidence\": 0.82}, ...]\n\n"
+            "Rules:\n"
+            "- Include every visible ingredient exactly once.\n"
+            "- Confidence must be between 0 and 1.\n"
+            "- Estimate realistic food volume in ml for the visible portion only.\n"
+            "- Do not invent hidden or questionnaire-only ingredients here.\n"
+        )
+        prompt += self._build_user_context_suffix(user_context)
+
+        gm = genai.GenerativeModel("gemini-2.5-flash", generation_config=self._GEMINI_GEN_CONFIG)
+        original_pil = Image.fromarray(image_rgb)
+        response = gm.generate_content([prompt, original_pil, raw_depth_image])
+        response_text = response.text or ""
+
+        if "```json" in response_text:
+            s = response_text.find("```json") + 7
+            e_idx = response_text.find("```", s)
+            json_str = response_text[s:e_idx].strip()
+        elif "```" in response_text:
+            s = response_text.find("```") + 3
+            e_idx = response_text.find("```", s)
+            json_str = response_text[s:e_idx].strip()
+        else:
+            s = response_text.find("[")
+            e_idx = response_text.rfind("]") + 1
+            json_str = response_text[s:e_idx]
+
+        data = json.loads(json_str)
+        self._record_gemini_output(
+            stage="production_image_volume_from_raw_depth",
+            job_id=job_id,
+            model_name="gemini-2.5-flash",
+            prompt=prompt,
+            response_text=response_text,
+            parsed_output=data,
+            metadata={"visible_ingredients": labels},
+        )
+        volume_map = {}
+        for item in data:
+            name = (item.get("name") or "").strip().lower()
+            if not name:
+                continue
+            volume_map[name] = {
+                "volume_ml": float(item.get("volume_ml") or 0.0),
+                "confidence": float(item.get("confidence") or 0.0),
+            }
+        logger.info(f"[{job_id}] Gemini raw depth volume estimates: {volume_map}")
+        return volume_map
+
+    def _estimate_questionnaire_item_nutrition(self, verified_items: list[dict], job_id: str) -> list[dict]:
+        if not verified_items or not self.config.GEMINI_API_KEY:
+            return []
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=self.config.GEMINI_API_KEY)
+            items_desc = ', '.join(
+                f"{i['name']} ({i.get('quantity', '')})"
+                for i in verified_items
+            )
+            prompt = (
+                f"For each of these verified questionnaire food additions: {items_desc}. "
+                "Convert the quantity to grams if possible and estimate the total calories for only that additional amount. "
+                "Return ONLY JSON array like "
+                "[{\"name\":\"olive oil\",\"grams\":14,\"grams_confidence\":0.9,\"kcal\":119,\"kcal_confidence\":0.88,\"confidence\":0.89}, ...]. "
+                "Every confidence must be between 0 and 1."
+            )
+            response = genai.GenerativeModel("gemini-2.0-flash").generate_content(prompt)
+            text = (response.text or "").strip()
+            if "```" in text:
+                text = text.split("```")[1]
+                if text.startswith("json"):
+                    text = text[4:]
+            data = json.loads(text.strip())
+            self._record_gemini_output(
+                stage="questionnaire_nutrition_estimation",
+                job_id=job_id,
+                model_name="gemini-2.0-flash",
+                prompt=prompt,
+                response_text=text.strip(),
+                parsed_output=data,
+                metadata={"verified_items": verified_items},
+            )
+            by_name = {(entry.get("name") or "").strip().lower(): entry for entry in data}
+            out = []
+            for item in verified_items:
+                entry = by_name.get((item.get("name") or "").strip().lower(), {})
+                grams = entry.get("grams")
+                kcal = entry.get("kcal")
+                out.append({
+                    "name": item.get("name"),
+                    "role_tag": "high_calorie" if item.get("type") == "extra" else "hidden",
+                    "confidence": float(entry.get("confidence") or item.get("confidence") or 0.0),
+                    "grams_confidence": float(entry.get("grams_confidence") or 0.0),
+                    "kcal_confidence": float(entry.get("kcal_confidence") or 0.0),
+                    "quantity": item.get("quantity"),
+                    "volume_ml": None,
+                    "mass_g": float(grams) if grams is not None else None,
+                    "total_calories": float(kcal) if kcal is not None else None,
+                })
+            return out
+        except Exception as e:
+            logger.warning(f"[{job_id}] Questionnaire nutrition estimation failed: {e}")
+            return []
+
+    def _analyze_nutrition_from_production(
+        self,
+        visible_items: list[dict],
+        volume_map: dict,
+        questionnaire_items: list[dict],
+        job_id: str,
+    ) -> dict:
+        rag = self.models.rag
+        nutrition_items = []
+        total_food_volume = 0.0
+        total_mass = 0.0
+        total_calories = 0.0
+
+        for item in visible_items:
+            label = item["name"]
+            role_tag = item.get("role_tag", "base")
+            confidence = float(item.get("confidence") or 0.0)
+            volume_entry = volume_map.get(label.lower()) or {}
+            volume_ml = float(volume_entry.get("volume_ml") or 0.0)
+            volume_confidence = float(volume_entry.get("confidence") or 0.0)
+            if volume_ml <= 0:
+                continue
+
+            density, fao_match, fao_src = rag._get_density_with_match(label)
+            kcal_per_100g, usda_match, usda_src = rag._get_calories_with_match(label)
+            mass_g = volume_ml * density
+            total_kcal = (mass_g / 100.0) * kcal_per_100g
+            nutrition = {
+                "food_name": label,
+                "role_tag": role_tag,
+                "confidence": confidence,
+                "volume_confidence": volume_confidence,
+                "quantity": 1,
+                "volume_ml": round(volume_ml, 1),
+                "density_g_per_ml": round(float(density), 4),
+                "density_source": fao_src,
+                "density_matched": fao_match,
+                "mass_g": round(float(mass_g), 1),
+                "calories_per_100g": round(float(kcal_per_100g), 1),
+                "calorie_source": usda_src,
+                "calorie_matched": usda_match,
+                "total_calories": round(float(total_kcal), 1),
+                "matched_food": label,
+            }
+            logger.info(
+                f"[{job_id}] {role_tag} '{label}': confidence={confidence:.2f} volume={volume_ml:.1f}ml "
+                f"density={density:.3f}[{fao_match}] weight={mass_g:.1f}g "
+                f"kcal/100g={kcal_per_100g:.1f}[{usda_match}] total_kcal={total_kcal:.1f}"
+            )
+            nutrition_items.append(nutrition)
+            total_food_volume += volume_ml
+            total_mass += mass_g
+            total_calories += total_kcal
+
+        for item in questionnaire_items:
+            nutrition = {
+                "food_name": item["name"],
+                "role_tag": item["role_tag"],
+                "confidence": float(item.get("confidence") or 0.0),
+                "volume_ml": item.get("volume_ml"),
+                "mass_g": round(float(item.get("mass_g") or 0.0), 1) if item.get("mass_g") is not None else None,
+                "calories_per_100g": None,
+                "density_g_per_ml": None,
+                "density_source": "gemini_questionnaire",
+                "density_matched": None,
+                "calorie_source": "gemini_questionnaire",
+                "calorie_matched": item.get("quantity"),
+                "total_calories": round(float(item.get("total_calories") or 0.0), 1),
+                "matched_food": item["name"],
+            }
+            logger.info(
+                f"[{job_id}] {item['role_tag']} '{item['name']}': confidence={nutrition['confidence']:.2f} "
+                f"volume=n/a weight={nutrition.get('mass_g')}g kcal/100g=n/a total_kcal={nutrition['total_calories']:.1f}"
+            )
+            nutrition_items.append(nutrition)
+            total_mass += float(item.get("mass_g") or 0.0)
+            total_calories += float(item.get("total_calories") or 0.0)
+
+        return {
+            "items": nutrition_items,
+            "summary": {
+                "total_food_volume_ml": round(total_food_volume, 1),
+                "total_mass_g": round(total_mass, 1),
+                "total_calories_kcal": round(total_calories, 1),
+                "num_food_items": len(nutrition_items),
+            },
+        }
+
+    def _run_production_image_pipeline(self, image_path: Path, job_id: str, user_context: dict = None) -> Dict:
+        img_bgr = cv2.imread(str(image_path))
+        if img_bgr is None:
+            raise ValueError(f"Could not load image: {image_path}")
+        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        pil_image = Image.fromarray(img_rgb)
+
+        first_pass = self._gemini_first_pass_image(pil_image, job_id, user_context=user_context)
+        visible_items = [
+            {
+                "name": (item.get("name") or "").strip(),
+                "role_tag": item.get("role_tag") or "base",
+                "confidence": float(item.get("confidence") or 0.0),
+            }
+            for item in first_pass.get("visible_ingredients") or []
+            if (item.get("name") or "").strip()
+        ]
+        if not visible_items:
+            raise RuntimeError("Production image pipeline found no visible ingredients")
+
+        segmentation_prompts = [item["name"] for item in visible_items]
+        vessel = first_pass.get("plate_or_bowl")
+        if vessel and vessel.get("name"):
+            segmentation_prompts.append(vessel["name"])
+        for ref in first_pass.get("reference_objects") or []:
+            if ref.get("name"):
+                segmentation_prompts.append(ref["name"])
+        segmentation_prompts = list(dict.fromkeys(segmentation_prompts))
+
+        sam3_model, sam3_processor = self.models.sam3
+        sam3_results = run_sam3_image(sam3_model, sam3_processor, pil_image, segmentation_prompts, device=self.device)
+        logger.info(f"[{job_id}] SAM3 segmentation complete for prompts={segmentation_prompts}")
+
+        zoe_model = self.models.zoedepth
+        raw_depth = run_zoedepth(zoe_model, pil_image)
+        calibrated_depth, calibration = self._calibrate_zoe_depth_from_reference(raw_depth, sam3_results, first_pass)
+        logger.info(
+            f"[{job_id}] ZoeDepth inference complete: raw_shape={tuple(raw_depth.shape)} "
+            f"calibration_method={calibration.get('method')} reference={calibration.get('reference_name')}"
+        )
+
+        ingredient_masks = [
+            self._resize_mask_to_shape((sam3_results.get(item["name"]) or {}).get("mask"), raw_depth.shape)
+            for item in visible_items
+            if (sam3_results.get(item["name"]) or {}).get("mask") is not None
+        ]
+        if not ingredient_masks:
+            raise RuntimeError("Production image pipeline produced no SAM3 ingredient masks")
+        dish_mask = np.any(np.stack([mask.astype(bool) for mask in ingredient_masks], axis=0), axis=0)
+
+        debug_assets = self._save_production_debug_assets(
+            job_id=job_id,
+            image_rgb=img_rgb,
+            sam3_results=sam3_results,
+            raw_depth=raw_depth,
+            calibrated_depth=calibrated_depth,
+            dish_mask=dish_mask,
+        )
+
+        raw_depth_image = self._render_depth_image(raw_depth)
+        volume_map = self._estimate_volume_from_raw_depth_with_gemini(
+            image_rgb=img_rgb,
+            raw_depth_image=raw_depth_image,
+            visible_items=visible_items,
+            first_pass=first_pass,
+            job_id=job_id,
+            user_context=user_context,
+        )
+
+        verified_questionnaire = self._verify_questionnaire_items_with_gemini(
+            {
+                "main_food_item": first_pass.get("meal_name"),
+                "visible_ingredients": [{"name": item["name"]} for item in visible_items],
+                "ingredient_breakdown": [item["name"] for item in visible_items],
+                "additional_notes": first_pass.get("notes") or "",
+            },
+            user_context or {},
+            job_id,
+        )
+        self.last_questionnaire_verification = verified_questionnaire
+        verified_questionnaire = [
+            item for item in verified_questionnaire
+            if item.get("verdict") == "include" and float(item.get("confidence") or 0.0) >= 0.6
+        ]
+        questionnaire_nutrition = self._estimate_questionnaire_item_nutrition(verified_questionnaire, job_id)
+
+        nutrition_results = self._analyze_nutrition_from_production(
+            visible_items=visible_items,
+            volume_map=volume_map,
+            questionnaire_items=questionnaire_nutrition,
+            job_id=job_id,
+        )
+        overall_confidence = self._calculate_overall_confidence(
+            first_pass=first_pass,
+            visible_items=visible_items,
+            sam3_results=sam3_results,
+            calibration=calibration,
+            volume_map=volume_map,
+            questionnaire_verification=self.last_questionnaire_verification,
+            nutrition_results=nutrition_results,
+        )
+
+        return {
+            "job_id": job_id,
+            "media_name": image_path.name,
+            "media_type": "image",
+            "timestamp": datetime.utcnow().isoformat(),
+            "num_frames_processed": 1,
+            "calibration": calibration,
+            "tracking": {
+                "objects": {
+                    f"ID{idx + 1}_{item['name']}": {
+                        "label": item["name"],
+                        "role_tag": item["role_tag"],
+                        "confidence": item["confidence"],
+                        "statistics": {
+                            "max_volume_ml": float((volume_map.get(item["name"].lower()) or {}).get("volume_ml") or 0.0),
+                        },
+                        "mask_bbox": self._mask_bbox((sam3_results.get(item["name"]) or {}).get("mask")),
+                    }
+                    for idx, item in enumerate(visible_items)
+                },
+                "total_objects": len(visible_items),
+            },
+            "nutrition": nutrition_results,
+            "questionnaire_verification": self.last_questionnaire_verification,
+            "gemini_outputs": self.gemini_outputs,
+            "pipeline_runtime": {
+                "image_pipeline": "production",
+                "sam3_model_dir": str(self.config.SAM3_MODEL_DIR),
+                "zoedepth_checkpoint": str(self.config.ZOEDEPTH_CHECKPOINT),
+                "midas_repo_dir": str(self.config.MIDAS_REPO_DIR),
+                "device": self.device,
+            },
+            "production_debug": {
+                "gemini_pass_1": first_pass,
+                "meal_name": first_pass.get("meal_name"),
+                "meal_confidence": float(first_pass.get("meal_confidence") or 0.0),
+                "cuisine_type": first_pass.get("cuisine_type"),
+                "cuisine_confidence": float(first_pass.get("cuisine_confidence") or 0.0),
+                "cooking_method": first_pass.get("cooking_method"),
+                "cooking_method_confidence": float(first_pass.get("cooking_method_confidence") or 0.0),
+                "visible_items": visible_items,
+                "sam3": debug_assets["masks"],
+                "depth_outputs": {
+                    "raw_min_m": float(np.nanmin(raw_depth)),
+                    "raw_max_m": float(np.nanmax(raw_depth)),
+                    "calibrated_min_m": float(np.nanmin(calibrated_depth)),
+                    "calibrated_max_m": float(np.nanmax(calibrated_depth)),
+                    "assets": debug_assets,
+                },
+                "gemini_pass_2_volume": volume_map,
+                "questionnaire_items": questionnaire_nutrition,
+                "overall_confidence": overall_confidence,
+                "gemini_outputs": self.gemini_outputs,
+                "runtime": {
+                    "image_pipeline": "production",
+                    "sam3_model_dir": str(self.config.SAM3_MODEL_DIR),
+                    "zoedepth_checkpoint": str(self.config.ZOEDEPTH_CHECKPOINT),
+                    "midas_repo_dir": str(self.config.MIDAS_REPO_DIR),
+                    "device": self.device,
+                },
+            },
+            "status": "completed",
+        }
     
     def _load_frames(self, video_path: Path) -> List[np.ndarray]:
         """Load frames from video. If VIDEO_NUM_FRAMES is set, enforce VIDEO_MAX_DURATION_SECONDS and load exactly that many frames evenly spaced."""
@@ -900,9 +1813,16 @@ class NutritionVideoPipeline:
                     if k in label_lower or label_lower in k:
                         vol = v
                         break
-            if vol is not None and vol > 0:
-                obj_data["gemini_volume_ml"] = float(vol)
-                logger.info(f"[{job_id}] ID{obj_id} ({obj_data['label']}): Gemini volume = {vol:.1f} ml")
+            if isinstance(vol, dict):
+                volume_ml = float(vol.get("volume_ml") or 0.0)
+                volume_confidence = float(vol.get("confidence") or 0.0)
+            else:
+                volume_ml = float(vol or 0.0) if vol is not None else 0.0
+                volume_confidence = 0.0
+            if volume_ml > 0:
+                obj_data["gemini_volume_ml"] = volume_ml
+                obj_data["gemini_volume_confidence"] = volume_confidence
+                logger.info(f"[{job_id}] ID{obj_id} ({obj_data['label']}): Gemini volume = {volume_ml:.1f} ml (confidence={volume_confidence:.2f})")
 
         # Compile results
         print("Compiling results...")
@@ -1204,7 +2124,8 @@ class NutritionVideoPipeline:
             "  - quantity: count (1 for most; use actual count for small items like nuts, berries)\n\n"
             "Do not estimate grams, calories, or volume in this step. We calculate nutrition separately after detection.\n\n"
             "Format as JSON: main_food_item, cuisine_type, cooking_method, "
-            "visible_ingredients (array of {name, bounding_box, quantity}), "
+            "main_food_item_confidence, cuisine_confidence, cooking_method_confidence, "
+            "visible_ingredients (array of {name, bounding_box, quantity, confidence}), "
             "ingredient_breakdown, nutritional_info, allergens, dietary_tags, additional_notes.\n"
             "Output only valid JSON (you may wrap in ```json)."
         )
@@ -1244,6 +2165,15 @@ class NutritionVideoPipeline:
             if not json_str:
                 return np.array([]), [], "", [], [], []
             data = json.loads(json_str)
+            self._record_gemini_output(
+                stage="legacy_image_detection",
+                job_id=job_id,
+                model_name=model_name,
+                prompt=prompt,
+                response_text=response_text,
+                parsed_output=data,
+                metadata={"image_size": {"width": img_width, "height": img_height}},
+            )
         except json.JSONDecodeError as e:
             logger.warning(f"[Gemini detection] JSON parse failed: {e}")
             return np.array([]), [], "", [], [], []
@@ -1453,7 +2383,8 @@ class NutritionVideoPipeline:
             "  - quantity: count (1 for most; actual count for small items like nuts, berries)\n\n"
             "Do not estimate grams, calories, or volume in this step. We calculate nutrition separately after detection.\n\n"
             "Format as JSON: main_food_item, cuisine_type, cooking_method, "
-            "visible_ingredients (array of {name, bounding_box, quantity}), "
+            "main_food_item_confidence, cuisine_confidence, cooking_method_confidence, "
+            "visible_ingredients (array of {name, bounding_box, quantity, confidence}), "
             "ingredient_breakdown, nutritional_info, allergens, dietary_tags, additional_notes.\n"
             "Output only valid JSON (you may wrap in ```json)."
         )
@@ -1501,6 +2432,15 @@ class NutritionVideoPipeline:
             if not json_str:
                 return None
             data = json.loads(json_str)
+            self._record_gemini_output(
+                stage="legacy_multi_image_detection",
+                job_id=job_id,
+                model_name=model_name,
+                prompt=prompt,
+                response_text=response_text,
+                parsed_output=data,
+                metadata={"num_frames": min(len(frames_list), n_expected), "first_frame_size": {"width": img_width, "height": img_height}},
+            )
         except Exception as e:
             logger.warning(f"[Gemini multi-image] Failed: {e}")
             return None
@@ -1587,7 +2527,8 @@ class NutritionVideoPipeline:
             "  - A pizza → 'pizza dough', 'tomato sauce', 'mozzarella', then each topping separately\n"
             "Never use the dish name as an ingredient label. Always name the actual component.\n\n"
             "Format as JSON: main_food_item, cuisine_type, cooking_method, "
-            "visible_ingredients (list of {name, bounding_box [x_min,y_min,x_max,y_max] at 1280x720, quantity, timestamp_seconds}), "
+            "main_food_item_confidence, cuisine_confidence, cooking_method_confidence, "
+            "visible_ingredients (list of {name, bounding_box [x_min,y_min,x_max,y_max] at 1280x720, quantity, timestamp_seconds, confidence}), "
             "ingredient_breakdown, nutritional_info, allergens, dietary_tags, additional_notes.\n"
             "quantity: 1 for most; actual count for small items.\n"
             "Do not estimate grams, calories, or volume in this step. We calculate nutrition separately after detection, and volume is estimated in a dedicated follow-up pass.\n"
@@ -1661,6 +2602,15 @@ class NutritionVideoPipeline:
                 sys.stdout.flush()
                 return None
             data = json.loads(json_str)
+            self._record_gemini_output(
+                stage="legacy_video_detection",
+                job_id=job_id,
+                model_name=model_name,
+                prompt=prompt,
+                response_text=response_text,
+                parsed_output=data,
+                metadata={"video_path": str(video_path)},
+            )
         except Exception as e:
             logger.warning(f"[Gemini video] Failed: {e}")
             print(f"  [Gemini video] Exception: {e}")
@@ -1962,6 +2912,15 @@ class NutritionVideoPipeline:
                             
                             response = gemini_model.generate_content(prompt)
                             formatted_answer = response.text.strip()
+                            self._record_gemini_output(
+                                stage="vqa_answer_formatting",
+                                job_id=job_id,
+                                model_name="gemini-2.0-flash",
+                                prompt=prompt,
+                                response_text=formatted_answer,
+                                parsed_output=None,
+                                metadata={"question": question},
+                            )
                             print(f"    → Gemini output: {formatted_answer[:100]}...")
                             sys.stdout.flush()
                             answer = formatted_answer
@@ -3292,7 +4251,8 @@ class NutritionVideoPipeline:
         prompt += self._build_user_context_suffix(user_context)
         prompt += (
             "\nReturn ONLY valid JSON — an array of objects:\n"
-            '[{"name": "<food item>", "volume_ml": <number>}, ...]\n'
+            '[{"name": "<food item>", "volume_ml": <number>, "confidence": <number>}, ...]\n'
+            "Every confidence must be between 0 and 1.\n"
             "Include every item from the detected list. No extra text."
         )
 
@@ -3331,12 +4291,24 @@ class NutritionVideoPipeline:
                 json_str = response_text[s:e_idx] if s >= 0 else ""
 
             data = json.loads(json_str)
+            self._record_gemini_output(
+                stage="legacy_depth_volume_estimation",
+                job_id=job_id,
+                model_name=model_name,
+                prompt=prompt,
+                response_text=response_text,
+                parsed_output=data,
+                metadata={"labels": labels, "plate_diameter_cm": plate_diameter_cm},
+            )
             volumes = {}
             for item in data:
                 name = (item.get("name") or "").strip().lower()
                 vol = item.get("volume_ml")
                 if name and vol is not None:
-                    volumes[name] = float(vol)
+                    volumes[name] = {
+                        "volume_ml": float(vol),
+                        "confidence": float(item.get("confidence") or 0.0),
+                    }
             logger.info(f"[{job_id}] Gemini volume estimates: {volumes}")
             return volumes
         except Exception as e:
@@ -3632,7 +4604,8 @@ Respond ONLY with a JSON object:
 {{
   "is_reasonable": true/false,
   "reason": "brief explanation",
-  "suggested_volume_ml": number (only if unreasonable)
+  "suggested_volume_ml": number (only if unreasonable),
+  "confidence": number
 }}
 
 Examples:
@@ -3650,8 +4623,17 @@ Examples:
                 response_text = response_text.split('```json')[1].split('```')[0].strip()
             elif '```' in response_text:
                 response_text = response_text.split('```')[1].split('```')[0].strip()
-            
+
             result = json.loads(response_text)
+            self._record_gemini_output(
+                stage="volume_validation",
+                job_id="unknown",
+                model_name="gemini-2.0-flash",
+                prompt=prompt,
+                response_text=response_text,
+                parsed_output=result,
+                metadata={"food_name": food_name, "calculated_volume_ml": calculated_volume_ml},
+            )
             
             if not result.get('is_reasonable', True):
                 suggested_volume = result.get('suggested_volume_ml')
@@ -3740,11 +4722,11 @@ For ESTIMATION: Provide typical serving volume based on food type and visible ar
 Respond ONLY with JSON:
 {{
   "validated": [
-    {{"food": "food_name", "validated_volume_ml": number, "reason": "explanation"}},
+    {{"food": "food_name", "validated_volume_ml": number, "reason": "explanation", "confidence": number}},
     ...
   ],
   "estimated": [
-    {{"food": "food_name", "estimated_volume_ml": number, "reason": "explanation"}},
+    {{"food": "food_name", "estimated_volume_ml": number, "reason": "explanation", "confidence": number}},
     ...
   ]
 }}
@@ -3764,8 +4746,20 @@ Example:
                 response_text = response_text.split('```json')[1].split('```')[0].strip()
             elif '```' in response_text:
                 response_text = response_text.split('```')[1].split('```')[0].strip()
-            
+
             result = json.loads(response_text)
+            self._record_gemini_output(
+                stage="batch_validate_and_estimate_volumes",
+                job_id=job_id,
+                model_name="gemini-2.0-flash",
+                prompt=prompt,
+                response_text=response_text,
+                parsed_output=result,
+                metadata={
+                    "items_for_validation": items_for_validation,
+                    "untracked_items": untracked_items,
+                },
+            )
             
             # Map validated volumes
             validated_map = {}
@@ -3868,7 +4862,7 @@ Common portion ranges:
 
 Respond ONLY with JSON array:
 [
-  {{"food": "food_name", "estimated_volume_ml": number, "reason": "brief explanation"}},
+  {{"food": "food_name", "estimated_volume_ml": number, "reason": "brief explanation", "confidence": number}},
   ...
 ]
 
@@ -3883,8 +4877,17 @@ Example:
                 response_text = response_text.split('```json')[1].split('```')[0].strip()
             elif '```' in response_text:
                 response_text = response_text.split('```')[1].split('```')[0].strip()
-            
+
             results = json.loads(response_text)
+            self._record_gemini_output(
+                stage="batch_estimate_volumes",
+                job_id=job_id,
+                model_name="gemini-2.0-flash",
+                prompt=prompt,
+                response_text=response_text,
+                parsed_output=results,
+                metadata={"untracked_items": untracked_items},
+            )
             
             # Map results to obj_ids
             volume_map = {}
@@ -3963,7 +4966,8 @@ Consider:
 Respond ONLY with a JSON object:
 {{
   "estimated_volume_ml": number,
-  "reason": "brief explanation of the estimate"
+  "reason": "brief explanation of the estimate",
+  "confidence": number
 }}
 
 Example:
@@ -3979,8 +4983,17 @@ Example:
                 response_text = response_text.split('```json')[1].split('```')[0].strip()
             elif '```' in response_text:
                 response_text = response_text.split('```')[1].split('```')[0].strip()
-            
+
             result = json.loads(response_text)
+            self._record_gemini_output(
+                stage="single_volume_estimation",
+                job_id=job_id,
+                model_name="gemini-2.0-flash",
+                prompt=prompt,
+                response_text=response_text,
+                parsed_output=result,
+                metadata={"food_name": food_name, "area_cm2": area_cm2},
+            )
             estimated_volume = result.get('estimated_volume_ml', 0)
             reason = result.get('reason', 'No reason provided')
             
@@ -4028,11 +5041,12 @@ Rules:
 Respond ONLY with JSON:
 {{
   "formatted_foods": "comma-separated list of food names from VQA",
-  "food_items_to_keep": ["item1", "item2", ...]
+  "formatted_foods_confidence": number,
+  "food_items_to_keep": [{{"name": "item1", "confidence": number}}, {{"name": "item2", "confidence": number}}]
 }}
 
 Example:
-{{"formatted_foods": "ribs, potatoes, beans, gravy, mashed potatoes", "food_items_to_keep": ["Ribs", "Potatoes", "Beans"]}}"""
+{{"formatted_foods": "ribs, potatoes, beans, gravy, mashed potatoes", "formatted_foods_confidence": 0.86, "food_items_to_keep": [{{"name": "Ribs", "confidence": 0.93}}, {{"name": "Potatoes", "confidence": 0.88}}, {{"name": "Beans", "confidence": 0.82}}]}}"""
 
             response = gemini_model.generate_content(prompt)
             response_text = response.text.strip()
@@ -4042,9 +5056,23 @@ Example:
                 response_text = response_text.split('```json')[1].split('```')[0].strip()
             elif '```' in response_text:
                 response_text = response_text.split('```')[1].split('```')[0].strip()
-            
+
             result = json.loads(response_text)
-            food_items_to_keep = [item.lower() for item in result.get('food_items_to_keep', [])]
+            self._record_gemini_output(
+                stage="format_and_filter_detected_items",
+                job_id=job_id,
+                model_name="gemini-2.0-flash",
+                prompt=prompt,
+                response_text=response_text,
+                parsed_output=result,
+                metadata={"frame_idx": frame_idx, "labels": labels, "vqa_answer": vqa_answer},
+            )
+            food_items_to_keep = []
+            for item in result.get('food_items_to_keep', []):
+                if isinstance(item, str):
+                    food_items_to_keep.append(item.lower())
+                elif isinstance(item, dict) and item.get('name'):
+                    food_items_to_keep.append(str(item['name']).lower())
             formatted_foods = result.get('formatted_foods', '')
             
             # Filter boxes and labels based on Gemini's response
@@ -4120,13 +5148,13 @@ Rules for merging:
 Respond ONLY with JSON listing merge groups:
 {{
   "merge_groups": [
-    {{"ids": ["ID1", "ID3"], "reason": "Both are meat/ribs"}},
-    {{"ids": ["ID2", "ID5"], "reason": "Both are potatoes with similar volume"}}
+    {{"ids": ["ID1", "ID3"], "reason": "Both are meat/ribs", "confidence": number}},
+    {{"ids": ["ID2", "ID5"], "reason": "Both are potatoes with similar volume", "confidence": number}}
   ],
-  "keep_separate": ["ID4", "ID6"]
+  "keep_separate": [{{"id": "ID4", "confidence": number}}, {{"id": "ID6", "confidence": number}}]
 }}
 
-If no duplicates, respond: {{"merge_groups": [], "keep_separate": ["ID1", "ID2", ...]}}"""
+If no duplicates, respond: {{"merge_groups": [], "keep_separate": [{{"id": "ID1", "confidence": 0.9}}, {{"id": "ID2", "confidence": 0.9}}]}}"""
 
             response = gemini_model.generate_content(prompt)
             response_text = response.text.strip()
@@ -4137,8 +5165,17 @@ If no duplicates, respond: {{"merge_groups": [], "keep_separate": ["ID1", "ID2",
                 response_text = response_text.split('```json')[1].split('```')[0].strip()
             elif '```' in response_text:
                 response_text = response_text.split('```')[1].split('```')[0].strip()
-            
+
             decisions = json.loads(response_text)
+            self._record_gemini_output(
+                stage="deduplicate_objects",
+                job_id=job_id,
+                model_name="gemini-2.0-flash",
+                prompt=prompt,
+                response_text=response_text,
+                parsed_output=decisions,
+                metadata={"num_objects": len(valid_obj_ids)},
+            )
             merge_groups = decisions.get('merge_groups', [])
             
             if not merge_groups:
@@ -4272,13 +5309,13 @@ Rules:
 Respond ONLY with JSON:
 {{
   "merge_groups": [
-    {{"ids": ["ID1", "ID3"], "reason": "Both are meat/ribs"}}
+    {{"ids": ["ID1", "ID3"], "reason": "Both are meat/ribs", "confidence": number}}
   ],
-  "combine": ["item_name1", "item_name2"],
-  "keep_separate": ["ID4", "ID6"]
+  "combine": [{{"name": "item_name1", "confidence": number}}, {{"name": "item_name2", "confidence": number}}],
+  "keep_separate": [{{"id": "ID4", "confidence": number}}, {{"id": "ID6", "confidence": number}}]
 }}
 
-If no duplicates/combinations, respond: {{"merge_groups": [], "combine": [], "keep_separate": ["ID1", "ID2", ...]}}"""
+If no duplicates/combinations, respond: {{"merge_groups": [], "combine": [], "keep_separate": [{{"id": "ID1", "confidence": 0.9}}, {{"id": "ID2", "confidence": 0.9}}]}}"""
 
             response = gemini_model.generate_content(prompt)
             response_text = response.text.strip()
@@ -4288,8 +5325,17 @@ If no duplicates/combinations, respond: {{"merge_groups": [], "combine": [], "ke
                 response_text = response_text.split('```json')[1].split('```')[0].strip()
             elif '```' in response_text:
                 response_text = response_text.split('```')[1].split('```')[0].strip()
-            
+
             decisions = json.loads(response_text)
+            self._record_gemini_output(
+                stage="deduplicate_and_combine_objects",
+                job_id=job_id,
+                model_name="gemini-2.0-flash",
+                prompt=prompt,
+                response_text=response_text,
+                parsed_output=decisions,
+                metadata={"num_objects": len(valid_obj_ids)},
+            )
             
             # Step 1: Apply merges (deduplication)
             merge_groups = decisions.get('merge_groups', [])
@@ -4346,7 +5392,12 @@ If no duplicates/combinations, respond: {{"merge_groups": [], "combine": [], "ke
                     merged_objects[obj_id] = obj_data
             
             # Step 2: Apply combinations
-            combine_items = [item.lower() for item in decisions.get('combine', [])]
+            combine_items = []
+            for item in decisions.get('combine', []):
+                if isinstance(item, str):
+                    combine_items.append(item.lower())
+                elif isinstance(item, dict) and item.get('name'):
+                    combine_items.append(str(item['name']).lower())
             item_groups = {}
             for obj_id, obj_data in merged_objects.items():
                 label = obj_data['label']
@@ -4429,12 +5480,12 @@ Rules:
 
 Respond ONLY with JSON:
 {{
-  "combine": ["item_name1", "item_name2"],  // Items to combine (garnishes, small ingredients)
-  "keep_separate": ["item_name3", "item_name4"]  // Items to keep as individual servings
+  "combine": [{{"name": "item_name1", "confidence": number}}, {{"name": "item_name2", "confidence": number}}],  // Items to combine (garnishes, small ingredients)
+  "keep_separate": [{{"name": "item_name3", "confidence": number}}, {{"name": "item_name4", "confidence": number}}]  // Items to keep as individual servings
 }}
 
 Example:
-{{"combine": ["Parsley", "Basil", "Sauce"], "keep_separate": ["Hamburger", "Fries", "Cola"]}}"""
+{{"combine": [{{"name": "Parsley", "confidence": 0.91}}, {{"name": "Basil", "confidence": 0.84}}, {{"name": "Sauce", "confidence": 0.8}}], "keep_separate": [{{"name": "Hamburger", "confidence": 0.95}}, {{"name": "Fries", "confidence": 0.93}}, {{"name": "Cola", "confidence": 0.9}}]}}"""
 
             response = gemini_model.generate_content(prompt)
             response_text = response.text.strip()
@@ -4445,9 +5496,23 @@ Example:
                 response_text = response_text.split('```json')[1].split('```')[0].strip()
             elif '```' in response_text:
                 response_text = response_text.split('```')[1].split('```')[0].strip()
-            
+
             decisions = json.loads(response_text)
-            combine_items = [item.lower() for item in decisions.get('combine', [])]
+            self._record_gemini_output(
+                stage="combine_similar_items",
+                job_id="unknown",
+                model_name="gemini-2.0-flash",
+                prompt=prompt,
+                response_text=response_text,
+                parsed_output=decisions,
+                metadata={"labels": list(item_groups.keys())},
+            )
+            combine_items = []
+            for item in decisions.get('combine', []):
+                if isinstance(item, str):
+                    combine_items.append(item.lower())
+                elif isinstance(item, dict) and item.get('name'):
+                    combine_items.append(str(item['name']).lower())
             
             # Combine items that Gemini suggested
             new_objects = {}

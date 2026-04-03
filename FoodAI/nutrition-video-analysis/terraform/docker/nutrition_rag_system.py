@@ -368,13 +368,6 @@ class NutritionRAG:
         if cache_key in self._gemini_cache:
             return self._gemini_cache[cache_key]
         try:
-            import google.generativeai as genai
-            genai.configure(api_key=self._gemini_api_key)
-            model = genai.GenerativeModel(
-                "gemini-2.5-flash",
-                generation_config={"temperature": 0.0},
-                tools="google_search_retrieval",
-            )
             if field == 'density_g_ml':
                 prompt = (
                     f"What is the density of '{food_name}' in grams per milliliter (g/ml) "
@@ -390,8 +383,46 @@ class NutritionRAG:
                 )
                 lo, hi = 1.0, 900.0
 
-            response = model.generate_content(prompt)
-            text = response.text.strip()
+            text = ""
+            try:
+                from google import genai as genai_new
+                from google.genai import types
+
+                client = genai_new.Client(api_key=self._gemini_api_key)
+                config_kwargs = {"temperature": 0.0}
+
+                # Prefer Google Search grounding when the installed SDK supports it,
+                # but degrade cleanly to a plain Gemini lookup if the tool surface
+                # differs across local/prod environments.
+                if hasattr(types, "Tool"):
+                    if hasattr(types, "GoogleSearch"):
+                        config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+                    elif hasattr(types, "GoogleSearchRetrieval"):
+                        config_kwargs["tools"] = [
+                            types.Tool(google_search_retrieval=types.GoogleSearchRetrieval())
+                        ]
+
+                response = client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=prompt,
+                    config=types.GenerateContentConfig(**config_kwargs),
+                )
+                text = (response.text or "").strip()
+            except Exception as new_sdk_error:
+                logger.warning(
+                    f"Gemini grounding [{field}] new SDK failed for '{food_name}', "
+                    f"retrying legacy client without grounding tool: {new_sdk_error}"
+                )
+                import google.generativeai as genai
+
+                genai.configure(api_key=self._gemini_api_key)
+                model = genai.GenerativeModel(
+                    "gemini-2.5-flash",
+                    generation_config={"temperature": 0.0},
+                )
+                response = model.generate_content(prompt)
+                text = (response.text or "").strip()
+
             match = re.search(r'\b(\d+\.?\d*)\b', text)
             if match:
                 val = float(match.group(1))

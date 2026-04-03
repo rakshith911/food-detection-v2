@@ -44,6 +44,7 @@ import logging
 
 from transformers import AutoProcessor, AutoModelForCausalLM
 from sam2.build_sam import build_sam2_video_predictor
+from app.production_models import load_sam3, load_zoedepth
 
 logger = logging.getLogger(__name__)
 
@@ -350,12 +351,24 @@ class ModelManager:
             logger.info("CUDA not available (e.g. Torch not compiled with CUDA) - using CPU")
         else:
             self.device = config.DEVICE
+
+        logger.info(
+            "[ModelManager] Runtime summary: "
+            f"device={self.device}, "
+            f"use_production_image_pipeline={getattr(config, 'USE_PRODUCTION_IMAGE_PIPELINE', None)}, "
+            f"production_root={getattr(config, 'PRODUCTION_ROOT', None)}, "
+            f"sam3_model_dir={getattr(config, 'SAM3_MODEL_DIR', None)}, "
+            f"zoedepth_checkpoint={getattr(config, 'ZOEDEPTH_CHECKPOINT', None)}, "
+            f"midas_repo_dir={getattr(config, 'MIDAS_REPO_DIR', None)}"
+        )
         
         # Models will be loaded on demand
         self._florence2 = None
         self._flan_t5 = None
         self._sam2 = None
+        self._sam3 = None
         self._depth_anything = None
+        self._zoedepth = None
         self._rag = None
     
     @property
@@ -400,6 +413,32 @@ class ModelManager:
         return self._depth_anything
 
     @property
+    def sam3(self):
+        """Lazy load SAM3"""
+        if self._sam3 is None:
+            logger.info(f"[ModelManager] Loading SAM3 for production image pipeline from {self.config.SAM3_MODEL_DIR}")
+            self._sam3 = load_sam3(
+                model_dir=self.config.SAM3_MODEL_DIR,
+                device=self.device
+            )
+        return self._sam3
+
+    @property
+    def zoedepth(self):
+        """Lazy load ZoeDepth"""
+        if self._zoedepth is None:
+            logger.info(
+                f"[ModelManager] Loading ZoeDepth for production image pipeline from "
+                f"{self.config.ZOEDEPTH_CHECKPOINT} with MiDaS repo {self.config.MIDAS_REPO_DIR}"
+            )
+            self._zoedepth = load_zoedepth(
+                checkpoint_path=self.config.ZOEDEPTH_CHECKPOINT,
+                midas_repo_dir=self.config.MIDAS_REPO_DIR,
+                device=self.device
+            )
+        return self._zoedepth
+
+    @property
     def rag(self):
         """Lazy load NutritionRAG"""
         if self._rag is None:
@@ -416,7 +455,9 @@ class ModelManager:
         logger.info("Preloading all models...")
         _ = self.florence2
         _ = self.sam2
+        _ = self.sam3
         _ = self.depth_anything
+        _ = self.zoedepth
         _ = self.rag
         logger.info("All models preloaded")
 
@@ -424,7 +465,9 @@ class ModelManager:
         """Clear all cached models"""
         self._florence2 = None
         self._sam2 = None
+        self._sam3 = None
         self._depth_anything = None
+        self._zoedepth = None
         self._rag = None
         model_cache.clear()
         logger.info("Model cache cleared")
@@ -453,4 +496,3 @@ if __name__ == "__main__":
     print(f"   ✓ SAM2: {type(sam2).__name__}")
     
     print("\nDone!")
-

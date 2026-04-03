@@ -38,6 +38,10 @@
                 {
                     "name": "DEBUG",
                     "value": "true"
+                },
+                {
+                    "name": "PRODUCTION_ASSETS_PREFIX",
+                    "value": "production_assets/model_assets"
                 }
             ],
             "mountPoints": [],

@@ -65,11 +65,18 @@ DYNAMODB_JOBS_TABLE = os.environ.get('DYNAMODB_JOBS_TABLE')
 SQS_VIDEO_QUEUE_URL = os.environ.get('SQS_VIDEO_QUEUE_URL')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 DEVICE = os.environ.get('DEVICE', 'cpu')
+USE_PRODUCTION_IMAGE_PIPELINE = os.environ.get('USE_PRODUCTION_IMAGE_PIPELINE', 'true')
+ZOEDEPTH_REPO_DIR = os.environ.get('ZOEDEPTH_REPO_DIR')
+PRODUCTION_ASSETS_PREFIX = os.environ.get('PRODUCTION_ASSETS_PREFIX', 'production_assets/model_assets')
 
 # Processing settings
 MAX_FRAMES = int(os.environ.get('MAX_FRAMES', '60'))
 FRAME_SKIP = int(os.environ.get('FRAME_SKIP', '10'))
 DETECTION_INTERVAL = int(os.environ.get('DETECTION_INTERVAL', '30'))
+
+print(f"🚀 Worker env: DEVICE={DEVICE} USE_PRODUCTION_IMAGE_PIPELINE={USE_PRODUCTION_IMAGE_PIPELINE}")
+print(f"🚀 Worker env: ZOEDEPTH_REPO_DIR={ZOEDEPTH_REPO_DIR}")
+print(f"🚀 Worker env: PRODUCTION_ASSETS_PREFIX={PRODUCTION_ASSETS_PREFIX}")
 
 
 def convert_floats_to_decimal(obj):
@@ -638,6 +645,65 @@ def download_models_from_s3():
             print(f"  ✗ Failed to download {s3_key}: {e}")
     
     print("Model download complete!")
+
+    download_production_assets_from_s3()
+
+
+def download_production_assets_from_s3():
+    """Download SAM3/ZoeDepth/MiDaS production assets from S3."""
+    if not S3_MODELS_BUCKET:
+        print("S3_MODELS_BUCKET not set, skipping production asset download")
+        return
+
+    prefix = (PRODUCTION_ASSETS_PREFIX or "").strip().strip("/")
+    if not prefix:
+        print("PRODUCTION_ASSETS_PREFIX not set, skipping production asset download")
+        return
+
+    local_root = "/app/PRODUCTION/model_assets"
+    os.makedirs(local_root, exist_ok=True)
+
+    print(f"Syncing production assets from s3://{S3_MODELS_BUCKET}/{prefix}/ ...")
+    paginator = s3.get_paginator("list_objects_v2")
+    found_any = False
+
+    for page in paginator.paginate(Bucket=S3_MODELS_BUCKET, Prefix=f"{prefix}/"):
+        for item in page.get("Contents", []):
+            s3_key = item["Key"]
+            if s3_key.endswith("/"):
+                continue
+            found_any = True
+            relative_key = s3_key[len(prefix) + 1:]
+            local_path = os.path.join(local_root, relative_key)
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            if os.path.exists(local_path):
+                print(f"  ✓ {relative_key} already exists")
+                continue
+            try:
+                print(f"  Downloading {s3_key}...")
+                s3.download_file(S3_MODELS_BUCKET, s3_key, local_path)
+                print(f"  ✓ Downloaded {relative_key}")
+            except Exception as e:
+                print(f"  ✗ Failed to download {s3_key}: {e}")
+
+    if not found_any:
+        print(
+            f"⚠️ No production assets found at s3://{S3_MODELS_BUCKET}/{prefix}/ "
+            "- SAM3/ZoeDepth image pipeline will not be available"
+        )
+        return
+
+    expected = [
+        "/app/PRODUCTION/model_assets/sam3_foodseg_final/config.json",
+        "/app/PRODUCTION/model_assets/sam3_foodseg_final/model.safetensors",
+        "/app/PRODUCTION/model_assets/zoedepth/ZoeD_M12_N.pt",
+        "/app/PRODUCTION/model_assets/midas_repo/hubconf.py",
+    ]
+    missing = [path for path in expected if not os.path.exists(path)]
+    if missing:
+        print(f"⚠️ Production assets downloaded but missing expected files: {missing}")
+    else:
+        print("✅ Production assets ready for SAM3/ZoeDepth image pipeline")
 
 
 if __name__ == '__main__':

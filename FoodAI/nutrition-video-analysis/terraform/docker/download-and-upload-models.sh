@@ -3,7 +3,11 @@ set -ex
 
 # Configuration
 REGION="us-east-1"
-S3_BUCKET="nutrition-video-analysis-dev-models-60ppnqfp"
+S3_BUCKET="nutrition-video-analysis-dev-models-dbenpoj2"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+PRODUCTION_MODEL_ASSETS_DIR="${REPO_ROOT}/PRODUCTION/model_assets"
+PRODUCTION_ASSETS_PREFIX="production_assets/model_assets"
 
 echo "=== Starting model checkpoint download and upload ==="
 
@@ -36,6 +40,13 @@ aws s3 cp checkpoints/ s3://${S3_BUCKET}/checkpoints/ --recursive --region ${REG
 echo "=== Uploading Grounding DINO checkpoints to S3 ==="
 aws s3 cp gdino_checkpoints/ s3://${S3_BUCKET}/gdino_checkpoints/ --recursive --region ${REGION}
 
+if [ -d "${PRODUCTION_MODEL_ASSETS_DIR}" ]; then
+    echo "=== Uploading production model assets to S3 ==="
+    aws s3 cp "${PRODUCTION_MODEL_ASSETS_DIR}/" "s3://${S3_BUCKET}/${PRODUCTION_ASSETS_PREFIX}/" --recursive --region ${REGION}
+else
+    echo "=== Skipping production model assets upload: ${PRODUCTION_MODEL_ASSETS_DIR} not found ==="
+fi
+
 # Verify uploads
 echo "=== Verifying uploads ==="
 echo "SAM2 checkpoints:"
@@ -43,6 +54,9 @@ aws s3 ls s3://${S3_BUCKET}/checkpoints/ --region ${REGION} --recursive --human-
 
 echo "Grounding DINO checkpoints:"
 aws s3 ls s3://${S3_BUCKET}/gdino_checkpoints/ --region ${REGION} --recursive --human-readable
+
+echo "Production model assets:"
+aws s3 ls s3://${S3_BUCKET}/${PRODUCTION_ASSETS_PREFIX}/ --region ${REGION} --recursive --human-readable
 
 # Write completion marker
 echo "Model upload completed at $(date)" > /tmp/upload-complete.txt

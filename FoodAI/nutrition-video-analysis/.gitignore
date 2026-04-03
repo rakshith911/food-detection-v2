@@ -13,5 +13,12 @@ tfplan
 *.log
 *.txt
 
+# Local model/test artifacts
+terraform/docker/outputs/
+terraform/docker/PRODUCTION/
+terraform/docker/vendor/
+terraform/docker/venv/
+terraform/docker/**/__pycache__/
+
 # PowerShell scripts (local only)
 build-and-push.ps1

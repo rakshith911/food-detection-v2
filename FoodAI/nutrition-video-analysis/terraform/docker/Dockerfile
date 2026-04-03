@@ -11,6 +11,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV HF_HUB_OFFLINE=0
 ENV TRANSFORMERS_OFFLINE=0
 ENV TRUST_REMOTE_CODE=1
+ENV HF_HOME=/app/hf_cache
+ENV TRANSFORMERS_CACHE=/app/hf_cache/hub
+ENV TMPDIR=/tmp
+ENV TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor_app
+ENV USER=appuser
+ENV LOGNAME=appuser
+ENV ZOEDEPTH_REPO_DIR=/app/vendor/ZoeDepth
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -26,15 +33,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create app directory
 WORKDIR /app
 
+RUN mkdir -p /app/hf_cache /app/vendor /app/PRODUCTION/model_assets /tmp/torchinductor_app
+
 # CRITICAL: Install NumPy 1.24.3 FIRST before PyTorch
-# PyTorch 2.1.0 was compiled with NumPy 1.x and will break with NumPy 2.x
 RUN pip install --no-cache-dir "numpy==1.24.3"
 
 # Install PyTorch CPU version (will use the pinned NumPy 1.24.3)
-# Note: 2.1.0+cpu is no longer available from CPU index, using regular PyPI version
-# This will work fine for CPU-only environments (CUDA won't be used)
 RUN pip install --no-cache-dir \
-    torch==2.1.0 torchvision==0.16.0
+    torch==2.4.1 torchvision==0.19.1
 
 # Copy and install Python dependencies
 COPY requirements.txt .
@@ -57,9 +63,8 @@ RUN echo "numpy==1.24.3" > /tmp/constraints_st.txt && \
     echo "✅ Verified NumPy 1.24.3 and sentence-transformers 3.3.1 are installed"
 
 # Force reinstall transformers to break Docker cache (use version from requirements.txt)
-# Use 4.40.0-4.44.x for PyTorch 2.1.0 compatibility (4.45.0+ requires PyTorch 2.2.0+)
 # CRITICAL: Reinstall NumPy after transformers to prevent upgrade
-RUN pip install --no-cache-dir --force-reinstall "transformers>=4.40.0,<4.45.0" && \
+RUN pip install --no-cache-dir --force-reinstall "git+https://github.com/huggingface/transformers.git" && \
     pip install --no-cache-dir --force-reinstall --no-deps "numpy==1.24.3" && \
     python -c "import numpy; assert numpy.__version__ == '1.24.3', f'NumPy upgraded to {numpy.__version__} after transformers install!'"
 
@@ -67,6 +72,11 @@ RUN pip install --no-cache-dir --force-reinstall "transformers>=4.40.0,<4.45.0" 
 # The actual model will use eager attention as specified in attn_implementation parameter
 RUN mkdir -p /usr/local/lib/python3.10/site-packages/flash_attn && \
     echo "# Dummy flash_attn module for Florence-2 CPU compatibility" > /usr/local/lib/python3.10/site-packages/flash_attn/__init__.py
+
+# Install ZoeDepth source package from the official repository so the packaged
+# local checkpoint in PRODUCTION can be loaded in the same runtime.
+RUN git clone --depth 1 https://github.com/isl-org/ZoeDepth.git /app/vendor/ZoeDepth && \
+    python -c "import sys; sys.path.insert(0, '/app/vendor/ZoeDepth'); import zoedepth; print('✅ zoedepth imported successfully')"
 
 # Copy worker script
 COPY worker.py .
@@ -93,6 +103,9 @@ RUN ls -la /app/ && \
     test -f /app/worker.py && \
     test -f /app/nutrition_rag_system.py && \
     echo "All required files present"
+
+RUN python -c "from transformers import Sam3Model, Sam3Processor; print('✅ SAM3 classes available in transformers')" && \
+    python -c "import zoedepth; print('✅ ZoeDepth package available')"
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \

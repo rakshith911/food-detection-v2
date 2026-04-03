@@ -42,3 +42,8 @@ yarn-error.*
 /android
 FoodAI/nutrition-video-analysis/terraform/docker/venv/
 FoodAI/nutrition-video-analysis/terraform/docker/checkpoints/
+FoodAI/nutrition-video-analysis/terraform/docker/outputs/
+FoodAI/nutrition-video-analysis/terraform/docker/PRODUCTION/
+FoodAI/nutrition-video-analysis/terraform/docker/vendor/
+FoodAI/nutrition-video-analysis/terraform/docker/**/__pycache__/
+PRODUCTION/
