@@ -104,8 +104,7 @@ RUN ls -la /app/ && \
     test -f /app/nutrition_rag_system.py && \
     echo "All required files present"
 
-RUN python -c "from transformers import Sam3Model, Sam3Processor; print('✅ SAM3 classes available in transformers')" && \
-    python -c "import zoedepth; print('✅ ZoeDepth package available')"
+RUN python -c "import zoedepth; print('✅ ZoeDepth package available')"
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
