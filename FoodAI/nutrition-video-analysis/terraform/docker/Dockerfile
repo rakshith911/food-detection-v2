@@ -73,6 +73,14 @@ RUN pip install --no-cache-dir --force-reinstall "git+https://github.com/hugging
 RUN mkdir -p /usr/local/lib/python3.10/site-packages/flash_attn && \
     echo "# Dummy flash_attn module for Florence-2 CPU compatibility" > /usr/local/lib/python3.10/site-packages/flash_attn/__init__.py
 
+# Patch transformers import_utils.py to handle missing flash_attn in PACKAGE_DISTRIBUTION_MAPPING.
+# transformers git HEAD (e1b80de) calls PACKAGE_DISTRIBUTION_MAPPING["flash_attn"] which KeyErrors
+# on CPU containers where flash_attn is not a registered package. Change to .get() so it returns
+# False (unavailable) instead of crashing. This keeps eager attention as the fallback.
+RUN IMPORT_UTILS="/usr/local/lib/python3.10/site-packages/transformers/utils/import_utils.py" && \
+    sed -i 's/PACKAGE_DISTRIBUTION_MAPPING\["flash_attn"\]/PACKAGE_DISTRIBUTION_MAPPING.get("flash_attn", [])/g' "$IMPORT_UTILS" && \
+    python -c "from transformers import AutoModel, AutoProcessor; print('✅ transformers imports OK after flash_attn patch')"
+
 # Install ZoeDepth source package from the official repository so the packaged
 # local checkpoint in PRODUCTION can be loaded in the same runtime.
 RUN git clone --depth 1 https://github.com/isl-org/ZoeDepth.git /app/vendor/ZoeDepth && \
