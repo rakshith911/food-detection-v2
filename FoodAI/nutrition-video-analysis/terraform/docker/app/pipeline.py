@@ -1241,33 +1241,25 @@ class NutritionVideoPipeline:
             if volume_ml <= 0:
                 continue
 
-            density, fao_match, fao_src = rag._get_density_with_match(label)
-            kcal_per_100g, usda_match, usda_src = rag._get_calories_with_match(label)
-            mass_g = volume_ml * density
-            total_kcal = (mass_g / 100.0) * kcal_per_100g
-            nutrition = {
+            nutrition = rag.get_nutrition_for_food(label, volume_ml, quantity=1)
+            density = float(nutrition.get("density_g_per_ml") or 0.0)
+            kcal_per_100g = float(nutrition.get("calories_per_100g") or 0.0)
+            mass_g = float(nutrition.get("mass_g") or 0.0)
+            total_kcal = float(nutrition.get("total_calories") or 0.0)
+            nutrition.update({
                 "food_name": label,
                 "role_tag": role_tag,
                 "confidence": confidence,
                 "volume_confidence": volume_confidence,
                 "quantity": 1,
                 "volume_ml": round(volume_ml, 1),
-                "density_g_per_ml": round(float(density), 4),
-                "density_source": fao_src,
-                "density_matched": fao_match,
-                "mass_g": round(float(mass_g), 1),
-                "calories_per_100g": round(float(kcal_per_100g), 1),
-                "calorie_source": usda_src,
-                "calorie_matched": usda_match,
-                "total_calories": round(float(total_kcal), 1),
                 "matched_food": label,
-            }
+            })
             logger.info(
                 f"[{job_id}] {role_tag} '{label}': confidence={confidence:.2f} volume={volume_ml:.1f}ml "
-                f"density={density:.3f}[{fao_match}] weight={mass_g:.1f}g "
-                f"kcal/100g={kcal_per_100g:.1f}[{usda_match}] total_kcal={total_kcal:.1f}"
+                f"density={density:.3f}[{nutrition.get('density_matched')}] weight={mass_g:.1f}g "
+                f"kcal/100g={kcal_per_100g:.1f}[{nutrition.get('calorie_matched')}] total_kcal={total_kcal:.1f}"
             )
-            nutrition = self._attach_grounding_metadata(nutrition, rag, label, fao_src, usda_src)
             nutrition_items.append(nutrition)
             total_food_volume += volume_ml
             total_mass += mass_g
@@ -1282,35 +1274,27 @@ class NutritionVideoPipeline:
             if volume_ml <= 0:
                 continue
 
-            density, fao_match, fao_src = rag._get_density_with_match(label)
-            kcal_per_100g, usda_match, usda_src = rag._get_calories_with_match(label)
-            mass_g = volume_ml * density
-            total_kcal = (mass_g / 100.0) * kcal_per_100g
-            nutrition = {
+            nutrition = rag.get_nutrition_for_food(label, volume_ml, quantity=1)
+            density = float(nutrition.get("density_g_per_ml") or 0.0)
+            kcal_per_100g = float(nutrition.get("calories_per_100g") or 0.0)
+            mass_g = float(nutrition.get("mass_g") or 0.0)
+            total_kcal = float(nutrition.get("total_calories") or 0.0)
+            nutrition.update({
                 "food_name": label,
                 "role_tag": role_tag,
                 "confidence": confidence,
                 "volume_confidence": volume_confidence,
                 "quantity": 1,
                 "volume_ml": round(volume_ml, 1),
-                "density_g_per_ml": round(float(density), 4),
-                "density_source": fao_src,
-                "density_matched": fao_match,
-                "mass_g": round(float(mass_g), 1),
-                "calories_per_100g": round(float(kcal_per_100g), 1),
-                "calorie_source": usda_src,
-                "calorie_matched": usda_match,
-                "total_calories": round(float(total_kcal), 1),
                 "matched_food": label,
                 "reason": item.get("reason"),
                 "is_incremental": bool(item.get("is_incremental")),
-            }
+            })
             logger.info(
                 f"[{job_id}] inferred {role_tag} '{label}': confidence={confidence:.2f} volume={volume_ml:.1f}ml "
-                f"density={density:.3f}[{fao_match}] weight={mass_g:.1f}g "
-                f"kcal/100g={kcal_per_100g:.1f}[{usda_match}] total_kcal={total_kcal:.1f}"
+                f"density={density:.3f}[{nutrition.get('density_matched')}] weight={mass_g:.1f}g "
+                f"kcal/100g={kcal_per_100g:.1f}[{nutrition.get('calorie_matched')}] total_kcal={total_kcal:.1f}"
             )
-            nutrition = self._attach_grounding_metadata(nutrition, rag, label, fao_src, usda_src)
             nutrition_items.append(nutrition)
             total_food_volume += volume_ml
             total_mass += mass_g
@@ -5863,32 +5847,24 @@ Example:
                 # Priority 1: Gemini volume estimate (from depth pass) + FAO density + USDA kcal
                 gemini_volume_ml = item_data.get('gemini_volume_ml')
                 if gemini_volume_ml and gemini_volume_ml > 0:
-                    density, fao_match, fao_src = rag._get_density_with_match(label)
-                    kcal_per_100g, usda_match, usda_src = rag._get_calories_with_match(label)
-                    mass_g = gemini_volume_ml * density
-                    total_kcal = (mass_g / 100.0) * kcal_per_100g
-                    nutrition = {
+                    nutrition = rag.get_nutrition_for_food(label, gemini_volume_ml, quantity=int(quantity))
+                    density = float(nutrition.get('density_g_per_ml') or 0.0)
+                    kcal_per_100g = float(nutrition.get('calories_per_100g') or 0.0)
+                    mass_g = float(nutrition.get('mass_g') or 0.0)
+                    total_kcal = float(nutrition.get('total_calories') or 0.0)
+                    nutrition.update({
                         'food_name': label,
                         'quantity': int(quantity),
                         'volume_ml': gemini_volume_ml,
-                        'density_g_per_ml': density,
-                        'density_source': fao_src,
-                        'density_matched': fao_match,
                         'density_similarity': 1.0,
-                        'mass_g': round(mass_g, 1),
-                        'calories_per_100g': round(kcal_per_100g, 1),
-                        'total_calories': round(total_kcal, 1),
-                        'calorie_source': usda_src,
-                        'calorie_matched': usda_match,
                         'calorie_similarity': 1.0,
                         'matched_food': label,
-                    }
+                    })
                     logger.info(
                         f"[{job_id}] '{label}': volume={gemini_volume_ml:.1f}ml "
-                        f"density={density:.3f}[{fao_match}] mass={mass_g:.1f}g "
-                        f"kcal={total_kcal:.0f}[{usda_match}] [depth+FAO+USDA]"
+                        f"density={density:.3f}[{nutrition.get('density_matched')}] mass={mass_g:.1f}g "
+                        f"kcal={total_kcal:.0f}[{nutrition.get('calorie_matched')}] [shared nutrition lookup]"
                     )
-                    nutrition = self._attach_grounding_metadata(nutrition, rag, label, fao_src, usda_src)
 
                 else:
                     # Priority 2: fallback to Gemini detection grams + USDA kcal
