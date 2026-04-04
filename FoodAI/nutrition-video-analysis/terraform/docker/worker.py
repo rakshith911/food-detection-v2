@@ -491,31 +491,29 @@ def process_message(message: dict, pipeline=None):
             # Process media (image or video) — pass user_context so Gemini prompts are enriched
             results = process_media(media_path, job_id, user_context=user_context, pipeline=pipeline)
 
-            # Upload segmentation debug images to S3 and embed presigned URLs in results
+            # Upload segmentation debug images to S3.
+            # Presigned URLs are generated fresh by the Lambda results_handler on each
+            # getResults call — ECS task STS credentials cap ExpiresIn at <7 days and
+            # expire before the stored URL would be used anyway.
             output_dir = f"/app/data/outputs/production_{job_id}"
             image_assets = {
                 "sam3_segmentation": f"{output_dir}/sam3_segmentation.png",
                 "zoedepth_colored": f"{output_dir}/zoedepth_colored.png",
                 "rgb": f"{output_dir}/rgb.png",
             }
-            overlay_urls = []
+            uploaded_keys = []
             for asset_name, local_path in image_assets.items():
                 if os.path.exists(local_path):
-                    s3_key = f"results/{job_id}/{asset_name}.png"
+                    asset_s3_key = f"results/{job_id}/{asset_name}.png"
                     try:
-                        s3.upload_file(local_path, S3_RESULTS_BUCKET, s3_key, ExtraArgs={"ContentType": "image/png"})
-                        url = s3v4.generate_presigned_url(
-                            "get_object",
-                            Params={"Bucket": S3_RESULTS_BUCKET, "Key": s3_key},
-                            ExpiresIn=86400 * 30,  # 30-day expiry
-                        )
-                        overlay_urls.append({"name": asset_name, "url": url})
-                        print(f"[Images] Uploaded {asset_name} → s3://{S3_RESULTS_BUCKET}/{s3_key}")
+                        s3.upload_file(local_path, S3_RESULTS_BUCKET, asset_s3_key, ExtraArgs={"ContentType": "image/png"})
+                        uploaded_keys.append({"name": asset_name, "s3_key": asset_s3_key})
+                        print(f"[Images] Uploaded {asset_name} → s3://{S3_RESULTS_BUCKET}/{asset_s3_key}")
                     except Exception as img_err:
                         print(f"[Images] Failed to upload {asset_name}: {img_err}")
-            if overlay_urls:
-                results["segmented_images"] = {"overlay_urls": overlay_urls}
-                print(f"[Images] {len(overlay_urls)} segmented images attached to results")
+            if uploaded_keys:
+                results["segmented_images"] = {"asset_keys": uploaded_keys}
+                print(f"[Images] {len(uploaded_keys)} segmented images uploaded to S3")
 
             # Upload results
             results_key = upload_results(job_id, results)

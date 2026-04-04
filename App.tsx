@@ -502,103 +502,132 @@ function AppContent() {
     console.log('[AppContent] showWelcome changed:', showWelcome, 'isAuthenticated:', isAuthenticated);
   }, [showWelcome, isAuthenticated]);
 
-  // When the app returns to the foreground, re-check any analyses that are still
-  // stuck at 'analyzing' — this handles the case where the app was killed while
-  // the backend was still processing.
+  // Re-check any analyses stuck at 'analyzing' — covers both foreground re-entry
+  // and cold start (where AppState is already 'active' when the listener registers).
   const historyRef = useRef(history);
   historyRef.current = history;
   const userRef = useRef(user);
   userRef.current = user;
 
-  useEffect(() => {
-    const subscription = AppState.addEventListener('change', async (nextState) => {
-      if (nextState !== 'active') return;
+  const isHistoryLoading = useAppSelector((state) => state.history.isLoading);
+  const hasRunColdStartCheck = useRef(false);
+  const historyWasLoading = useRef(false);
 
-      const pendingEntries = historyRef.current.filter(
-        (entry) => entry.analysisStatus === 'analyzing' && entry.job_id
-      );
+  const checkPendingJobs = useCallback(async (source: string) => {
+    const pendingEntries = historyRef.current.filter(
+      (entry) => entry.analysisStatus === 'analyzing' && entry.job_id
+    );
 
-      if (pendingEntries.length === 0) return;
+    if (pendingEntries.length === 0) return;
 
-      console.log(`[ResumeCheck] App became active — re-checking ${pendingEntries.length} pending job(s)`);
+    console.log(`[ResumeCheck] ${source} — re-checking ${pendingEntries.length} pending job(s)`);
 
-      for (const entry of pendingEntries) {
-        const jobId = entry.job_id!;
+    for (const entry of pendingEntries) {
+      const jobId = entry.job_id!;
 
-        // Re-read the latest entry from the ref — PreviewScreen polling may have already completed it
-        const currentEntry = historyRef.current.find((e) => e.id === entry.id);
-        if (!currentEntry || currentEntry.analysisStatus !== 'analyzing') {
-          console.log(`[ResumeCheck] Skipping job ${jobId} — already resolved by in-app polling`);
+      // Re-read the latest entry from the ref — PreviewScreen polling may have already completed it
+      const currentEntry = historyRef.current.find((e) => e.id === entry.id);
+      if (!currentEntry || currentEntry.analysisStatus !== 'analyzing') {
+        console.log(`[ResumeCheck] Skipping job ${jobId} — already resolved by in-app polling`);
+        continue;
+      }
+
+      console.log(`[ResumeCheck] Checking job ${jobId} for analysis ${entry.id}...`);
+      try {
+        const status = await nutritionAnalysisAPI.checkStatus(jobId);
+        if (!status) {
+          console.warn(`[ResumeCheck] Could not reach backend for job ${jobId}`);
           continue;
         }
 
-        console.log(`[ResumeCheck] Checking job ${jobId} for analysis ${entry.id}...`);
-        try {
-          const status = await nutritionAnalysisAPI.checkStatus(jobId);
-          if (!status) {
-            console.warn(`[ResumeCheck] Could not reach backend for job ${jobId}`);
+        console.log(`[ResumeCheck] Job ${jobId} status: ${status.status}`);
+
+        if (status.status === 'completed') {
+          // Check once more that PreviewScreen hasn't resolved it while we were awaiting checkStatus
+          const stillPending = historyRef.current.find((e) => e.id === entry.id);
+          if (!stillPending || stillPending.analysisStatus !== 'analyzing') {
+            console.log(`[ResumeCheck] Skipping update — analysis ${entry.id} already resolved`);
             continue;
           }
 
-          console.log(`[ResumeCheck] Job ${jobId} status: ${status.status}`);
+          const results = await nutritionAnalysisAPI.getResults(jobId, true, true);
+          if (!results) continue;
 
-          if (status.status === 'completed') {
-            // Check once more that PreviewScreen hasn't resolved it while we were awaiting checkStatus
-            const stillPending = historyRef.current.find((e) => e.id === entry.id);
-            if (!stillPending || stillPending.analysisStatus !== 'analyzing') {
-              console.log(`[ResumeCheck] Skipping update — analysis ${entry.id} already resolved`);
-              continue;
-            }
+          const items = results.items ?? [];
+          const summary = results.nutrition_summary;
+          const dishTables = buildDishTablesFromItems(items, (currentEntry as any)?.questionnaireContext);
+          const dishContents = items.length > 0
+            ? getBaseDishContents(dishTables)
+            : [{ id: `${Date.now()}_0`, name: 'No food detected', weight: '', calories: '0' }];
+          const totalCalories = getOverallCaloriesFromTables(dishTables) || summary?.total_calories_kcal || 0;
+          const mealName = items.length > 0
+            ? (results.meal_name || getMealNameFromTables(dishTables, 'Analyzed Meal'))
+            : 'No food detected';
 
-            const results = await nutritionAnalysisAPI.getResults(jobId, true);
-            if (!results) continue;
-
-            const items = results.items ?? [];
-            const summary = results.nutrition_summary;
-            const dishTables = buildDishTablesFromItems(items, (currentEntry as any)?.questionnaireContext);
-            const dishContents = items.length > 0
-              ? getBaseDishContents(dishTables)
-              : [{ id: `${Date.now()}_0`, name: 'No food detected', weight: '', calories: '0' }];
-            const totalCalories = getOverallCaloriesFromTables(dishTables) || summary?.total_calories_kcal || 0;
-            const mealName = items.length > 0
-              ? getMealNameFromTables(dishTables, 'Analyzed Meal')
-              : 'No food detected';
-
-            if (userRef.current?.email) {
-              await dispatch(updateAnalysis({
-                userEmail: userRef.current.email,
-                analysisId: entry.id,
-                updates: {
-                  analysisStatus: 'completed',
-                  analysisProgress: 100,
-                  dishTables,
-                  dishContents,
-                  mealName,
-                  nutritionalInfo: { calories: totalCalories, protein: 0, carbs: 0, fat: 0 },
-                  analysisResult: {
-                    summary: `Detected ${dishContents.length} food items with ${Math.round(totalCalories)} calories`,
-                    nutrition_summary: summary,
-                    job_id: jobId,
-                  } as any,
+          if (userRef.current?.email) {
+            await dispatch(updateAnalysis({
+              userEmail: userRef.current.email,
+              analysisId: entry.id,
+              updates: {
+                analysisStatus: 'completed',
+                analysisProgress: 100,
+                dishTables,
+                dishContents,
+                mealName,
+                nutritionalInfo: { calories: totalCalories, protein: 0, carbs: 0, fat: 0 },
+                analysisResult: {
+                  summary: `Detected ${dishContents.length} food items with ${Math.round(totalCalories)} calories`,
+                  nutrition_summary: summary,
                   job_id: jobId,
-                },
-              }));
-              console.log(`[ResumeCheck] ✅ Updated analysis ${entry.id} to completed`);
-            }
-          } else if (status.status === 'failed') {
-            dispatch(updateAnalysisProgress({ id: entry.id, progress: 0, status: 'failed' }));
-            console.log(`[ResumeCheck] ❌ Job ${jobId} failed`);
-          } else {
-            console.log(`[ResumeCheck] Job ${jobId} still in progress (${status.status})`);
+                } as any,
+                job_id: jobId,
+                ...(results.segmented_images ? { segmented_images: results.segmented_images } : {}),
+              },
+            }));
+            console.log(`[ResumeCheck] ✅ Updated analysis ${entry.id} to completed`);
           }
-        } catch (err) {
-          console.warn(`[ResumeCheck] Error checking job ${jobId}:`, err);
+        } else if (status.status === 'failed') {
+          dispatch(updateAnalysisProgress({ id: entry.id, progress: 0, status: 'failed' }));
+          console.log(`[ResumeCheck] ❌ Job ${jobId} failed`);
+        } else {
+          console.log(`[ResumeCheck] Job ${jobId} still in progress (${status.status})`);
         }
+      } catch (err) {
+        console.warn(`[ResumeCheck] Error checking job ${jobId}:`, err);
       }
-    });
-
-    return () => subscription.remove();
+    }
   }, [dispatch]);
+
+  // Foreground re-entry: AppState fires when the app transitions background → active
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', async (nextState) => {
+      if (nextState !== 'active') return;
+      await checkPendingJobs('App became active');
+    });
+    return () => subscription.remove();
+  }, [checkPendingJobs]);
+
+  // Cold-start / re-open: app is already 'active' when the listener registers,
+  // so AppState never fires. Instead, watch for history to finish its first load
+  // and run the same check once.
+  useEffect(() => {
+    if (!isAuthenticated) {
+      // Reset on logout so the next login triggers a fresh cold-start check
+      hasRunColdStartCheck.current = false;
+      historyWasLoading.current = false;
+      return;
+    }
+    if (isHistoryLoading) {
+      historyWasLoading.current = true;
+      return;
+    }
+    // Only run after we've seen at least one loading cycle (prevents firing before
+    // loadHistory is even dispatched, when isHistoryLoading is still false)
+    if (!historyWasLoading.current) return;
+    if (hasRunColdStartCheck.current) return;
+    hasRunColdStartCheck.current = true;
+    checkPendingJobs('Cold start (history loaded)');
+  }, [isAuthenticated, isHistoryLoading, checkPendingJobs]);
 
   const handleSplashFinish = useCallback(() => {
     Animated.timing(splashOpacity, {

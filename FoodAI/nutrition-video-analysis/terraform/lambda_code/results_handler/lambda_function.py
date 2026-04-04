@@ -123,68 +123,85 @@ def lambda_handler(event, context):
                 result['detailed_results'] = None
                 result['warning'] = f'Error fetching detailed results: {str(e)}'
 
-            # Generate presigned URLs for segmented images
-            try:
-                segmented_prefix = f'segmented_images/{job_id}/'
-                segmented_objects = s3.list_objects_v2(
-                    Bucket=S3_RESULTS_BUCKET,
-                    Prefix=segmented_prefix,
-                    MaxKeys=100  # Limit to avoid timeout
-                )
+            # Generate fresh presigned URLs for production image pipeline assets.
+            # The worker stores images under results/{job_id}/ and records only S3 keys
+            # (no presigned URLs) because ECS STS credentials cap ExpiresIn at <7 days.
+            # The Lambda generates fresh 1-hour URLs on every detailed request.
+            PRODUCTION_ASSET_NAMES = ['sam3_segmentation', 'zoedepth_colored', 'rgb']
+            production_overlay_urls = []
+            for asset_name in PRODUCTION_ASSET_NAMES:
+                key = f'results/{job_id}/{asset_name}.png'
+                try:
+                    s3.head_object(Bucket=S3_RESULTS_BUCKET, Key=key)
+                    presigned_url = s3.generate_presigned_url(
+                        'get_object',
+                        Params={'Bucket': S3_RESULTS_BUCKET, 'Key': key},
+                        ExpiresIn=3600  # 1 hour — Lambda credentials are always fresh
+                    )
+                    production_overlay_urls.append({'name': asset_name, 'url': presigned_url})
+                except Exception:
+                    pass  # Asset not yet uploaded or doesn't exist for this job
 
-                if 'Contents' in segmented_objects and len(segmented_objects['Contents']) > 0:
-                    segmented_images = {
-                        'overlay_urls': [],
-                        'mask_urls': [],
-                        'video_overlay_url': None
-                    }
+            if production_overlay_urls:
+                result['segmented_images'] = {'overlay_urls': production_overlay_urls}
+                print(f'Generated {len(production_overlay_urls)} fresh presigned URLs for production assets')
+            else:
+                # Fallback: legacy video pipeline segmented images under segmented_images/{job_id}/
+                try:
+                    segmented_prefix = f'segmented_images/{job_id}/'
+                    segmented_objects = s3.list_objects_v2(
+                        Bucket=S3_RESULTS_BUCKET,
+                        Prefix=segmented_prefix,
+                        MaxKeys=100
+                    )
 
-                    for obj in segmented_objects['Contents']:
-                        key = obj['Key']
-                        try:
-                            presigned_url = s3.generate_presigned_url(
-                                'get_object',
-                                Params={
-                                    'Bucket': S3_RESULTS_BUCKET,
-                                    'Key': key
-                                },
-                                ExpiresIn=3600  # 1 hour
-                            )
+                    if 'Contents' in segmented_objects and len(segmented_objects['Contents']) > 0:
+                        segmented_images = {
+                            'overlay_urls': [],
+                            'mask_urls': [],
+                            'video_overlay_url': None
+                        }
 
-                            # Extract frame number from path: segmented_images/{job_id}/frame_XXXXX/...
-                            frame_match = None
-                            if '/frame_' in key:
-                                parts = key.split('/frame_')
-                                if len(parts) > 1:
-                                    frame_match = parts[1].split('/')[0]
+                        for obj in segmented_objects['Contents']:
+                            key = obj['Key']
+                            try:
+                                presigned_url = s3.generate_presigned_url(
+                                    'get_object',
+                                    Params={'Bucket': S3_RESULTS_BUCKET, 'Key': key},
+                                    ExpiresIn=3600
+                                )
+                                frame_match = None
+                                if '/frame_' in key:
+                                    parts = key.split('/frame_')
+                                    if len(parts) > 1:
+                                        frame_match = parts[1].split('/')[0]
 
-                            if key.endswith('.mp4'):
-                                segmented_images['video_overlay_url'] = presigned_url
-                            elif 'overlays' in key and 'all_masks.png' in key:
-                                segmented_images['overlay_urls'].append({
-                                    'frame': frame_match or '00000',
-                                    'url': presigned_url,
-                                    'key': key,
-                                    'type': 'overlay'
-                                })
-                            elif 'masks' in key and key.endswith('.png'):
-                                segmented_images['mask_urls'].append({
-                                    'frame': frame_match or '00000',
-                                    'url': presigned_url,
-                                    'key': key,
-                                    'type': 'mask',
-                                    'object_id': key.split('_obj_')[1].split('_')[0] if '_obj_' in key else None
-                                })
-                        except Exception as e:
-                            print(f"Warning: Could not generate URL for {key}: {e}")
-                            continue
+                                if key.endswith('.mp4'):
+                                    segmented_images['video_overlay_url'] = presigned_url
+                                elif 'overlays' in key and 'all_masks.png' in key:
+                                    segmented_images['overlay_urls'].append({
+                                        'frame': frame_match or '00000',
+                                        'url': presigned_url,
+                                        'key': key,
+                                        'type': 'overlay'
+                                    })
+                                elif 'masks' in key and key.endswith('.png'):
+                                    segmented_images['mask_urls'].append({
+                                        'frame': frame_match or '00000',
+                                        'url': presigned_url,
+                                        'key': key,
+                                        'type': 'mask',
+                                        'object_id': key.split('_obj_')[1].split('_')[0] if '_obj_' in key else None
+                                    })
+                            except Exception as e:
+                                print(f"Warning: Could not generate URL for {key}: {e}")
+                                continue
 
-                    if segmented_images['overlay_urls'] or segmented_images['mask_urls'] or segmented_images['video_overlay_url']:
-                        result['segmented_images'] = segmented_images
-                        print(f"Added {len(segmented_images['overlay_urls'])} overlays, {len(segmented_images['mask_urls'])} masks, video_overlay={'yes' if segmented_images['video_overlay_url'] else 'no'}")
-            except Exception as e:
-                print(f"Warning: Could not generate segmented image URLs: {e}")
-                # Don't fail if segmented images can't be listed
+                        if segmented_images['overlay_urls'] or segmented_images['mask_urls'] or segmented_images['video_overlay_url']:
+                            result['segmented_images'] = segmented_images
+                            print(f"Added {len(segmented_images['overlay_urls'])} overlays, {len(segmented_images['mask_urls'])} masks")
+                except Exception as e:
+                    print(f"Warning: Could not generate segmented image URLs: {e}")
 
         return {
             'statusCode': 200,

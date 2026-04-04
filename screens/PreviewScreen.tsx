@@ -224,6 +224,7 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
       const analysisType: 'image' | 'video' = imageUri ? 'image' : 'video';
       let analysisResult;
       let result;
+      let mealName = 'Analyzed Meal';
 
       const userContext: QuestionnaireContext = {};
 
@@ -358,13 +359,15 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
 
           let dishTables;
           let dishContents;
-          let mealName = 'Analyzed Meal';
 
           if (apiResult.items && apiResult.items.length > 0) {
             console.log('[PreviewScreen] Using extracted items:', apiResult.items.length, 'items');
             dishTables = buildDishTablesFromItems(apiResult.items, userContext);
+            console.log('[PreviewScreen] dishTables built');
             dishContents = getBaseDishContents(dishTables);
+            console.log('[PreviewScreen] dishContents:', dishContents.length, 'rows');
             mealName = apiResult.meal_name || getMealNameFromTables(dishTables, 'Analyzed Meal');
+            console.log('[PreviewScreen] mealName resolved:', mealName);
           } else if (apiResult.detailed_results?.items && apiResult.detailed_results.items.length > 0) {
             console.log('[PreviewScreen] Using detailed_results.items');
             dishTables = buildDishTablesFromItems(apiResult.detailed_results.items, userContext);
@@ -377,9 +380,11 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
             mealName = 'No food detected';
           }
 
+          console.log('[PreviewScreen] Computing totals...');
           const totalCaloriesFromItems = getOverallCaloriesFromTables(dishTables)
             || apiResult.nutrition_summary?.total_calories_kcal
             || 0;
+          console.log('[PreviewScreen] totalCalories:', totalCaloriesFromItems);
 
           analysisResult = {
             totalCalories: totalCaloriesFromItems,
@@ -391,6 +396,7 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
             mealName,
           };
 
+          console.log('[PreviewScreen] analysisResult created, building result...');
           const numItems = apiResult.items?.length || apiResult.nutrition_summary?.num_food_items || dishContents.length;
 
           result = {
@@ -405,6 +411,7 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
             segmented_images: apiResult.segmented_images,
             job_id: apiResult.job_id,
           };
+          console.log('[PreviewScreen] result built, about to dispatch...');
         }
       } else {
         throw new Error('No image or video URI provided');
@@ -451,14 +458,30 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
       if (error?.message === 'Analysis timeout') {
         console.log('[PreviewScreen] Timeout — job remains queued in SQS, analysisId:', analysisId);
         // Job is queued — push notification will fire when ready, no alert needed
-      } else {
-        console.log('[PreviewScreen] Real failure — marking analysisId as failed:', analysisId, 'error:', error?.message);
+      } else if (
+        error?.message?.includes('analysis failed') ||
+        error?.message?.includes('too many') ||
+        error?.message?.includes('rate limit') ||
+        error?.message?.includes('503') ||
+        error?.message?.includes('429')
+      ) {
+        console.log('[PreviewScreen] Capacity/rate-limit error:', error?.message);
         if (analysisId && user?.email) {
           dispatch(updateAnalysisProgress({ id: analysisId, progress: 0, status: 'failed' }));
         }
         Alert.alert(
           'High Demand',
           'We are receiving too many requests. We will notify you when its ready.',
+          [{ text: 'OK' }]
+        );
+      } else {
+        console.log('[PreviewScreen] Unexpected error — marking failed. analysisId:', analysisId, 'error:', error?.message);
+        if (analysisId && user?.email) {
+          dispatch(updateAnalysisProgress({ id: analysisId, progress: 0, status: 'failed' }));
+        }
+        Alert.alert(
+          'Analysis Failed',
+          'Something went wrong processing your image. Please try again.',
           [{ text: 'OK' }]
         );
       }

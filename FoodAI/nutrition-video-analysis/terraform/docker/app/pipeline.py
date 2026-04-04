@@ -38,6 +38,13 @@ class NutritionVideoPipeline:
     # Shared Gemini generation config — temperature=0 for deterministic/reproducible outputs
     _GEMINI_GEN_CONFIG = {"temperature": 0.0}
 
+    @staticmethod
+    def _get_s3_client():
+        global s3_client
+        if s3_client is None:
+            s3_client = boto3.client("s3")
+        return s3_client
+
     def __init__(self, model_manager, config):
             """
             Initialize pipeline with models and configuration
@@ -684,7 +691,6 @@ class NutritionVideoPipeline:
     ) -> None:
         import matplotlib
         matplotlib.use("Agg")
-        import matplotlib.patches as mpatches
         import matplotlib.pyplot as plt
 
         palette = [
@@ -694,7 +700,7 @@ class NutritionVideoPipeline:
         ]
 
         overlay = image_rgb.copy().astype(np.float32)
-        legend_patches = []
+        label_positions = []
 
         for idx, (name, data) in enumerate(sam3_results.items()):
             mask = self._resize_mask_to_shape(data.get("mask"), image_rgb.shape[:2])
@@ -703,16 +709,35 @@ class NutritionVideoPipeline:
 
             color = np.array(palette[idx % len(palette)], dtype=np.float32)
             overlay[mask] = 0.45 * overlay[mask] + 0.55 * color
-            legend_patches.append(
-                mpatches.Patch(color=color / 255.0, label=name)
-            )
+            bbox = self._mask_bbox(mask)
+            if bbox is None:
+                continue
+            x1, y1, x2, y2 = bbox
+            label_x = int((x1 + x2) / 2)
+            label_y = max(12, y1 - 6)
+            label_positions.append((name, label_x, label_y))
 
         overlay = np.clip(overlay, 0, 255).astype(np.uint8)
         fig, ax = plt.subplots(figsize=(8, 6))
         ax.imshow(overlay)
         ax.axis("off")
-        if legend_patches:
-            ax.legend(handles=legend_patches, loc="upper right", fontsize=7, framealpha=0.8, ncol=2)
+        for name, x, y in label_positions:
+            ax.text(
+                x,
+                y,
+                name,
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                color="black",
+                bbox={
+                    "boxstyle": "square,pad=0.2",
+                    "facecolor": "white",
+                    "edgecolor": "#cccccc",
+                    "linewidth": 0.8,
+                    "alpha": 0.95,
+                },
+            )
         fig.tight_layout(pad=0.5)
         fig.savefig(out_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
@@ -753,6 +778,39 @@ class NutritionVideoPipeline:
             output[mask.astype(bool)] = rgb[mask.astype(bool)]
             rgb = output
         return Image.fromarray(rgb)
+
+    def _build_production_dish_mask(
+        self,
+        visible_items: list[dict],
+        sam3_results: dict,
+        target_shape: tuple[int, ...],
+        job_id: str,
+    ) -> np.ndarray:
+        target_hw = tuple(target_shape[:2])
+        ingredient_masks = [
+            self._resize_mask_to_shape((sam3_results.get(item["name"]) or {}).get("mask"), target_hw)
+            for item in visible_items
+            if (sam3_results.get(item["name"]) or {}).get("mask") is not None
+        ]
+        ingredient_masks = [mask for mask in ingredient_masks if mask is not None and mask.any()]
+        if ingredient_masks:
+            return np.any(np.stack([mask.astype(bool) for mask in ingredient_masks], axis=0), axis=0)
+
+        fallback_masks = []
+        for name, entry in sam3_results.items():
+            resized = self._resize_mask_to_shape(entry.get("mask"), target_hw)
+            if resized is None or not resized.any():
+                continue
+            fallback_masks.append(resized.astype(bool))
+
+        if fallback_masks:
+            logger.warning(
+                f"[{job_id}] SAM3 returned no ingredient-specific masks; "
+                f"falling back to union of {len(fallback_masks)} available SAM3 mask(s)"
+            )
+            return np.any(np.stack(fallback_masks, axis=0), axis=0)
+
+        raise RuntimeError("Production image pipeline produced no usable SAM3 masks")
 
     def _save_production_debug_assets(
         self,
@@ -1146,14 +1204,12 @@ class NutritionVideoPipeline:
             f"calibration_method={calibration.get('method')} reference={calibration.get('reference_name')}"
         )
 
-        ingredient_masks = [
-            self._resize_mask_to_shape((sam3_results.get(item["name"]) or {}).get("mask"), raw_depth.shape)
-            for item in visible_items
-            if (sam3_results.get(item["name"]) or {}).get("mask") is not None
-        ]
-        if not ingredient_masks:
-            raise RuntimeError("Production image pipeline produced no SAM3 ingredient masks")
-        dish_mask = np.any(np.stack([mask.astype(bool) for mask in ingredient_masks], axis=0), axis=0)
+        dish_mask = self._build_production_dish_mask(
+            visible_items=visible_items,
+            sam3_results=sam3_results,
+            target_shape=raw_depth.shape,
+            job_id=job_id,
+        )
 
         debug_assets = self._save_production_debug_assets(
             job_id=job_id,
@@ -4191,7 +4247,7 @@ class NutritionVideoPipeline:
             buf.seek(0)
             frame_folder = f"frame_{frame_idx:05d}"
             s3_key = f"depth_maps/{job_id}/{frame_folder}/masked_depth.png"
-            s3.put_object(
+            self._get_s3_client().put_object(
                 Bucket=S3_RESULTS_BUCKET,
                 Key=s3_key,
                 Body=buf,
