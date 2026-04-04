@@ -93,11 +93,15 @@ export const buildDishTablesFromItems = (
 
   items.forEach((item, index) => {
     const foodName = item.food_name || '';
-    const targetKey: DishTableKey = matchesQuestionnaireList(foodName, questionnaireContext?.hidden_ingredients)
-      ? 'hiddenContent'
-      : matchesQuestionnaireList(foodName, questionnaireContext?.extras)
-        ? 'highCalorie'
-        : 'base';
+    // Trust the backend's role_tag when available — avoids incorrectly moving base items
+    // (e.g. "Chicken breast") into hidden just because they share a name with a questionnaire entry.
+    const targetKey: DishTableKey =
+      item.role_tag === 'hidden' ? 'hiddenContent' :
+      item.role_tag === 'high_calorie' ? 'highCalorie' :
+      item.role_tag === 'base' ? 'base' :
+      matchesQuestionnaireList(foodName, questionnaireContext?.hidden_ingredients) ? 'hiddenContent' :
+      matchesQuestionnaireList(foodName, questionnaireContext?.extras) ? 'highCalorie' :
+      'base';
 
     const section = tables.find((table) => table.key === targetKey);
     section?.rows.push(createRowFromItem(item, index, targetKey));

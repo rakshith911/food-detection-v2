@@ -418,7 +418,7 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
             analysisResult: JSON.parse(JSON.stringify(result)),
             dishTables: analysisResult.dishTables,
             dishContents: analysisResult.dishContents,
-            mealName: analysisResult.mealName,
+            mealName: mealName,
             questionnaireContext: userContext,
             nutritionalInfo: {
               calories: Number(analysisResult.totalCalories) || 0,

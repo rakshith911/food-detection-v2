@@ -14,6 +14,7 @@ export interface NutritionItem {
   mass_g: number;
   volume_ml?: number;
   total_calories?: number;
+  role_tag?: string;  // backend categorisation: 'base' | 'hidden' | 'high_calorie'
 }
 
 export interface SegmentedImage {
@@ -336,6 +337,7 @@ export class NutritionAnalysisAPI {
                 mass_g: item.mass_g || 0,
                 volume_ml: item.volume_ml,
                 total_calories: item.total_calories || item.calories || 0,
+                role_tag: item.role_tag,  // preserve backend categorisation (base/hidden/high_calorie)
               }));
 
               data.items.forEach((item: NutritionItem, index: number) => {

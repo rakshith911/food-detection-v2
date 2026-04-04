@@ -1234,7 +1234,6 @@ class NutritionVideoPipeline:
             },
             "nutrition": nutrition_results,
             "questionnaire_verification": self.last_questionnaire_verification,
-            "gemini_outputs": self.gemini_outputs,
             "pipeline_runtime": {
                 "image_pipeline": "production",
                 "sam3_model_dir": str(self.config.SAM3_MODEL_DIR),

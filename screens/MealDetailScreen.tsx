@@ -138,9 +138,9 @@ export default function MealDetailScreen() {
     }
   }, [item?.id, item?.job_id]);
   
-  // Effective overlay: only use freshly fetched URLs — never show stale stored ones
-  // (stored overlay_urls are presigned S3 URLs that expire, so always wait for fresh ones)
-  const effectiveSegmentedImages = refreshedSegmentedImages;
+  // Use freshly fetched URLs when available, fall back to stored ones.
+  // Stored URLs have 30-day expiry so they remain valid for normal usage patterns.
+  const effectiveSegmentedImages = refreshedSegmentedImages ?? item?.segmented_images ?? null;
   
   // Reset overlay state and loader when item changes
   useEffect(() => {
@@ -169,7 +169,8 @@ export default function MealDetailScreen() {
     (async () => {
       setRefreshingOverlay(true);
       try {
-        const fresh = await nutritionAnalysisAPI.getResults(item.job_id!, true, false);
+        // fetchDetailedJson=true so we download results.json and get fresh presigned image URLs
+        const fresh = await nutritionAnalysisAPI.getResults(item.job_id!, true, true);
         if (cancelled) return;
         const hasResult = fresh?.segmented_images?.overlay_urls?.length || fresh?.segmented_images?.video_overlay_url;
         if (hasResult) {
