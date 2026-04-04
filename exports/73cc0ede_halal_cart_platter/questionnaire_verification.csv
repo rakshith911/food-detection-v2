@@ -1,2 +1,0 @@
-name,type,quantity,plausible,confidence,already_visible,verdict,reason,estimated_grams,estimated_kcal
-Rice,hidden,25g,True,1.0,True,include,Yellow rice is a visible ingredient and the user-reported 'Rice' is clearly visible and plausible for this dish. The 25g likely refers to the already included rice.,,

@@ -100,7 +100,6 @@ class Settings(BaseSettings):
 
     # External APIs
     GEMINI_API_KEY: Optional[str] = None
-    GEMINI_FLASH_MODEL: str = "gemini-flash-latest"
     
     # Database
     DATABASE_URL: str = "sqlite:///./data/nutrition.db"  # PostgreSQL: postgresql://user:pass@host/db

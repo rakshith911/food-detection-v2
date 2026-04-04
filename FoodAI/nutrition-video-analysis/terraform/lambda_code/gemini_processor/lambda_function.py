@@ -35,7 +35,6 @@ GEMINI_API_KEY       = os.environ.get('GEMINI_API_KEY')
 S3_VIDEOS_BUCKET     = os.environ.get('S3_VIDEOS_BUCKET')
 S3_RESULTS_BUCKET    = os.environ.get('S3_RESULTS_BUCKET')
 DYNAMODB_JOBS_TABLE  = os.environ.get('DYNAMODB_JOBS_TABLE')
-GEMINI_MODEL         = os.environ.get('GEMINI_MODEL', 'gemini-flash-latest')
 
 # Files <= 20 MB are sent inline; larger files use the Gemini File API
 GEMINI_INLINE_LIMIT = 20 * 1024 * 1024
@@ -44,7 +43,6 @@ IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.webp'}
 VIDEO_EXTS = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
 
 GEMINI_MODELS = [
-    GEMINI_MODEL,
     'gemini-2.5-flash',
     'gemini-2.0-flash-exp',
     'gemini-1.5-flash',
