@@ -1,0 +1,11 @@
+food_name,role_tag,confidence,volume_confidence,quantity,volume_ml,density_g_per_ml,density_source,density_matched,mass_g,calories_per_100g,calorie_source,calorie_matched,total_calories,matched_food
+Yellow rice,base,0.95,0.9,1,400.0,0.72,"fao_faiss(sim=0.82),fao_measured",Rice,288.0,343.0,usda_faiss(sim=0.80),"Yellow rice with seasoning, dry packet mix, unprepared",987.8,Yellow rice
+Chopped seasoned meat,base,0.9,0.7,1,80.0,0.5917,"usda_faiss(sim=0.61),cup(ratio=0.55)","Chicken, roasting, light meat, meat only, cooked, roasted",47.3,138.0,usda_faiss(sim=0.71),"Turkey, diced, light and dark meat, seasoned",65.3,Chopped seasoned meat
+Kofta,base,0.85,0.9,1,180.0,0.9,gemini_grounding,Kofta,162.0,290.0,cofid_faiss(sim=0.62),"Kofta, beef, homemade",469.8,Kofta
+White sauce,base,0.95,0.9,1,30.0,1.0458,"usda_faiss(sim=0.79),avg_cup_macro(ratio=1.02)","Sauce, homemade, white, thick",31.4,105.0,cofid_faiss(sim=0.80),"Sauce, traditional cook in, white sauce based",32.9,White sauce
+Red chili sauce,base,0.95,0.9,1,21.0,0.5,"fao_faiss(sim=0.80),fao_measured","Chili, red",10.5,21.0,usda_faiss(sim=0.74),"Sauce, peppers, hot, chili, mature red, canned",2.2,Red chili sauce
+Shredded lettuce,base,0.95,0.8,1,120.0,0.1522,"usda_faiss(sim=0.79),cup(ratio=0.15)","Lettuce, green leaf, raw",18.3,15.0,usda_faiss(sim=0.79),"Lettuce, green leaf, raw",2.7,Shredded lettuce
+Shredded carrots,base,0.9,0.8,1,60.0,0.503,"usda_faiss(sim=0.80),cup(ratio=0.49)","Carrots, raw",30.2,41.0,usda_faiss(sim=0.80),"Carrots, raw",12.4,Shredded carrots
+Sliced cucumber,base,0.95,0.9,1,13.0,0.5326,"usda_faiss(sim=0.79),cup(ratio=0.53)","Cucumber, peeled, raw",6.9,10.0,usda_faiss(sim=0.79),"Cucumber, peeled, raw",0.7,Sliced cucumber
+Diced tomatoes,base,0.95,0.8,1,30.0,0.6678,"usda_faiss(sim=0.76),cup(ratio=0.66)","Tomatoes, orange, raw",20.0,16.0,usda_faiss(sim=0.76),"Tomatoes, orange, raw",3.2,Diced tomatoes
+Sliced white onions,base,0.9,0.75,1,25.0,0.22,"fao_faiss(sim=0.77),fao_measured","Onions, chopped",5.5,123.0,usda_faiss(sim=0.75),"Onions, yellow, sauteed",6.8,Sliced white onions

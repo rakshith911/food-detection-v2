@@ -52,6 +52,7 @@ class NutritionRAG:
         usda_density_path: Optional[Path] = None,
         usda_density_names_path: Optional[Path] = None,
         gemini_api_key: Optional[str] = None,
+        gemini_model: str = "gemini-flash-latest",
         embedding_model: str = "all-MiniLM-L6-v2",
     ):
         self._unified_faiss_path   = Path(unified_faiss_path)   if unified_faiss_path   else None
@@ -67,6 +68,7 @@ class NutritionRAG:
         self._usda_names_path   = Path(usda_names_path)   if usda_names_path   else None
 
         self._gemini_api_key    = gemini_api_key
+        self._gemini_model      = gemini_model
         self._embedding_model   = embedding_model
 
         # Runtime objects (populated in load())
@@ -403,7 +405,7 @@ class NutritionRAG:
                         ]
 
                 response = client.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model=self._gemini_model,
                     contents=prompt,
                     config=types.GenerateContentConfig(**config_kwargs),
                 )
@@ -417,7 +419,7 @@ class NutritionRAG:
 
                 genai.configure(api_key=self._gemini_api_key)
                 model = genai.GenerativeModel(
-                    "gemini-2.5-flash",
+                    self._gemini_model,
                     generation_config={"temperature": 0.0},
                 )
                 response = model.generate_content(prompt)

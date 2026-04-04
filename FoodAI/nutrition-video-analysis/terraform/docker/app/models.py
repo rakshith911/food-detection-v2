@@ -308,6 +308,7 @@ def load_nutrition_rag(
     unified_foods_path: Path,
     unified_food_names_path: Path,
     gemini_api_key: str = None,
+    gemini_model: str = "gemini-flash-latest",
 ):
     """
     Load and initialize Nutrition RAG system using unified FAISS index (FAO+USDA+CoFID).
@@ -332,6 +333,7 @@ def load_nutrition_rag(
         unified_foods_path=unified_foods_path,
         unified_food_names_path=unified_food_names_path,
         gemini_api_key=gemini_api_key,
+        gemini_model=gemini_model,
     )
     rag.load()
 
@@ -447,6 +449,7 @@ class ModelManager:
                 unified_foods_path=self.config.UNIFIED_FOODS_PATH,
                 unified_food_names_path=self.config.UNIFIED_FOOD_NAMES_PATH,
                 gemini_api_key=self.config.GEMINI_API_KEY,
+                gemini_model=self.config.GEMINI_FLASH_MODEL,
             )
         return self._rag
 
