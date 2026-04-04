@@ -240,6 +240,8 @@ class NutritionVideoPipeline:
                 "- Do not blindly trust the questionnaire.\n"
                 "- Reject ingredients that do not fit the dish context.\n"
                 "- If an ingredient is already visible or clearly already counted in the base dish, set already_visible=true.\n"
+                "- For extras, already_visible=true does NOT mean reject it. If the questionnaire describes an additional amount "
+                "of a visible ingredient beyond the normal base portion, still use verdict=include and estimate only the extra amount.\n"
                 "- For extras, estimated_grams and estimated_kcal must represent only the additional amount described by the questionnaire, not the full base portion.\n"
                 "- Use confidence between 0 and 1.\n"
                 "- Be conservative when uncertain."
@@ -562,6 +564,205 @@ class NutritionVideoPipeline:
         return float(sum(cleaned) / len(cleaned))
 
     @staticmethod
+    def _round_optional(value: Optional[float], digits: int = 1) -> Optional[float]:
+        if value is None:
+            return None
+        return round(float(value), digits)
+
+    @staticmethod
+    def _join_unique_text(values: list[Optional[str]]) -> Optional[str]:
+        cleaned = []
+        for value in values:
+            text = (value or "").strip()
+            if text and text not in cleaned:
+                cleaned.append(text)
+        if not cleaned:
+            return None
+        return " | ".join(cleaned)
+
+    def _find_matching_item_key(self, item_map: dict, label: str) -> Optional[str]:
+        for existing_label in item_map.keys():
+            if self._ingredient_names_match(existing_label, label):
+                return existing_label
+        return None
+
+    def _build_volume_nutrition_component(
+        self,
+        label: str,
+        role_tag: str,
+        confidence: float,
+        volume_ml: float,
+        volume_confidence: float,
+        origin: str,
+        reason: Optional[str] = None,
+        is_incremental: bool = False,
+    ) -> dict:
+        rag = self.models.rag
+        nutrition = rag.get_nutrition_for_food(label, volume_ml, quantity=1)
+        nutrition = self._attach_grounding_metadata(
+            nutrition,
+            rag,
+            label,
+            nutrition.get("density_source"),
+            nutrition.get("calorie_source"),
+        )
+        return {
+            "food_name": label,
+            "role_tag": role_tag,
+            "confidence": float(confidence or 0.0),
+            "volume_confidence": float(volume_confidence or 0.0),
+            "quantity": 1,
+            "volume_ml": self._round_optional(volume_ml, 1),
+            "density_g_per_ml": self._round_optional(nutrition.get("density_g_per_ml"), 4),
+            "density_source": nutrition.get("density_source"),
+            "density_matched": nutrition.get("density_matched"),
+            "mass_g": self._round_optional(nutrition.get("mass_g"), 1),
+            "calories_per_100g": self._round_optional(nutrition.get("calories_per_100g"), 1),
+            "calorie_source": nutrition.get("calorie_source"),
+            "calorie_matched": nutrition.get("calorie_matched"),
+            "total_calories": self._round_optional(nutrition.get("total_calories"), 1),
+            "matched_food": label,
+            "reason": reason,
+            "is_incremental": bool(is_incremental),
+            "origin": origin,
+            "density_grounding_metadata": nutrition.get("density_grounding_metadata"),
+            "calorie_grounding_metadata": nutrition.get("calorie_grounding_metadata"),
+        }
+
+    def _build_questionnaire_component(self, item: dict) -> dict:
+        mass_g = float(item.get("mass_g") or 0.0) if item.get("mass_g") is not None else None
+        total_calories = float(item.get("total_calories") or 0.0)
+        calories_per_100g = None
+        if mass_g and mass_g > 0:
+            calories_per_100g = (total_calories * 100.0) / mass_g
+        return {
+            "food_name": item["name"],
+            "role_tag": item["role_tag"],
+            "confidence": float(item.get("confidence") or 0.0),
+            "volume_confidence": float(item.get("volume_confidence") or 0.0),
+            "quantity": item.get("quantity"),
+            "volume_ml": self._round_optional(item.get("volume_ml"), 1),
+            "density_g_per_ml": self._round_optional(item.get("density_g_per_ml"), 4),
+            "density_source": item.get("density_source") or "gemini_questionnaire",
+            "density_matched": item.get("density_matched"),
+            "mass_g": self._round_optional(mass_g, 1) if mass_g is not None else None,
+            "calories_per_100g": self._round_optional(calories_per_100g, 1) if calories_per_100g is not None else None,
+            "calorie_source": item.get("calorie_source") or "gemini_questionnaire",
+            "calorie_matched": item.get("calorie_matched") or item.get("quantity"),
+            "total_calories": self._round_optional(total_calories, 1),
+            "matched_food": item["name"],
+            "reason": item.get("reason"),
+            "is_incremental": bool(item.get("is_incremental", item.get("role_tag") == "high_calorie")),
+            "origin": item.get("origin") or "questionnaire",
+            "density_grounding_metadata": item.get("density_grounding_metadata"),
+            "calorie_grounding_metadata": item.get("calorie_grounding_metadata"),
+        }
+
+    def _aggregate_component_group(self, role_tag: str, components: list[dict]) -> dict:
+        volume_values = [float(comp["volume_ml"]) for comp in components if comp.get("volume_ml") is not None]
+        mass_values = [float(comp["mass_g"]) for comp in components if comp.get("mass_g") is not None]
+        calorie_values = [float(comp["total_calories"]) for comp in components if comp.get("total_calories") is not None]
+        total_volume = sum(volume_values) if volume_values else None
+        total_mass = sum(mass_values) if mass_values else None
+        total_calories = sum(calorie_values) if calorie_values else None
+
+        density = None
+        if total_volume and total_volume > 0 and total_mass is not None:
+            density = total_mass / total_volume
+
+        calories_per_100g = None
+        if total_mass and total_mass > 0 and total_calories is not None:
+            calories_per_100g = (total_calories * 100.0) / total_mass
+
+        return {
+            "role_tag": role_tag,
+            "component_count": len(components),
+            "confidence": round(self._safe_average([float(comp.get("confidence") or 0.0) for comp in components], default=0.0), 4),
+            "volume_confidence": round(self._safe_average([float(comp.get("volume_confidence") or 0.0) for comp in components], default=0.0), 4),
+            "volume_ml": self._round_optional(total_volume, 1),
+            "density_g_per_ml": self._round_optional(density, 4),
+            "density_source": self._join_unique_text([comp.get("density_source") for comp in components]),
+            "density_matched": self._join_unique_text([comp.get("density_matched") for comp in components]),
+            "mass_g": self._round_optional(total_mass, 1),
+            "calories_per_100g": self._round_optional(calories_per_100g, 1),
+            "calorie_source": self._join_unique_text([comp.get("calorie_source") for comp in components]),
+            "calorie_matched": self._join_unique_text([comp.get("calorie_matched") for comp in components]),
+            "total_calories": self._round_optional(total_calories, 1),
+            "matched_food": self._join_unique_text([comp.get("matched_food") for comp in components]),
+            "reasons": [reason for reason in dict.fromkeys((comp.get("reason") or "").strip() for comp in components if (comp.get("reason") or "").strip())],
+            "entries": components,
+        }
+
+    def _finalize_component_based_item(self, label: str, components: list[dict]) -> dict:
+        grouped_components = {}
+        for role_tag in ("base", "high_calorie", "hidden"):
+            role_components = [comp for comp in components if comp.get("role_tag") == role_tag]
+            if role_components:
+                grouped_components[role_tag] = self._aggregate_component_group(role_tag, role_components)
+
+        total_volume = sum(float(comp.get("volume_ml") or 0.0) for comp in components if comp.get("volume_ml") is not None)
+        total_mass = sum(float(comp.get("mass_g") or 0.0) for comp in components if comp.get("mass_g") is not None)
+        total_calories = sum(float(comp.get("total_calories") or 0.0) for comp in components if comp.get("total_calories") is not None)
+
+        density = None
+        if total_volume > 0 and total_mass > 0:
+            density = total_mass / total_volume
+
+        calories_per_100g = None
+        if total_mass > 0 and total_calories > 0:
+            calories_per_100g = (total_calories * 100.0) / total_mass
+
+        role_tags = list(grouped_components.keys()) or ["base"]
+        primary_role = "base" if "base" in role_tags else role_tags[0]
+
+        item = {
+            "food_name": label,
+            "role_tag": primary_role,
+            "role_tags": role_tags,
+            "confidence": round(self._safe_average([float(comp.get("confidence") or 0.0) for comp in components], default=0.0), 4),
+            "volume_confidence": round(self._safe_average([float(comp.get("volume_confidence") or 0.0) for comp in components], default=0.0), 4),
+            "quantity": 1,
+            "volume_ml": self._round_optional(total_volume, 1) if total_volume > 0 else None,
+            "density_g_per_ml": self._round_optional(density, 4),
+            "density_source": self._join_unique_text([comp.get("density_source") for comp in components]),
+            "density_matched": self._join_unique_text([comp.get("density_matched") for comp in components]),
+            "mass_g": self._round_optional(total_mass, 1) if total_mass > 0 else None,
+            "calories_per_100g": self._round_optional(calories_per_100g, 1) if calories_per_100g is not None else None,
+            "calorie_source": self._join_unique_text([comp.get("calorie_source") for comp in components]),
+            "calorie_matched": self._join_unique_text([comp.get("calorie_matched") for comp in components]),
+            "total_calories": self._round_optional(total_calories, 1) if total_calories > 0 else None,
+            "matched_food": label,
+            "component_breakdown": grouped_components,
+            "base_component": grouped_components.get("base"),
+            "extra_component": grouped_components.get("high_calorie"),
+            "hidden_component": grouped_components.get("hidden"),
+        }
+
+        for prefix, role_tag in (("base", "base"), ("extra", "high_calorie"), ("hidden", "hidden")):
+            component_group = grouped_components.get(role_tag)
+            item[f"{prefix}_volume_ml"] = component_group.get("volume_ml") if component_group else None
+            item[f"{prefix}_density_g_per_ml"] = component_group.get("density_g_per_ml") if component_group else None
+            item[f"{prefix}_density_source"] = component_group.get("density_source") if component_group else None
+            item[f"{prefix}_mass_g"] = component_group.get("mass_g") if component_group else None
+            item[f"{prefix}_calories_per_100g"] = component_group.get("calories_per_100g") if component_group else None
+            item[f"{prefix}_calorie_source"] = component_group.get("calorie_source") if component_group else None
+            item[f"{prefix}_total_calories"] = component_group.get("total_calories") if component_group else None
+
+        density_grounding_metadata = []
+        calorie_grounding_metadata = []
+        for comp in components:
+            if comp.get("density_grounding_metadata"):
+                density_grounding_metadata.append(comp["density_grounding_metadata"])
+            if comp.get("calorie_grounding_metadata"):
+                calorie_grounding_metadata.append(comp["calorie_grounding_metadata"])
+        if density_grounding_metadata:
+            item["density_grounding_metadata"] = density_grounding_metadata
+        if calorie_grounding_metadata:
+            item["calorie_grounding_metadata"] = calorie_grounding_metadata
+
+        return item
+
+    @staticmethod
     def _source_confidence(source: Optional[str]) -> float:
         src = (source or "").strip().lower()
         if not src:
@@ -624,8 +825,11 @@ class NutritionVideoPipeline:
 
         nutrition_values = []
         for item in nutrition_results.get("items") or []:
-            role_tag = (item.get("role_tag") or "base").strip().lower()
-            if role_tag in {"hidden", "high_calorie"}:
+            role_tags = {
+                (tag or "").strip().lower()
+                for tag in (item.get("role_tags") or [item.get("role_tag") or "base"])
+            }
+            if role_tags and role_tags.issubset({"hidden", "high_calorie"}):
                 nutrition_values.append(float(item.get("confidence") or 0.0))
                 continue
             density_conf = self._source_confidence(item.get("density_source"))
@@ -1094,6 +1298,7 @@ class NutritionVideoPipeline:
                 out.append({
                     "name": item.get("name"),
                     "role_tag": "high_calorie" if item.get("type") == "extra" else "hidden",
+                    "item_type": item.get("type"),
                     "confidence": float(entry.get("confidence") or item.get("confidence") or 0.0),
                     "grams_confidence": float(entry.get("grams_confidence") or 0.0),
                     "kcal_confidence": float(entry.get("kcal_confidence") or 0.0),
@@ -1101,6 +1306,10 @@ class NutritionVideoPipeline:
                     "volume_ml": None,
                     "mass_g": float(grams) if grams is not None else None,
                     "total_calories": float(kcal) if kcal is not None else None,
+                    "already_visible": bool(item.get("already_visible")),
+                    "reason": item.get("reason"),
+                    "is_incremental": item.get("type") == "extra",
+                    "origin": "questionnaire",
                 })
             return out
         except Exception as e:
@@ -1112,6 +1321,8 @@ class NutritionVideoPipeline:
         first_pass: dict,
         visible_items: list[dict],
         volume_map: dict,
+        image_pil,
+        raw_depth_image,
         job_id: str,
         user_context: Optional[dict] = None,
     ) -> list[dict]:
@@ -1137,7 +1348,10 @@ class NutritionVideoPipeline:
         ]
         prompt = (
             "You are reviewing an image-only dish analysis to infer non-base ingredients that should populate "
-            "the Hidden Content or High Calorie tables.\n\n"
+            "the Hidden Content or High Calorie tables.\n"
+            "Image 1 is the RGB photo. Image 2 is the aligned raw depth visualization.\n"
+            "Use the actual visuals, not just the metadata, to decide if a visible ingredient appears unusually heavy, abundant, or calorie-dense.\n"
+            "Also use the overall dish scene and context to infer whether likely components are hidden underneath, inside, covered by sauce, or only partially visible.\n\n"
             "Return ONLY valid JSON as an array. Each entry must be:\n"
             "[{\"name\": str, \"type\": \"hidden\"|\"extra\", \"reason\": str, \"confidence\": number, "
             "\"volume_ml\": number, \"is_incremental\": true|false}]\n\n"
@@ -1149,10 +1363,19 @@ class NutritionVideoPipeline:
             f"Reference objects: {json.dumps(first_pass.get('reference_objects') or [], ensure_ascii=True)}\n"
             f"Notes: {json.dumps(first_pass.get('notes') or '')}\n\n"
             "Rules:\n"
+            "- First understand the likely dish composition from the full scene: meal name, cuisine, cooking method, plating style, visible layering, and the relationship between ingredients.\n"
+            "- Use dish context to reason about hidden items. Example: rice may be hidden under curry or meat, noodles may be buried under toppings, sauce may cover vegetables, fillings may sit inside wraps or sandwiches.\n"
+            "- Hidden items should come from strong contextual clues in the scene, not generic recipe knowledge alone.\n"
+            "- If the dish context suggests a hidden component but the visible scene does not support it, do not include it.\n"
+            "- Review every visible ingredient one by one and decide whether it looks like only a normal base portion or a base portion plus an extra amount.\n"
+            "- Base ingredients are the ingredients that visibly belong in the dish by default. If one of those base ingredients also looks unusually abundant, return it again as an extra item representing only the added amount beyond normal.\n"
+            "- Example: chicken salad normally contains chicken as a base ingredient. If the portion looks unusually chicken-heavy, keep chicken as the base ingredient and also return chicken as an extra item with only the extra estimated volume.\n"
             "- Hidden items are plausible components that are likely present but not directly visible or only partly visible "
             "because they are buried/underneath/inside the dish (example: rice under falafel, gravy under toppings).\n"
             "- Extra items are only incremental high-calorie amounts beyond the visible base portion already counted. "
             "Use this for things like unusually heavy dressing, cheese, oil, butter, sauce, mayo, etc.\n"
+            "- Extra items can be visually obvious. If a visible ingredient itself appears present in an unusually heavy amount, "
+            "return the same ingredient name as an extra item and set volume_ml to only that extra amount above a normal base portion.\n"
             "- If an extra item has the same name as a visible ingredient, the returned volume_ml must represent only the "
             "additional amount beyond the already-counted visible base amount.\n"
             "- Do not repeat ordinary visible base ingredients as hidden items.\n"
@@ -1165,7 +1388,7 @@ class NutritionVideoPipeline:
 
         model_name = self._flash_model_name()
         model = genai.GenerativeModel(model_name, generation_config=self._GEMINI_GEN_CONFIG)
-        response = model.generate_content(prompt)
+        response = model.generate_content([prompt, image_pil, raw_depth_image])
         response_text = (response.text or "").strip()
         if "```" in response_text:
             response_text = response_text.split("```")[1]
@@ -1225,15 +1448,10 @@ class NutritionVideoPipeline:
         questionnaire_items: list[dict],
         job_id: str,
     ) -> dict:
-        rag = self.models.rag
-        nutrition_items = []
-        total_food_volume = 0.0
-        total_mass = 0.0
-        total_calories = 0.0
+        item_components = {}
 
         for item in visible_items:
             label = item["name"]
-            role_tag = item.get("role_tag", "base")
             confidence = float(item.get("confidence") or 0.0)
             volume_entry = volume_map.get(label.lower()) or {}
             volume_ml = float(volume_entry.get("volume_ml") or 0.0)
@@ -1241,29 +1459,22 @@ class NutritionVideoPipeline:
             if volume_ml <= 0:
                 continue
 
-            nutrition = rag.get_nutrition_for_food(label, volume_ml, quantity=1)
-            density = float(nutrition.get("density_g_per_ml") or 0.0)
-            kcal_per_100g = float(nutrition.get("calories_per_100g") or 0.0)
-            mass_g = float(nutrition.get("mass_g") or 0.0)
-            total_kcal = float(nutrition.get("total_calories") or 0.0)
-            nutrition.update({
-                "food_name": label,
-                "role_tag": role_tag,
-                "confidence": confidence,
-                "volume_confidence": volume_confidence,
-                "quantity": 1,
-                "volume_ml": round(volume_ml, 1),
-                "matched_food": label,
-            })
-            logger.info(
-                f"[{job_id}] {role_tag} '{label}': confidence={confidence:.2f} volume={volume_ml:.1f}ml "
-                f"density={density:.3f}[{nutrition.get('density_matched')}] weight={mass_g:.1f}g "
-                f"kcal/100g={kcal_per_100g:.1f}[{nutrition.get('calorie_matched')}] total_kcal={total_kcal:.1f}"
+            nutrition = self._build_volume_nutrition_component(
+                label=label,
+                role_tag="base",
+                confidence=confidence,
+                volume_ml=volume_ml,
+                volume_confidence=volume_confidence,
+                origin="visible_base",
             )
-            nutrition_items.append(nutrition)
-            total_food_volume += volume_ml
-            total_mass += mass_g
-            total_calories += total_kcal
+            logger.info(
+                f"[{job_id}] base '{label}': confidence={confidence:.2f} volume={volume_ml:.1f}ml "
+                f"density={float(nutrition.get('density_g_per_ml') or 0.0):.3f}[{nutrition.get('density_matched')}] "
+                f"weight={float(nutrition.get('mass_g') or 0.0):.1f}g "
+                f"kcal/100g={float(nutrition.get('calories_per_100g') or 0.0):.1f}[{nutrition.get('calorie_matched')}] "
+                f"total_kcal={float(nutrition.get('total_calories') or 0.0):.1f}"
+            )
+            item_components[label] = [nutrition]
 
         for item in inferred_items:
             label = item["name"]
@@ -1274,55 +1485,78 @@ class NutritionVideoPipeline:
             if volume_ml <= 0:
                 continue
 
-            nutrition = rag.get_nutrition_for_food(label, volume_ml, quantity=1)
-            density = float(nutrition.get("density_g_per_ml") or 0.0)
-            kcal_per_100g = float(nutrition.get("calories_per_100g") or 0.0)
-            mass_g = float(nutrition.get("mass_g") or 0.0)
-            total_kcal = float(nutrition.get("total_calories") or 0.0)
-            nutrition.update({
-                "food_name": label,
-                "role_tag": role_tag,
-                "confidence": confidence,
-                "volume_confidence": volume_confidence,
-                "quantity": 1,
-                "volume_ml": round(volume_ml, 1),
-                "matched_food": label,
-                "reason": item.get("reason"),
-                "is_incremental": bool(item.get("is_incremental")),
-            })
+            nutrition = self._build_volume_nutrition_component(
+                label=label,
+                role_tag=role_tag,
+                confidence=confidence,
+                volume_ml=volume_ml,
+                volume_confidence=volume_confidence,
+                origin="gemini_visual_inference",
+                reason=item.get("reason"),
+                is_incremental=bool(item.get("is_incremental")),
+            )
             logger.info(
                 f"[{job_id}] inferred {role_tag} '{label}': confidence={confidence:.2f} volume={volume_ml:.1f}ml "
-                f"density={density:.3f}[{nutrition.get('density_matched')}] weight={mass_g:.1f}g "
-                f"kcal/100g={kcal_per_100g:.1f}[{nutrition.get('calorie_matched')}] total_kcal={total_kcal:.1f}"
+                f"density={float(nutrition.get('density_g_per_ml') or 0.0):.3f}[{nutrition.get('density_matched')}] "
+                f"weight={float(nutrition.get('mass_g') or 0.0):.1f}g "
+                f"kcal/100g={float(nutrition.get('calories_per_100g') or 0.0):.1f}[{nutrition.get('calorie_matched')}] "
+                f"total_kcal={float(nutrition.get('total_calories') or 0.0):.1f}"
             )
-            nutrition_items.append(nutrition)
-            total_food_volume += volume_ml
-            total_mass += mass_g
-            total_calories += total_kcal
+            target_key = self._find_matching_item_key(item_components, label) if role_tag == "high_calorie" else None
+            target_key = target_key or label
+            item_components.setdefault(target_key, []).append(nutrition)
 
         for item in questionnaire_items:
-            nutrition = {
-                "food_name": item["name"],
-                "role_tag": item["role_tag"],
-                "confidence": float(item.get("confidence") or 0.0),
-                "volume_ml": item.get("volume_ml"),
-                "mass_g": round(float(item.get("mass_g") or 0.0), 1) if item.get("mass_g") is not None else None,
-                "calories_per_100g": None,
-                "density_g_per_ml": None,
-                "density_source": "gemini_questionnaire",
-                "density_matched": None,
-                "calorie_source": "gemini_questionnaire",
-                "calorie_matched": item.get("quantity"),
-                "total_calories": round(float(item.get("total_calories") or 0.0), 1),
-                "matched_food": item["name"],
-            }
+            nutrition = self._build_questionnaire_component(item)
+
+            if (
+                nutrition["role_tag"] == "high_calorie"
+                and not nutrition.get("volume_ml")
+                and nutrition.get("mass_g")
+            ):
+                matching_key = self._find_matching_item_key(item_components, item["name"])
+                if matching_key:
+                    base_group = self._aggregate_component_group(
+                        "base",
+                        [comp for comp in item_components[matching_key] if comp.get("role_tag") == "base"],
+                    )
+                    base_density = base_group.get("density_g_per_ml")
+                    if base_density:
+                        derived_volume = float(nutrition["mass_g"]) / float(base_density)
+                        nutrition["volume_ml"] = self._round_optional(derived_volume, 1)
+                        nutrition["density_g_per_ml"] = base_density
+                        nutrition["density_source"] = "derived_from_base_component"
+                        nutrition["density_matched"] = matching_key
+                        nutrition["volume_confidence"] = round(
+                            self._safe_average(
+                                [
+                                    float(nutrition.get("confidence") or 0.0),
+                                    float(base_group.get("volume_confidence") or 0.0),
+                                ],
+                                default=float(nutrition.get("confidence") or 0.0),
+                            ),
+                            4,
+                        )
+
             logger.info(
-                f"[{job_id}] {item['role_tag']} '{item['name']}': confidence={nutrition['confidence']:.2f} "
-                f"volume=n/a weight={nutrition.get('mass_g')}g kcal/100g=n/a total_kcal={nutrition['total_calories']:.1f}"
+                f"[{job_id}] questionnaire {item['role_tag']} '{item['name']}': confidence={nutrition['confidence']:.2f} "
+                f"volume={nutrition.get('volume_ml') if nutrition.get('volume_ml') is not None else 'n/a'} "
+                f"weight={nutrition.get('mass_g')}g total_kcal={float(nutrition.get('total_calories') or 0.0):.1f}"
             )
-            nutrition_items.append(nutrition)
-            total_mass += float(item.get("mass_g") or 0.0)
-            total_calories += float(item.get("total_calories") or 0.0)
+            target_key = None
+            if nutrition["role_tag"] == "high_calorie":
+                target_key = self._find_matching_item_key(item_components, item["name"])
+            target_key = target_key or item["name"]
+            item_components.setdefault(target_key, []).append(nutrition)
+
+        nutrition_items = [
+            self._finalize_component_based_item(label, components)
+            for label, components in item_components.items()
+        ]
+
+        total_food_volume = sum(float(item.get("volume_ml") or 0.0) for item in nutrition_items if item.get("volume_ml") is not None)
+        total_mass = sum(float(item.get("mass_g") or 0.0) for item in nutrition_items if item.get("mass_g") is not None)
+        total_calories = sum(float(item.get("total_calories") or 0.0) for item in nutrition_items if item.get("total_calories") is not None)
 
         return {
             "items": nutrition_items,
@@ -1416,13 +1650,18 @@ class NutritionVideoPipeline:
             item for item in verified_questionnaire
             if item.get("verdict") == "include"
             and float(item.get("confidence") or 0.0) >= 0.6
-            and not item.get("already_visible")  # skip items already counted in base dish
+            and (
+                not item.get("already_visible")
+                or item.get("type") == "extra"
+            )
         ]
         questionnaire_nutrition = self._estimate_questionnaire_item_nutrition(verified_questionnaire, job_id)
         inferred_nonvisible_items = self._infer_hidden_and_extra_items_with_gemini(
             first_pass=first_pass,
             visible_items=visible_items,
             volume_map=volume_map,
+            image_pil=pil_image,
+            raw_depth_image=raw_depth_image,
             job_id=job_id,
             user_context=user_context,
         )
