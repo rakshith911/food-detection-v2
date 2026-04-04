@@ -1075,10 +1075,120 @@ class NutritionVideoPipeline:
             logger.warning(f"[{job_id}] Questionnaire nutrition estimation failed: {e}")
             return []
 
+    def _infer_hidden_and_extra_items_with_gemini(
+        self,
+        first_pass: dict,
+        visible_items: list[dict],
+        volume_map: dict,
+        job_id: str,
+        user_context: Optional[dict] = None,
+    ) -> list[dict]:
+        if not visible_items or not self.config.GEMINI_API_KEY:
+            return []
+
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=self.config.GEMINI_API_KEY)
+        except Exception as e:
+            logger.warning(f"[{job_id}] Gemini inferred hidden/extra init failed: {e}")
+            return []
+
+        visible_payload = [
+            {
+                "name": item["name"],
+                "role_tag": item.get("role_tag") or "base",
+                "confidence": float(item.get("confidence") or 0.0),
+                "estimated_volume_ml": float((volume_map.get(item["name"].lower()) or {}).get("volume_ml") or 0.0),
+                "volume_confidence": float((volume_map.get(item["name"].lower()) or {}).get("confidence") or 0.0),
+            }
+            for item in visible_items
+        ]
+        prompt = (
+            "You are reviewing an image-only dish analysis to infer non-base ingredients that should populate "
+            "the Hidden Content or High Calorie tables.\n\n"
+            "Return ONLY valid JSON as an array. Each entry must be:\n"
+            "[{\"name\": str, \"type\": \"hidden\"|\"extra\", \"reason\": str, \"confidence\": number, "
+            "\"volume_ml\": number, \"is_incremental\": true|false}]\n\n"
+            f"Meal name: {json.dumps(first_pass.get('meal_name') or '')}\n"
+            f"Cuisine type: {json.dumps(first_pass.get('cuisine_type') or '')}\n"
+            f"Cooking method: {json.dumps(first_pass.get('cooking_method') or '')}\n"
+            f"Visible ingredients with estimated visible volume: {json.dumps(visible_payload, ensure_ascii=True)}\n"
+            f"Plate/bowl context: {json.dumps(first_pass.get('plate_or_bowl') or {}, ensure_ascii=True)}\n"
+            f"Reference objects: {json.dumps(first_pass.get('reference_objects') or [], ensure_ascii=True)}\n"
+            f"Notes: {json.dumps(first_pass.get('notes') or '')}\n\n"
+            "Rules:\n"
+            "- Hidden items are plausible components that are likely present but not directly visible or only partly visible "
+            "because they are buried/underneath/inside the dish (example: rice under falafel, gravy under toppings).\n"
+            "- Extra items are only incremental high-calorie amounts beyond the visible base portion already counted. "
+            "Use this for things like unusually heavy dressing, cheese, oil, butter, sauce, mayo, etc.\n"
+            "- If an extra item has the same name as a visible ingredient, the returned volume_ml must represent only the "
+            "additional amount beyond the already-counted visible base amount.\n"
+            "- Do not repeat ordinary visible base ingredients as hidden items.\n"
+            "- Do not invent improbable ingredients. Be conservative.\n"
+            "- Omit anything uncertain below 0.6 confidence.\n"
+            "- volume_ml must be > 0.\n"
+            "- Return at most 4 items total.\n"
+        )
+        prompt += self._build_user_context_suffix(user_context)
+
+        model = genai.GenerativeModel("gemini-2.5-flash", generation_config=self._GEMINI_GEN_CONFIG)
+        response = model.generate_content(prompt)
+        response_text = (response.text or "").strip()
+        if "```" in response_text:
+            response_text = response_text.split("```")[1]
+            if response_text.startswith("json"):
+                response_text = response_text[4:]
+        parsed = json.loads(response_text.strip())
+        self._record_gemini_output(
+            stage="production_image_hidden_extra_inference",
+            job_id=job_id,
+            model_name="gemini-2.5-flash",
+            prompt=prompt,
+            response_text=response_text,
+            parsed_output=parsed,
+            metadata={"visible_items": visible_payload},
+        )
+
+        visible_names = {(item["name"] or "").strip().lower() for item in visible_items}
+        inferred_items = []
+        seen_pairs = set()
+        for item in parsed if isinstance(parsed, list) else []:
+            name = (item.get("name") or "").strip()
+            item_type = (item.get("type") or "").strip().lower()
+            confidence = float(item.get("confidence") or 0.0)
+            volume_ml = float(item.get("volume_ml") or 0.0)
+            if not name or item_type not in {"hidden", "extra"} or confidence < 0.6 or volume_ml <= 0:
+                continue
+
+            normalized_name = name.lower()
+            if item_type == "hidden" and normalized_name in visible_names:
+                logger.info(f"[{job_id}] Skipping inferred hidden item '{name}' because it is already visible")
+                continue
+
+            pair_key = (normalized_name, item_type)
+            if pair_key in seen_pairs:
+                continue
+            seen_pairs.add(pair_key)
+
+            inferred_items.append({
+                "name": name,
+                "role_tag": "high_calorie" if item_type == "extra" else "hidden",
+                "confidence": confidence,
+                "volume_ml": volume_ml,
+                "volume_confidence": confidence,
+                "reason": (item.get("reason") or "").strip(),
+                "is_incremental": bool(item.get("is_incremental", item_type == "extra")),
+            })
+
+        if inferred_items:
+            logger.info(f"[{job_id}] Gemini inferred hidden/high-calorie items: {inferred_items}")
+        return inferred_items
+
     def _analyze_nutrition_from_production(
         self,
         visible_items: list[dict],
         volume_map: dict,
+        inferred_items: list[dict],
         questionnaire_items: list[dict],
         job_id: str,
     ) -> dict:
@@ -1121,6 +1231,48 @@ class NutritionVideoPipeline:
             }
             logger.info(
                 f"[{job_id}] {role_tag} '{label}': confidence={confidence:.2f} volume={volume_ml:.1f}ml "
+                f"density={density:.3f}[{fao_match}] weight={mass_g:.1f}g "
+                f"kcal/100g={kcal_per_100g:.1f}[{usda_match}] total_kcal={total_kcal:.1f}"
+            )
+            nutrition_items.append(nutrition)
+            total_food_volume += volume_ml
+            total_mass += mass_g
+            total_calories += total_kcal
+
+        for item in inferred_items:
+            label = item["name"]
+            role_tag = item.get("role_tag", "hidden")
+            confidence = float(item.get("confidence") or 0.0)
+            volume_ml = float(item.get("volume_ml") or 0.0)
+            volume_confidence = float(item.get("volume_confidence") or confidence)
+            if volume_ml <= 0:
+                continue
+
+            density, fao_match, fao_src = rag._get_density_with_match(label)
+            kcal_per_100g, usda_match, usda_src = rag._get_calories_with_match(label)
+            mass_g = volume_ml * density
+            total_kcal = (mass_g / 100.0) * kcal_per_100g
+            nutrition = {
+                "food_name": label,
+                "role_tag": role_tag,
+                "confidence": confidence,
+                "volume_confidence": volume_confidence,
+                "quantity": 1,
+                "volume_ml": round(volume_ml, 1),
+                "density_g_per_ml": round(float(density), 4),
+                "density_source": fao_src,
+                "density_matched": fao_match,
+                "mass_g": round(float(mass_g), 1),
+                "calories_per_100g": round(float(kcal_per_100g), 1),
+                "calorie_source": usda_src,
+                "calorie_matched": usda_match,
+                "total_calories": round(float(total_kcal), 1),
+                "matched_food": label,
+                "reason": item.get("reason"),
+                "is_incremental": bool(item.get("is_incremental")),
+            }
+            logger.info(
+                f"[{job_id}] inferred {role_tag} '{label}': confidence={confidence:.2f} volume={volume_ml:.1f}ml "
                 f"density={density:.3f}[{fao_match}] weight={mass_g:.1f}g "
                 f"kcal/100g={kcal_per_100g:.1f}[{usda_match}] total_kcal={total_kcal:.1f}"
             )
@@ -1248,10 +1400,18 @@ class NutritionVideoPipeline:
             and not item.get("already_visible")  # skip items already counted in base dish
         ]
         questionnaire_nutrition = self._estimate_questionnaire_item_nutrition(verified_questionnaire, job_id)
+        inferred_nonvisible_items = self._infer_hidden_and_extra_items_with_gemini(
+            first_pass=first_pass,
+            visible_items=visible_items,
+            volume_map=volume_map,
+            job_id=job_id,
+            user_context=user_context,
+        )
 
         nutrition_results = self._analyze_nutrition_from_production(
             visible_items=visible_items,
             volume_map=volume_map,
+            inferred_items=inferred_nonvisible_items,
             questionnaire_items=questionnaire_nutrition,
             job_id=job_id,
         )
@@ -1315,6 +1475,7 @@ class NutritionVideoPipeline:
                     "assets": debug_assets,
                 },
                 "gemini_pass_2_volume": volume_map,
+                "gemini_pass_3_inferred_items": inferred_nonvisible_items,
                 "questionnaire_items": questionnaire_nutrition,
                 "overall_confidence": overall_confidence,
                 "gemini_outputs": self.gemini_outputs,
