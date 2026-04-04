@@ -84,6 +84,24 @@ class NutritionVideoPipeline:
             self.florence_detections = []
             self.last_questionnaire_verification = []
             self.gemini_outputs = []
+
+    def _flash_model_name(self) -> str:
+        model_name = getattr(self.config, "GEMINI_FLASH_MODEL", "gemini-flash-latest")
+        return (model_name or "gemini-flash-latest").strip()
+
+    def _flash_model_candidates(self) -> List[str]:
+        candidates = [
+            self._flash_model_name(),
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash",
+            "gemini-1.5-pro",
+        ]
+        deduped = []
+        for candidate in candidates:
+            if candidate and candidate not in deduped:
+                deduped.append(candidate)
+        return deduped
     
     @staticmethod
     def _build_user_context_suffix(user_context: dict) -> str:
@@ -447,7 +465,8 @@ class NutritionVideoPipeline:
         )
         prompt += self._build_user_context_suffix(user_context)
 
-        gm = genai.GenerativeModel("gemini-2.5-flash", generation_config=self._GEMINI_GEN_CONFIG)
+        model_name = self._flash_model_name()
+        gm = genai.GenerativeModel(model_name, generation_config=self._GEMINI_GEN_CONFIG)
         response = gm.generate_content([prompt, image_pil])
         response_text = response.text or ""
 
@@ -468,7 +487,7 @@ class NutritionVideoPipeline:
         self._record_gemini_output(
             stage="production_image_first_pass",
             job_id=job_id,
-            model_name="gemini-2.5-flash",
+            model_name=model_name,
             prompt=prompt,
             response_text=response_text,
             parsed_output=data,
@@ -980,7 +999,8 @@ class NutritionVideoPipeline:
         )
         prompt += self._build_user_context_suffix(user_context)
 
-        gm = genai.GenerativeModel("gemini-2.5-flash", generation_config=self._GEMINI_GEN_CONFIG)
+        model_name = self._flash_model_name()
+        gm = genai.GenerativeModel(model_name, generation_config=self._GEMINI_GEN_CONFIG)
         original_pil = Image.fromarray(image_rgb)
         response = gm.generate_content([prompt, original_pil, raw_depth_image])
         response_text = response.text or ""
@@ -1002,7 +1022,7 @@ class NutritionVideoPipeline:
         self._record_gemini_output(
             stage="production_image_volume_from_raw_depth",
             job_id=job_id,
-            model_name="gemini-2.5-flash",
+            model_name=model_name,
             prompt=prompt,
             response_text=response_text,
             parsed_output=data,
@@ -1131,7 +1151,8 @@ class NutritionVideoPipeline:
         )
         prompt += self._build_user_context_suffix(user_context)
 
-        model = genai.GenerativeModel("gemini-2.5-flash", generation_config=self._GEMINI_GEN_CONFIG)
+        model_name = self._flash_model_name()
+        model = genai.GenerativeModel(model_name, generation_config=self._GEMINI_GEN_CONFIG)
         response = model.generate_content(prompt)
         response_text = (response.text or "").strip()
         if "```" in response_text:
@@ -1142,7 +1163,7 @@ class NutritionVideoPipeline:
         self._record_gemini_output(
             stage="production_image_hidden_extra_inference",
             job_id=job_id,
-            model_name="gemini-2.5-flash",
+            model_name=model_name,
             prompt=prompt,
             response_text=response_text,
             parsed_output=parsed,
@@ -2350,7 +2371,12 @@ class NutritionVideoPipeline:
         )
         prompt += self._build_user_context_suffix(user_context)
         # Try multiple models (404 if model name not available in this API version)
-        gemini_models_try = ["gemini-pro-latest", "gemini-3.1-pro-preview", "gemini-3-pro-preview", "gemini-3-flash-preview", "gemini-2.5-flash"]
+        gemini_models_try = self._flash_model_candidates() + [
+            "gemini-pro-latest",
+            "gemini-3.1-pro-preview",
+            "gemini-3-pro-preview",
+            "gemini-3-flash-preview",
+        ]
         response_text = ""
         for model_name in gemini_models_try:
             try:
@@ -2619,7 +2645,7 @@ class NutritionVideoPipeline:
                 pil_img.save(buf, format="JPEG", quality=85)
                 parts.append(types.Part(inline_data=types.Blob(data=buf.getvalue(), mime_type="image/jpeg")))
             response_text = ""
-            for model_name in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]:
+            for model_name in self._flash_model_candidates():
                 try:
                     print(f"  → Calling Gemini multi-image for food detection ({model_name}), 5 frames (no duplicates)...")
                     sys.stdout.flush()
@@ -2761,7 +2787,7 @@ class NutritionVideoPipeline:
                 client = genai_new.Client(api_key=self.config.GEMINI_API_KEY)
                 size = video_path.stat().st_size
                 mime = "video/mp4" if video_path.suffix.lower() in (".mp4", ".mpg", ".mpeg") else "video/quicktime"
-                video_models_try = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+                video_models_try = self._flash_model_candidates()
                 response_text = ""
                 if size <= self._GEMINI_VIDEO_INLINE_LIMIT:
                     video_bytes = video_path.read_bytes()
@@ -4476,7 +4502,12 @@ class NutritionVideoPipeline:
         )
 
         original_pil = Image.fromarray(cv2.cvtColor(frame_np, cv2.COLOR_BGR2RGB))
-        gemini_models = ["gemini-pro-latest", "gemini-3.1-pro-preview", "gemini-3-pro-preview", "gemini-3-flash-preview", "gemini-2.5-flash"]
+        gemini_models = self._flash_model_candidates() + [
+            "gemini-pro-latest",
+            "gemini-3.1-pro-preview",
+            "gemini-3-pro-preview",
+            "gemini-3-flash-preview",
+        ]
         response_text = ""
         for model_name in gemini_models:
             try:
