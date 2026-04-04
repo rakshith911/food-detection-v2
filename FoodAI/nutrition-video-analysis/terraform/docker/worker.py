@@ -51,9 +51,12 @@ from pathlib import Path
 from typing import Optional
 
 import boto3
+from botocore.config import Config
 
 # AWS clients
+# s3v4_client is used for presigned URLs — KMS-encrypted buckets require Signature Version 4
 s3 = boto3.client('s3')
+s3v4 = boto3.client('s3', config=Config(signature_version='s3v4'))
 sqs = boto3.client('sqs')
 dynamodb = boto3.resource('dynamodb')
 
@@ -501,7 +504,7 @@ def process_message(message: dict, pipeline=None):
                     s3_key = f"results/{job_id}/{asset_name}.png"
                     try:
                         s3.upload_file(local_path, S3_RESULTS_BUCKET, s3_key, ExtraArgs={"ContentType": "image/png"})
-                        url = s3.generate_presigned_url(
+                        url = s3v4.generate_presigned_url(
                             "get_object",
                             Params={"Bucket": S3_RESULTS_BUCKET, "Key": s3_key},
                             ExpiresIn=86400 * 30,  # 30-day expiry
