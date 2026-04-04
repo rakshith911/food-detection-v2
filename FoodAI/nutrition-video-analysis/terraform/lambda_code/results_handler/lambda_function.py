@@ -27,6 +27,8 @@ PRIVATE_RESPONSE_KEYS = {
     'pipeline_runtime',
     'production_debug',
     'segmented_images',
+    'density_grounding_metadata',
+    'calorie_grounding_metadata',
 }
 
 

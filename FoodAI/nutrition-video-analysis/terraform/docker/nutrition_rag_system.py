@@ -8,7 +8,8 @@ import logging
 import re
 import numpy as np
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+from urllib.parse import urlparse
 
 import faiss
 from sentence_transformers import SentenceTransformer
@@ -87,6 +88,7 @@ class NutritionRAG:
 
         self._use_unified = False
         self._gemini_cache: dict = {}  # food_name+field -> value
+        self._gemini_grounding_metadata: dict = {}  # food_name+field -> grounding metadata
 
     # ──────────────────────────────────────────────────────────────────────────
     # Loading
@@ -386,6 +388,7 @@ class NutritionRAG:
                 lo, hi = 1.0, 900.0
 
             text = ""
+            grounding_metadata = None
             try:
                 from google import genai as genai_new
                 from google.genai import types
@@ -410,6 +413,7 @@ class NutritionRAG:
                     config=types.GenerateContentConfig(**config_kwargs),
                 )
                 text = (response.text or "").strip()
+                grounding_metadata = self._extract_grounding_metadata(response)
             except Exception as new_sdk_error:
                 logger.warning(
                     f"Gemini grounding [{field}] new SDK failed for '{food_name}', "
@@ -431,10 +435,99 @@ class NutritionRAG:
                 if lo <= val <= hi:
                     logger.info(f"Gemini grounding [{field}] '{food_name}': {val}")
                     self._gemini_cache[cache_key] = val
+                    if grounding_metadata and grounding_metadata.get("grounded"):
+                        grounding_metadata.update({
+                            "food_name": food_name,
+                            "field": field,
+                            "value": val,
+                            "model": self._gemini_model,
+                        })
+                        self._gemini_grounding_metadata[cache_key] = grounding_metadata
                     return val
         except Exception as e:
             logger.warning(f"Gemini grounding [{field}] failed for '{food_name}': {e}")
         return None
+
+    @staticmethod
+    def _extract_grounding_metadata(response: Any) -> Optional[dict]:
+        """Extract source URLs/titles from Gemini grounding metadata when available."""
+        def _as_plain(obj: Any):
+            if obj is None or isinstance(obj, (str, int, float, bool)):
+                return obj
+            if isinstance(obj, list):
+                return [_as_plain(item) for item in obj]
+            if isinstance(obj, dict):
+                return {key: _as_plain(value) for key, value in obj.items()}
+            if hasattr(obj, "model_dump"):
+                try:
+                    return _as_plain(obj.model_dump())
+                except Exception:
+                    pass
+            if hasattr(obj, "to_dict"):
+                try:
+                    return _as_plain(obj.to_dict())
+                except Exception:
+                    pass
+            if hasattr(obj, "__dict__"):
+                try:
+                    return _as_plain(vars(obj))
+                except Exception:
+                    pass
+            return str(obj)
+
+        response_data = _as_plain(response)
+        if not isinstance(response_data, dict):
+            return None
+
+        candidates = response_data.get("candidates") or []
+        candidate = candidates[0] if candidates else {}
+        grounding = (
+            candidate.get("grounding_metadata")
+            or candidate.get("groundingMetadata")
+            or {}
+        )
+        if not isinstance(grounding, dict):
+            return None
+
+        chunks = grounding.get("grounding_chunks") or grounding.get("groundingChunks") or []
+        queries = grounding.get("web_search_queries") or grounding.get("webSearchQueries") or []
+        supports = grounding.get("grounding_supports") or grounding.get("groundingSupports") or []
+
+        sources = []
+        seen_urls = set()
+        for chunk in chunks:
+            if not isinstance(chunk, dict):
+                continue
+            web = chunk.get("web") or {}
+            if not isinstance(web, dict):
+                continue
+            url = (web.get("uri") or web.get("url") or "").strip()
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            domain = urlparse(url).netloc
+            sources.append({
+                "title": (web.get("title") or "").strip() or None,
+                "url": url,
+                "domain": domain or None,
+            })
+
+        grounded = bool(sources or queries or supports)
+        if not grounded:
+            return None
+
+        return {
+            "grounded": True,
+            "queries": [q for q in queries if isinstance(q, str) and q.strip()],
+            "sources": sources,
+        }
+
+    def get_grounding_metadata(self, food_name: str, field: str) -> Optional[dict]:
+        cache_key = f"{food_name}::{field}"
+        metadata = self._gemini_grounding_metadata.get(cache_key)
+        if not metadata:
+            return None
+        return json.loads(json.dumps(metadata))
 
     # ──────────────────────────────────────────────────────────────────────────
     # Single-entry lookup: one FAISS search, both fields from the same entry
@@ -609,4 +702,12 @@ class NutritionRAG:
             "density_source":    source_tag,
             "calorie_matched":   matched,
             "calorie_source":    source_tag,
+            "density_grounding_metadata": (
+                self.get_grounding_metadata(food_name, 'density_g_ml')
+                if source_tag == "gemini_grounding" else None
+            ),
+            "calorie_grounding_metadata": (
+                self.get_grounding_metadata(food_name, 'calories_per_100g')
+                if source_tag == "gemini_grounding" else None
+            ),
         }

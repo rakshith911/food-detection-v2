@@ -102,6 +102,18 @@ class NutritionVideoPipeline:
             if candidate and candidate not in deduped:
                 deduped.append(candidate)
         return deduped
+
+    @staticmethod
+    def _attach_grounding_metadata(nutrition: dict, rag, food_name: str, density_source: str, calorie_source: str) -> dict:
+        if density_source == "gemini_grounding":
+            density_metadata = rag.get_grounding_metadata(food_name, "density_g_ml")
+            if density_metadata:
+                nutrition["density_grounding_metadata"] = density_metadata
+        if calorie_source == "gemini_grounding":
+            calorie_metadata = rag.get_grounding_metadata(food_name, "calories_per_100g")
+            if calorie_metadata:
+                nutrition["calorie_grounding_metadata"] = calorie_metadata
+        return nutrition
     
     @staticmethod
     def _build_user_context_suffix(user_context: dict) -> str:
@@ -1255,6 +1267,7 @@ class NutritionVideoPipeline:
                 f"density={density:.3f}[{fao_match}] weight={mass_g:.1f}g "
                 f"kcal/100g={kcal_per_100g:.1f}[{usda_match}] total_kcal={total_kcal:.1f}"
             )
+            nutrition = self._attach_grounding_metadata(nutrition, rag, label, fao_src, usda_src)
             nutrition_items.append(nutrition)
             total_food_volume += volume_ml
             total_mass += mass_g
@@ -1297,6 +1310,7 @@ class NutritionVideoPipeline:
                 f"density={density:.3f}[{fao_match}] weight={mass_g:.1f}g "
                 f"kcal/100g={kcal_per_100g:.1f}[{usda_match}] total_kcal={total_kcal:.1f}"
             )
+            nutrition = self._attach_grounding_metadata(nutrition, rag, label, fao_src, usda_src)
             nutrition_items.append(nutrition)
             total_food_volume += volume_ml
             total_mass += mass_g
@@ -5874,6 +5888,7 @@ Example:
                         f"density={density:.3f}[{fao_match}] mass={mass_g:.1f}g "
                         f"kcal={total_kcal:.0f}[{usda_match}] [depth+FAO+USDA]"
                     )
+                    nutrition = self._attach_grounding_metadata(nutrition, rag, label, fao_src, usda_src)
 
                 else:
                     # Priority 2: fallback to Gemini detection grams + USDA kcal
