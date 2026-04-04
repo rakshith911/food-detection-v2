@@ -1,6 +1,10 @@
 """
 Build CoFID foods JSON + FAISS index structured identically to usda_foods.json.
 
+CoFID does not provide the exact volumetric portion data we use for USDA-style
+density calculations, so this builder preserves calorie/macronutrient data only
+and leaves density fields empty unless a future exact source is added.
+
 Output files:
   cofid_data/cofid_foods.json        — list of food dicts
   cofid_data/cofid_food_names.json   — parallel list of names (for FAISS lookup)
@@ -18,27 +22,6 @@ XLSX = Path(__file__).parent / "CoFID.xlsx"
 OUT_DIR = Path(__file__).parent
 
 
-def compute_macro_density(water, protein, fat, carbs):
-    """
-    Macronutrient density formula (g/ml).
-    Partial specific volumes: water=1.0, protein=0.74, fat=1.11, carbs=0.67
-    density = 100 / sum(macro_i / pv_i)
-    """
-    try:
-        denom = (
-            float(water or 0) / 1.0
-            + float(protein or 0) / 1.35
-            + float(fat or 0) / 0.9
-            + float(carbs or 0) / 1.5
-        )
-        if denom <= 0:
-            return None
-        d = round(100.0 / denom, 3)
-        return d if 0.1 < d < 3.0 else None
-    except Exception:
-        return None
-
-
 def safe_float(v):
     if v is None:
         return None
@@ -54,8 +37,24 @@ def safe_float(v):
         return None
 
 
+def parse_specific_gravity_map(wb):
+    ws = wb["1.2 Factors"]
+    gravity_by_code = {}
+    for row in ws.iter_rows(min_row=4, values_only=True):
+        code = row[0]
+        if not code:
+            continue
+        specific_gravity = safe_float(row[8])
+        if specific_gravity is None:
+            continue
+        if 0.05 <= specific_gravity <= 3.0:
+            gravity_by_code[str(code)] = round(float(specific_gravity), 3)
+    return gravity_by_code
+
+
 def parse_cofid():
     wb = openpyxl.load_workbook(str(XLSX), read_only=True, data_only=True)
+    gravity_by_code = parse_specific_gravity_map(wb)
     ws = wb["1.3 Proximates"]
 
     foods = []
@@ -77,7 +76,7 @@ def parse_cofid():
         if kcal is None:
             continue  # skip entries with no calorie data
 
-        density = compute_macro_density(water, protein, fat, carbs)
+        density = gravity_by_code.get(str(code))
 
         foods.append({
             "food_code":          str(code),
@@ -88,7 +87,7 @@ def parse_cofid():
             "fat_g":              fat,
             "carbs_g":            carbs,
             "density_g_ml":       density,
-            "density_method":     "macro_only" if density else None,
+            "density_method":     "cofid_specific_gravity" if density is not None else None,
             "source":             "cofid",
         })
 

@@ -4,6 +4,10 @@ Build a single unified FAISS index from FAO + USDA + CoFID.
 Each entry in unified_foods.json has:
   description, calories_per_100g, density_g_ml, density_method, source
 
+FAO and USDA may contribute exact density values.
+CoFID contributes calorie data, but density stays empty unless an exact
+measurement-based CoFID density source is added upstream.
+
 Output:
   unified_data/unified_foods.json
   unified_data/unified_food_names.json
