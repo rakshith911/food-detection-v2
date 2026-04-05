@@ -12,12 +12,17 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 import faiss
+import torch
+from PIL import Image
 from sentence_transformers import SentenceTransformer
+from sentence_transformers.cross_encoder import CrossEncoder
+from transformers import CLIPModel, CLIPProcessor
 
 logger = logging.getLogger(__name__)
 
 # Minimum cosine similarity from FAISS to consider a candidate.
 _MIN_FAISS_SIM = 0.45
+_MIN_RERANK_SCORE = -5.0
 
 # Per-source minimum similarity — FAO has only 634 entries and can match off-target
 # at lower similarities; USDA/CoFID are larger and more tolerant.
@@ -50,6 +55,8 @@ class NutritionRAG:
         gemini_api_key: Optional[str] = None,
         gemini_model: str = "gemini-flash-latest",
         embedding_model: str = "all-MiniLM-L6-v2",
+        clip_model_name: str = "openai/clip-vit-base-patch32",
+        cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
     ):
         self._unified_faiss_path   = Path(unified_faiss_path)   if unified_faiss_path   else None
         self._unified_foods_path   = Path(unified_foods_path)   if unified_foods_path   else None
@@ -66,9 +73,16 @@ class NutritionRAG:
         self._gemini_api_key    = gemini_api_key
         self._gemini_model      = gemini_model
         self._embedding_model   = embedding_model
+        self._clip_model_name   = clip_model_name
+        self._cross_encoder_model = cross_encoder_model
 
         # Runtime objects (populated in load())
         self._embedder: Optional[SentenceTransformer] = None
+        self._clip_model: Optional[CLIPModel] = None
+        self._clip_processor: Optional[CLIPProcessor] = None
+        self._cross_encoder: Optional[CrossEncoder] = None
+        self._clip_index = None
+        self._clip_name_embeddings: Optional[np.ndarray] = None
         self._unified_index = None
         self._unified_foods: list = []
         self._unified_names: list = []
@@ -90,11 +104,17 @@ class NutritionRAG:
     # ──────────────────────────────────────────────────────────────────────────
 
     def load(self):
-        """Load indexes, embedding model, and cross-encoder re-ranker."""
+        """Load indexes and retrieval/reranking models."""
         logger.info("Loading NutritionRAG...")
 
         self._embedder = SentenceTransformer(self._embedding_model)
         logger.info(f"  Embedding model: {self._embedding_model}")
+        self._cross_encoder = CrossEncoder(self._cross_encoder_model)
+        logger.info(f"  Cross-encoder:   {self._cross_encoder_model}")
+        self._clip_processor = CLIPProcessor.from_pretrained(self._clip_model_name)
+        self._clip_model = CLIPModel.from_pretrained(self._clip_model_name)
+        self._clip_model.eval()
+        logger.info(f"  CLIP model:      {self._clip_model_name}")
 
         # Prefer unified index
         if (self._unified_faiss_path and self._unified_faiss_path.exists()
@@ -106,6 +126,7 @@ class NutritionRAG:
                 self._unified_names = json.load(f)
             self._use_unified = True
             logger.info(f"  Unified index:   {len(self._unified_foods)} entries (FAO+USDA+CoFID)")
+            self._build_clip_index()
         else:
             # Fall back to separate FAO + USDA indexes
             logger.info("  Unified index not found — falling back to separate FAO + USDA indexes")
@@ -125,6 +146,31 @@ class NutritionRAG:
                 logger.info(f"  USDA index:      {len(self._usda_foods)} entries")
 
         logger.info("NutritionRAG ready")
+
+    def _build_clip_index(self) -> None:
+        if not self._unified_names or self._clip_model is None or self._clip_processor is None:
+            return
+        logger.info("  Building CLIP retrieval index from unified food names...")
+        batch_size = 256
+        embeddings = []
+        for start in range(0, len(self._unified_names), batch_size):
+            batch_names = self._unified_names[start:start + batch_size]
+            inputs = self._clip_processor(text=batch_names, return_tensors="pt", padding=True, truncation=True)
+            with torch.no_grad():
+                text_features = self._clip_model.get_text_features(
+                    input_ids=inputs["input_ids"],
+                    attention_mask=inputs["attention_mask"],
+                )
+            batch_emb = text_features.detach().cpu().numpy().astype(np.float32)
+            norms = np.linalg.norm(batch_emb, axis=1, keepdims=True)
+            batch_emb = batch_emb / np.clip(norms, 1e-8, None)
+            embeddings.append(batch_emb)
+
+        self._clip_name_embeddings = np.vstack(embeddings).astype(np.float32)
+        dim = int(self._clip_name_embeddings.shape[1])
+        self._clip_index = faiss.IndexFlatIP(dim)
+        self._clip_index.add(self._clip_name_embeddings)
+        logger.info(f"  CLIP index:      {self._clip_index.ntotal} entries ({dim} dims)")
 
     # ──────────────────────────────────────────────────────────────────────────
     # Label normalisation
@@ -200,6 +246,54 @@ class NutritionRAG:
                     hits[idx] = sim
         return sorted(hits.items(), key=lambda x: -x[1])
 
+    def _clip_text_embedding(self, text: str) -> np.ndarray:
+        inputs = self._clip_processor(text=[text], return_tensors="pt", padding=True, truncation=True)
+        with torch.no_grad():
+            text_features = self._clip_model.get_text_features(
+                input_ids=inputs["input_ids"],
+                attention_mask=inputs["attention_mask"],
+            )
+        vec = text_features.detach().cpu().numpy().astype(np.float32)
+        vec = vec / np.clip(np.linalg.norm(vec, axis=1, keepdims=True), 1e-8, None)
+        return vec
+
+    def _clip_image_embedding(self, crop_image: Optional[Image.Image]) -> Optional[np.ndarray]:
+        if crop_image is None:
+            return None
+        inputs = self._clip_processor(images=[crop_image.convert("RGB")], return_tensors="pt")
+        with torch.no_grad():
+            image_features = self._clip_model.get_image_features(pixel_values=inputs["pixel_values"])
+        vec = image_features.detach().cpu().numpy().astype(np.float32)
+        vec = vec / np.clip(np.linalg.norm(vec, axis=1, keepdims=True), 1e-8, None)
+        return vec
+
+    def _clip_fused_search(
+        self,
+        food_name: str,
+        crop_image: Optional[Image.Image],
+        top_k: int,
+    ) -> list:
+        if self._clip_index is None or self._clip_model is None or self._clip_processor is None:
+            return []
+
+        text_vec = self._clip_text_embedding(food_name)
+        image_vec = self._clip_image_embedding(crop_image)
+        if image_vec is not None:
+            fused = (text_vec + image_vec) / 2.0
+            fused = fused / np.clip(np.linalg.norm(fused, axis=1, keepdims=True), 1e-8, None)
+        else:
+            fused = text_vec
+
+        sims, idxs = self._clip_index.search(fused.astype(np.float32), top_k)
+        hits = []
+        for i in range(top_k):
+            idx = int(idxs[0][i])
+            sim = float(sims[0][i])
+            if idx < 0:
+                continue
+            hits.append((idx, sim))
+        return hits
+
     # ──────────────────────────────────────────────────────────────────────────
     # Word-overlap plausibility guard
     # ──────────────────────────────────────────────────────────────────────────
@@ -208,6 +302,19 @@ class NutritionRAG:
     _GENERIC_WORDS = {
         'sauce', 'soup', 'food', 'dish', 'meal', 'item', 'product', 'type',
         'style', 'with', 'from', 'made', 'home', 'store', 'brand', 'kind',
+    }
+    _UNPREPARED_TERMS = {
+        'dry', 'unprepared', 'packet', 'mix', 'concentrate', 'powder',
+        'seasoning', 'instant', 'flavor', 'flavoured', 'flavored',
+    }
+    _PREPARED_TERMS = {
+        'prepared', 'cooked', 'boiled', 'steamed', 'fried', 'grilled',
+        'baked', 'roasted', 'restaurant', 'homemade', 'entree',
+        'pilaf', 'spanish',
+    }
+    _RAW_QUERY_TERMS = {
+        'raw', 'dry', 'unprepared', 'powder', 'mix', 'packet', 'instant',
+        'concentrate', 'seasoning',
     }
 
     @classmethod
@@ -229,38 +336,193 @@ class NutritionRAG:
             for qw in q_words for mw in m_words if len(mw) >= 4
         )
 
+    @classmethod
+    def _tokenize_for_rank(cls, text: str) -> list[str]:
+        cleaned = re.sub(r'[^a-z0-9 ]', ' ', (text or '').lower())
+        return [
+            token for token in cleaned.split()
+            if len(token) >= 3 and token not in cls._GENERIC_WORDS
+        ]
+
+    @classmethod
+    def _query_implies_served_dish(cls, query_lower: str) -> bool:
+        query_tokens = set(cls._tokenize_for_rank(query_lower))
+        return not bool(query_tokens & cls._RAW_QUERY_TERMS)
+
+    @classmethod
+    def _candidate_rank_score(
+        cls,
+        query_lower: str,
+        matched_lower: str,
+        entry: dict,
+        sim: float,
+    ) -> float:
+        """
+        Final ranking score after FAISS recall.
+        Rewards exact/near-exact lexical matches and prepared dish candidates.
+        Penalizes generic commodity hits and dry/unprepared mix entries for plated dishes.
+        """
+        score = float(sim) * 100.0
+
+        normalized_query = cls._normalize_food_name(query_lower)
+        normalized_matched = cls._normalize_food_name(matched_lower)
+        query_tokens = set(cls._tokenize_for_rank(normalized_query))
+        matched_tokens = set(cls._tokenize_for_rank(normalized_matched))
+
+        if normalized_query and normalized_query == normalized_matched:
+            score += 20.0
+        elif normalized_query and normalized_query in normalized_matched:
+            score += 12.0
+
+        overlap_count = len(query_tokens & matched_tokens)
+        missing_count = len(query_tokens - matched_tokens)
+        score += overlap_count * 6.0
+        score -= missing_count * 5.0
+
+        if len(query_tokens) >= 2 and len(matched_tokens) <= 1 and missing_count > 0:
+            score -= 14.0
+
+        query_served = cls._query_implies_served_dish(query_lower)
+        matched_all_text = re.sub(r'[^a-z0-9 ]', ' ', matched_lower)
+        matched_all_tokens = set(matched_all_text.split())
+
+        has_unprepared_marker = bool(matched_all_tokens & cls._UNPREPARED_TERMS)
+        has_prepared_marker = bool(matched_all_tokens & cls._PREPARED_TERMS)
+
+        if query_served:
+            if has_prepared_marker:
+                score += 8.0
+            if has_unprepared_marker:
+                score -= 18.0
+
+        # Strongly discourage falling back to a generic single-food label like "Rice"
+        # when the query is more specific, e.g. "yellow rice".
+        if len(query_tokens) >= 2 and normalized_matched in matched_tokens and len(matched_tokens) == 1:
+            score -= 16.0
+
+        # Favor richer USDA/CoFID dish descriptions over generic FAO commodity labels
+        # when the query itself is a multi-word plated dish.
+        if len(query_tokens) >= 2 and entry.get('source') == 'fao' and len(matched_tokens) <= 2:
+            score -= 6.0
+
+        return score
+
+    @classmethod
+    def _lexical_override_score(cls, query_lower: str, matched_lower: str) -> float:
+        score = 0.0
+        normalized_query = cls._normalize_food_name(query_lower)
+        normalized_matched = cls._normalize_food_name(matched_lower)
+        query_tokens = set(cls._tokenize_for_rank(normalized_query))
+        matched_tokens = set(cls._tokenize_for_rank(normalized_matched))
+
+        if normalized_query == normalized_matched:
+            score += 40.0
+        elif normalized_matched.startswith(normalized_query):
+            score += 28.0
+        elif normalized_query in normalized_matched:
+            score += 18.0
+
+        overlap = len(query_tokens & matched_tokens)
+        score += overlap * 8.0
+        score -= len(query_tokens - matched_tokens) * 6.0
+
+        processed_penalties = {"mix", "packet", "instant", "powder", "concentrate", "flavor", "flavored", "flavoured"}
+        matched_all_tokens = set(re.sub(r'[^a-z0-9 ]', ' ', matched_lower).split())
+        score -= len(processed_penalties & matched_all_tokens) * 7.0
+        return score
+
+    def _retrieve_candidates(
+        self,
+        food_name: str,
+        crop_image: Optional[Image.Image],
+        top_k: int = 10,
+    ) -> list[dict]:
+        if not self._use_unified:
+            return []
+
+        clip_hits = self._clip_fused_search(food_name, crop_image, top_k)
+        candidates = []
+        normalized = self._normalize_food_name(food_name)
+
+        for idx, clip_sim in clip_hits:
+            if not (0 <= idx < len(self._unified_foods)):
+                continue
+            entry = self._unified_foods[idx]
+            matched = self._unified_names[idx] if idx < len(self._unified_names) else ""
+            if not matched:
+                continue
+            cross_score = float(self._cross_encoder.predict([(food_name, matched)])[0]) if self._cross_encoder else float("-inf")
+            lexical_score = self._lexical_override_score(normalized, matched.lower())
+            rank_score = self._candidate_rank_score(normalized, matched.lower(), entry, clip_sim)
+            candidates.append({
+                "idx": idx,
+                "entry": entry,
+                "matched": matched,
+                "clip_sim": clip_sim,
+                "cross_score": cross_score,
+                "lexical_score": lexical_score,
+                "rank_score": rank_score,
+            })
+
+        candidates.sort(key=lambda item: (-item["cross_score"], -item["lexical_score"], -item["rank_score"], -item["clip_sim"]))
+        return candidates
+
+    def _apply_lexical_override(self, food_name: str, candidates: list[dict]) -> list[dict]:
+        if not candidates:
+            return candidates
+        best = candidates[0]
+        lexical_best = max(candidates, key=lambda item: item["lexical_score"])
+        if lexical_best["idx"] != best["idx"]:
+            lexical_gap = lexical_best["lexical_score"] - best["lexical_score"]
+            bad_best = (
+                lexical_gap >= 10.0
+                and (
+                    best["cross_score"] < -2.0
+                    or lexical_best["cross_score"] >= best["cross_score"] - 1.0
+                )
+            )
+            if bad_best:
+                reordered = [lexical_best] + [item for item in candidates if item["idx"] != lexical_best["idx"]]
+                return reordered
+        return candidates
+
     # ──────────────────────────────────────────────────────────────────────────
     # Unified lookup (density or calories)
     # ──────────────────────────────────────────────────────────────────────────
 
     _SKIP_WORDS = {'oil', 'fat', 'extract', 'powder', 'concentrate', 'flavoring', 'supplement'}
 
-    def _lookup_unified(self, food_name: str, field: str, top_k: int = 20):
+    def _lookup_unified(
+        self,
+        food_name: str,
+        field: str,
+        top_k: int = 10,
+        crop_image: Optional[Image.Image] = None,
+    ):
         """
         Search unified FAISS index, re-rank with cross-encoder.
         field: 'density_g_ml' or 'calories_per_100g'
         Returns (value, matched_name, source) or (None, None, None).
         """
         normalized = self._normalize_food_name(food_name)
-        raw_lower  = food_name.strip().lower()
-        variants   = list(dict.fromkeys([normalized, raw_lower]))
+        retrieved_candidates = self._apply_lexical_override(
+            normalized,
+            self._retrieve_candidates(food_name, crop_image=crop_image, top_k=top_k),
+        )
 
-        hits = self._faiss_search(self._unified_index, variants, top_k)
-
-        # Build candidate list filtered to entries that have the field
         candidates = []
-        for idx, sim in hits:
-            if not (0 <= idx < len(self._unified_foods)):
-                continue
-            entry = self._unified_foods[idx]
+        for candidate in retrieved_candidates:
+            idx = candidate["idx"]
+            sim = candidate["clip_sim"]
+            entry = candidate["entry"]
             value = entry.get(field)
             if value is None:
                 continue
-            matched = self._unified_names[idx] if idx < len(self._unified_names) else ""
+            matched = candidate["matched"]
 
             # Apply per-source minimum similarity thresholds
             src = entry.get('source', 'usda')
-            min_sim = _MIN_SIM_BY_SOURCE.get(src, _MIN_FAISS_SIM)
+            min_sim = _MIN_SIM_BY_SOURCE.get(src, _MIN_FAISS_SIM) - 0.05
             if sim < min_sim:
                 continue
 
@@ -278,20 +540,27 @@ class NutritionRAG:
                 logger.info(f"Skip (no word overlap): '{food_name}' vs '{matched}'")
                 continue
 
-            candidates.append((idx, sim, float(value), matched, entry))
+            rank_score = candidate["rank_score"]
+            candidates.append((candidate["cross_score"], candidate["lexical_score"], rank_score, idx, sim, float(value), matched, entry))
 
         if not candidates:
             return None, None, None
 
-        # Pick best by FAISS similarity (already sorted desc)
+        candidates.sort(key=lambda item: (-item[0], -item[1], -item[2], -item[4]))
         best = candidates[0]
 
-        idx, sim, value, matched, entry = best
+        cross_score, lexical_score, rank_score, idx, sim, value, matched, entry = best
+        if cross_score < _MIN_RERANK_SCORE:
+            logger.info(f"[{field}] '{food_name}' top rerank score too low ({cross_score:.2f}) - using Gemini fallback path")
+            return None, None, None
         src = entry.get('source', 'unified')
         source = f"{src}_faiss(sim={sim:.2f})"
         if field == 'density_g_ml':
             source += f",{entry.get('density_method', 'unknown')}"
-        logger.info(f"[{field}] '{food_name}' → '{matched}' ({source}): {value}")
+        logger.info(
+            f"[{field}] '{food_name}' → '{matched}' "
+            f"({source}, clip={sim:.2f}, cross={cross_score:.2f}, lexical={lexical_score:.2f}, rank={rank_score:.2f}): {value}"
+        )
         return value, matched, source
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -528,7 +797,12 @@ class NutritionRAG:
     # Single-entry lookup: one FAISS search, both fields from the same entry
     # ──────────────────────────────────────────────────────────────────────────
 
-    def _lookup_best_entry(self, food_name: str, top_k: int = 20):
+    def _lookup_best_entry(
+        self,
+        food_name: str,
+        top_k: int = 10,
+        crop_image: Optional[Image.Image] = None,
+    ):
         """
         Find the best matching food entry that has BOTH density and calories.
         Returns (entry, matched_name, sim, source_tag) or (None, None, None, None).
@@ -537,25 +811,23 @@ class NutritionRAG:
         they are always nutritionally consistent.
         """
         normalized = self._normalize_food_name(food_name)
-        raw_lower  = food_name.strip().lower()
-        variants   = list(dict.fromkeys([normalized, raw_lower]))
-
-        hits = self._faiss_search(self._unified_index, variants, top_k)
-
         candidates = []
-        for idx, sim in hits:
-            if not (0 <= idx < len(self._unified_foods)):
-                continue
-            entry   = self._unified_foods[idx]
+        for candidate in self._apply_lexical_override(
+            normalized,
+            self._retrieve_candidates(food_name, crop_image=crop_image, top_k=top_k),
+        ):
+            idx = candidate["idx"]
+            sim = candidate["clip_sim"]
+            entry = candidate["entry"]
             density = entry.get('density_g_ml')
             kcal    = entry.get('calories_per_100g')
             # Must have both fields
             if density is None or kcal is None:
                 continue
-            matched = self._unified_names[idx] if idx < len(self._unified_names) else ""
+            matched = candidate["matched"]
 
             src = entry.get('source', 'usda')
-            min_sim = _MIN_SIM_BY_SOURCE.get(src, _MIN_FAISS_SIM)
+            min_sim = _MIN_SIM_BY_SOURCE.get(src, _MIN_FAISS_SIM) - 0.05
             if sim < min_sim:
                 continue
 
@@ -570,28 +842,44 @@ class NutritionRAG:
                 logger.info(f"Skip (no word overlap): '{food_name}' vs '{matched}'")
                 continue
 
-            candidates.append((idx, sim, entry, matched))
+            candidates.append((
+                candidate["cross_score"],
+                candidate["lexical_score"],
+                candidate["rank_score"],
+                idx,
+                sim,
+                entry,
+                matched,
+            ))
 
         if not candidates:
             return None, None, None, None
 
-        idx, sim, entry, matched = candidates[0]
+        candidates.sort(key=lambda item: (-item[0], -item[1], -item[2], -item[4]))
+        cross_score, lexical_score, rank_score, idx, sim, entry, matched = candidates[0]
+        if cross_score < _MIN_RERANK_SCORE:
+            logger.info(f"[shared_lookup] '{food_name}' top rerank score too low ({cross_score:.2f}) - not using shared DB entry")
+            return None, None, None, None
         src = entry.get('source', 'unified')
         method = entry.get('density_method', 'unknown')
         source_tag = f"{src}_faiss(sim={sim:.2f}),{method}"
+        logger.info(
+            f"[shared_lookup] '{food_name}' → '{matched}' "
+            f"({source_tag}, clip={sim:.2f}, cross={cross_score:.2f}, lexical={lexical_score:.2f}, rank={rank_score:.2f})"
+        )
         return entry, matched, sim, source_tag
 
     # ──────────────────────────────────────────────────────────────────────────
     # Public API
     # ──────────────────────────────────────────────────────────────────────────
 
-    def get_density(self, food_name: str) -> float:
-        return self._get_density_with_match(food_name)[0]
+    def get_density(self, food_name: str, crop_image: Optional[Image.Image] = None) -> float:
+        return self._get_density_with_match(food_name, crop_image=crop_image)[0]
 
-    def _get_density_with_match(self, food_name: str, top_k: int = 20):
+    def _get_density_with_match(self, food_name: str, top_k: int = 10, crop_image: Optional[Image.Image] = None):
         """Return (density_g_ml, matched_name, source). Used standalone if needed."""
         if self._use_unified:
-            density, matched, source = self._lookup_unified(food_name, 'density_g_ml', top_k)
+            density, matched, source = self._lookup_unified(food_name, 'density_g_ml', top_k, crop_image=crop_image)
         else:
             density, matched, source = self._lookup_legacy_density(food_name)
 
@@ -605,13 +893,13 @@ class NutritionRAG:
         logger.warning(f"No density found for '{food_name}' — all lookups failed")
         return 0.9, "fallback", "fallback_default"
 
-    def get_calories_per_100g(self, food_name: str) -> float:
-        return self._get_calories_with_match(food_name)[0]
+    def get_calories_per_100g(self, food_name: str, crop_image: Optional[Image.Image] = None) -> float:
+        return self._get_calories_with_match(food_name, crop_image=crop_image)[0]
 
-    def _get_calories_with_match(self, food_name: str, top_k: int = 20):
+    def _get_calories_with_match(self, food_name: str, top_k: int = 10, crop_image: Optional[Image.Image] = None):
         """Return (kcal_per_100g, matched_name, source). Used standalone if needed."""
         if self._use_unified:
-            kcal, matched, source = self._lookup_unified(food_name, 'calories_per_100g', top_k)
+            kcal, matched, source = self._lookup_unified(food_name, 'calories_per_100g', top_k, crop_image=crop_image)
         else:
             kcal, matched, source = self._lookup_legacy_calories(food_name)
 
@@ -625,8 +913,8 @@ class NutritionRAG:
         logger.warning(f"No calories found for '{food_name}' — all lookups failed")
         return 200.0, "fallback", "fallback_default"
 
-    def get_nutrition(self, food_name: str, volume_ml: float) -> dict:
-        density, kcal_per_100g, density_matched, density_source, calorie_matched, calorie_source = self._resolve_nutrition(food_name)
+    def get_nutrition(self, food_name: str, volume_ml: float, crop_image: Optional[Image.Image] = None) -> dict:
+        density, kcal_per_100g, density_matched, density_source, calorie_matched, calorie_source = self._resolve_nutrition(food_name, crop_image=crop_image)
         mass_g     = volume_ml * density
         total_kcal = (mass_g / 100.0) * kcal_per_100g
         return {
@@ -642,7 +930,7 @@ class NutritionRAG:
             "calorie_source":    calorie_source,
         }
 
-    def _resolve_nutrition(self, food_name: str):
+    def _resolve_nutrition(self, food_name: str, crop_image: Optional[Image.Image] = None):
         """
         Prefer one shared entry when its density is reliable.
         Otherwise resolve density and calories independently so unreliable CoFID
@@ -654,7 +942,7 @@ class NutritionRAG:
         ).
         """
         if self._use_unified:
-            entry, matched, sim, source_tag = self._lookup_best_entry(food_name)
+            entry, matched, sim, source_tag = self._lookup_best_entry(food_name, crop_image=crop_image)
         else:
             entry, matched, sim, source_tag = None, None, None, None
 
@@ -663,8 +951,8 @@ class NutritionRAG:
             kcal_per_100g = float(entry['calories_per_100g'])
             return density, kcal_per_100g, matched, source_tag, matched, source_tag
 
-        density, density_matched, density_source = self._get_density_with_match(food_name)
-        kcal_per_100g, calorie_matched, calorie_source = self._get_calories_with_match(food_name)
+        density, density_matched, density_source = self._get_density_with_match(food_name, crop_image=crop_image)
+        kcal_per_100g, calorie_matched, calorie_source = self._get_calories_with_match(food_name, crop_image=crop_image)
         return density, kcal_per_100g, density_matched, density_source, calorie_matched, calorie_source
 
     def get_nutrition_for_food(
@@ -673,8 +961,9 @@ class NutritionRAG:
         volume_ml: float,
         mass_g: Optional[float] = None,
         quantity: int = 1,
+        crop_image: Optional[Image.Image] = None,
     ) -> dict:
-        density, kcal_per_100g, density_matched, density_source, calorie_matched, calorie_source = self._resolve_nutrition(food_name)
+        density, kcal_per_100g, density_matched, density_source, calorie_matched, calorie_source = self._resolve_nutrition(food_name, crop_image=crop_image)
         if mass_g is None or mass_g <= 0:
             mass_g = volume_ml * density
         total_kcal = (mass_g / 100.0) * kcal_per_100g

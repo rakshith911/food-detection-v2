@@ -596,9 +596,10 @@ class NutritionVideoPipeline:
         origin: str,
         reason: Optional[str] = None,
         is_incremental: bool = False,
+        crop_image: Optional[Image.Image] = None,
     ) -> dict:
         rag = self.models.rag
-        nutrition = rag.get_nutrition_for_food(label, volume_ml, quantity=1)
+        nutrition = rag.get_nutrition_for_food(label, volume_ml, quantity=1, crop_image=crop_image)
         nutrition = self._attach_grounding_metadata(
             nutrition,
             rag,
@@ -657,6 +658,24 @@ class NutritionVideoPipeline:
             "density_grounding_metadata": item.get("density_grounding_metadata"),
             "calorie_grounding_metadata": item.get("calorie_grounding_metadata"),
         }
+
+    @staticmethod
+    def _extract_mask_crop(
+        image_rgb: np.ndarray,
+        mask: Optional[np.ndarray],
+    ) -> Optional[Image.Image]:
+        if mask is None:
+            return None
+        if mask.sum() == 0:
+            return None
+        ys, xs = np.where(mask)
+        if len(xs) == 0 or len(ys) == 0:
+            return None
+        x1, y1, x2, y2 = int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
+        crop_rgb = image_rgb[y1:y2 + 1, x1:x2 + 1].copy()
+        crop_mask = mask[y1:y2 + 1, x1:x2 + 1]
+        crop_rgb[~crop_mask] = 0
+        return Image.fromarray(crop_rgb)
 
     def _aggregate_component_group(self, role_tag: str, components: list[dict]) -> dict:
         volume_values = [float(comp["volume_ml"]) for comp in components if comp.get("volume_ml") is not None]
@@ -761,6 +780,224 @@ class NutritionVideoPipeline:
             item["calorie_grounding_metadata"] = calorie_grounding_metadata
 
         return item
+
+    @staticmethod
+    def _serialize_component_for_report(component: Optional[dict]) -> Optional[dict]:
+        if not component:
+            return None
+        return {
+            "role_tag": component.get("role_tag"),
+            "component_count": component.get("component_count"),
+            "confidence": component.get("confidence"),
+            "volume_confidence": component.get("volume_confidence"),
+            "volume_ml": component.get("volume_ml"),
+            "mass_g": component.get("mass_g"),
+            "density_g_per_ml": component.get("density_g_per_ml"),
+            "calories_per_100g": component.get("calories_per_100g"),
+            "total_calories": component.get("total_calories"),
+            "density_source": component.get("density_source"),
+            "calorie_source": component.get("calorie_source"),
+            "density_matched": component.get("density_matched"),
+            "calorie_matched": component.get("calorie_matched"),
+            "matched_food": component.get("matched_food"),
+            "reasons": component.get("reasons") or [],
+            "entries": component.get("entries") or [],
+        }
+
+    @staticmethod
+    def _summarize_component_names(components: list[dict]) -> str:
+        return " | ".join(
+            component.get("food_name") or ""
+            for component in components
+            if component.get("food_name")
+        )
+
+    def _build_export_report(
+        self,
+        job_id: str,
+        media_name: str,
+        media_type: str,
+        first_pass: dict,
+        nutrition_results: dict,
+        overall_confidence: dict,
+        debug_assets: dict,
+        calibration: dict,
+    ) -> dict:
+        items = nutrition_results.get("items") or []
+        summary = nutrition_results.get("summary") or {}
+
+        macro_ingredients = []
+        hidden_items = []
+        variant_items = []
+
+        for item in items:
+            base_component = item.get("base_component")
+            extra_component = item.get("extra_component")
+            hidden_component = item.get("hidden_component")
+
+            if base_component:
+                macro_ingredients.append({
+                    "food_name": item.get("food_name"),
+                    "role_tags": item.get("role_tags") or [],
+                    "confidence": item.get("confidence"),
+                    "base_component": self._serialize_component_for_report(base_component),
+                })
+            if hidden_component:
+                hidden_items.append({
+                    "food_name": item.get("food_name"),
+                    "confidence": item.get("confidence"),
+                    "hidden_component": self._serialize_component_for_report(hidden_component),
+                })
+            if extra_component:
+                variant_items.append({
+                    "food_name": item.get("food_name"),
+                    "confidence": item.get("confidence"),
+                    "variant_type": self._join_unique_text(extra_component.get("reasons") or []) or "extra_visible_portion",
+                    "variant_component": self._serialize_component_for_report(extra_component),
+                })
+
+        base_total_weight = sum(
+            float(item.get("base_mass_g") or 0.0)
+            for item in items
+            if item.get("base_mass_g") is not None
+        )
+        base_total_kcal = sum(
+            float(item.get("base_total_calories") or 0.0)
+            for item in items
+            if item.get("base_total_calories") is not None
+        )
+        hidden_total_kcal = sum(
+            float(item.get("hidden_total_calories") or 0.0)
+            for item in items
+            if item.get("hidden_total_calories") is not None
+        )
+        hidden_total_weight = sum(
+            float(item.get("hidden_mass_g") or 0.0)
+            for item in items
+            if item.get("hidden_mass_g") is not None
+        )
+        variant_total_volume = sum(
+            float(item.get("extra_volume_ml") or 0.0)
+            for item in items
+            if item.get("extra_volume_ml") is not None
+        )
+        variant_total_weight = sum(
+            float(item.get("extra_mass_g") or 0.0)
+            for item in items
+            if item.get("extra_mass_g") is not None
+        )
+        variant_total_kcal = sum(
+            float(item.get("extra_total_calories") or 0.0)
+            for item in items
+            if item.get("extra_total_calories") is not None
+        )
+        variant_density = None
+        if variant_total_volume > 0 and variant_total_weight > 0:
+            variant_density = variant_total_weight / variant_total_volume
+
+        overall_conf = float(overall_confidence.get("overall_confidence") or 0.0)
+        uncertainty = float(overall_confidence.get("overall_uncertainty") or 0.0)
+        variant_confidence = self._safe_average(
+            [float(entry.get("confidence") or 0.0) for entry in variant_items],
+            default=0.0,
+        )
+
+        spreadsheet_summary = {
+            "id": job_id,
+            "image_file": media_name,
+            "image_source": media_type,
+            "food_detected": "Y" if bool(items) else "N",
+            "dish_name": first_pass.get("meal_name"),
+            "cuisine_type": first_pass.get("cuisine_type"),
+            "cooking_method": first_pass.get("cooking_method"),
+            "total_weight_without_variant_g": round(base_total_weight + hidden_total_weight, 1),
+            "base_dish_total_kcal": round(base_total_kcal + hidden_total_kcal, 1),
+            "total_kcal_with_high_impact_variant": self._round_optional(summary.get("total_calories_kcal"), 1),
+            "uncertainty_mi": round(uncertainty, 4),
+            "macro_ingredients": [entry["food_name"] for entry in macro_ingredients],
+            "macro_ingredients_text": " | ".join(entry["food_name"] for entry in macro_ingredients if entry.get("food_name")),
+            "absolute_volume_of_mi_ml": [entry["base_component"]["volume_ml"] for entry in macro_ingredients if entry.get("base_component")],
+            "absolute_weight_of_mi_g": [entry["base_component"]["mass_g"] for entry in macro_ingredients if entry.get("base_component")],
+            "absolute_density_of_mi_g_per_ml": [entry["base_component"]["density_g_per_ml"] for entry in macro_ingredients if entry.get("base_component")],
+            "absolute_kcal_of_mi": [entry["base_component"]["total_calories"] for entry in macro_ingredients if entry.get("base_component")],
+            "hidden_content_text": " | ".join(entry["food_name"] for entry in hidden_items if entry.get("food_name")),
+            "confidence": round(overall_conf, 4),
+            "high_impact_variant": "Y" if variant_items else "N",
+            "high_impact_variant_type": [entry["variant_type"] for entry in variant_items],
+            "high_impact_variant_type_text": " | ".join(entry["variant_type"] for entry in variant_items if entry.get("variant_type")),
+            "variant_volume_ml": self._round_optional(variant_total_volume, 1) if variant_items else None,
+            "variant_contribution_kcal": self._round_optional(variant_total_kcal, 1) if variant_items else None,
+            "variant_confidence": round(variant_confidence, 4) if variant_items else None,
+            "sam3_segmentation": debug_assets.get("sam3_segmentation_path"),
+            "depth_map": debug_assets.get("calibrated_depth_visual_path") or debug_assets.get("raw_depth_visual_path"),
+            "masked_depth_map": debug_assets.get("dish_masked_depth_path"),
+        }
+
+        return {
+            "record_metadata": {
+                "id": job_id,
+                "job_id": job_id,
+                "image_file": media_name,
+                "image_source": media_type,
+                "food_detected": bool(items),
+            },
+            "dish": {
+                "dish_name": first_pass.get("meal_name"),
+                "meal_confidence": self._round_optional(first_pass.get("meal_confidence"), 4),
+                "cuisine_type": first_pass.get("cuisine_type"),
+                "cuisine_confidence": self._round_optional(first_pass.get("cuisine_confidence"), 4),
+                "cooking_method": first_pass.get("cooking_method"),
+                "cooking_method_confidence": self._round_optional(first_pass.get("cooking_method_confidence"), 4),
+            },
+            "spreadsheet_summary": spreadsheet_summary,
+            "base_dish": {
+                "total_weight_g": round(base_total_weight + hidden_total_weight, 1),
+                "total_kcal": round(base_total_kcal + hidden_total_kcal, 1),
+                "macro_ingredients": macro_ingredients,
+                "hidden_content": hidden_items,
+            },
+            "variant": {
+                "has_variant": bool(variant_items),
+                "variant_types": [entry["variant_type"] for entry in variant_items],
+                "variant_volume_ml": self._round_optional(variant_total_volume, 1) if variant_items else None,
+                "variant_weight_g": self._round_optional(variant_total_weight, 1) if variant_items else None,
+                "variant_density_g_per_ml": self._round_optional(variant_density, 4) if variant_density is not None else None,
+                "variant_kcal": self._round_optional(variant_total_kcal, 1) if variant_items else None,
+                "variant_confidence": round(variant_confidence, 4) if variant_items else None,
+                "items": variant_items,
+            },
+            "totals": {
+                "total_food_volume_ml": self._round_optional(summary.get("total_food_volume_ml"), 1),
+                "total_mass_g": self._round_optional(summary.get("total_mass_g"), 1),
+                "total_calories_kcal": self._round_optional(summary.get("total_calories_kcal"), 1),
+                "num_food_items": summary.get("num_food_items"),
+            },
+            "ingredients": items,
+            "uncertainty_confidence": {
+                "overall_confidence": round(overall_conf, 4),
+                "overall_uncertainty": round(uncertainty, 4),
+                "stage_breakdown": overall_confidence.get("stages") or {},
+                "weighted_components": overall_confidence.get("weighted_components") or {},
+            },
+            "assets": {
+                "sam3_segmentation": debug_assets.get("sam3_segmentation_path"),
+                "depth_map": debug_assets.get("calibrated_depth_visual_path") or debug_assets.get("raw_depth_visual_path"),
+                "masked_depth_map": debug_assets.get("dish_masked_depth_path"),
+                "rgb": debug_assets.get("rgb_path"),
+                "zoedepth_colored": debug_assets.get("zoedepth_colored_path"),
+            },
+            "context": {
+                "visible_ingredients": first_pass.get("visible_ingredients") or [],
+                "plate_or_bowl": first_pass.get("plate_or_bowl"),
+                "reference_objects": first_pass.get("reference_objects") or [],
+                "notes": first_pass.get("notes"),
+                "calibration": calibration,
+            },
+            "backend_details": {
+                "questionnaire_verification": self.last_questionnaire_verification,
+                "gemini_outputs": self.gemini_outputs,
+            },
+        }
 
     @staticmethod
     def _source_confidence(source: Optional[str]) -> float:
@@ -924,9 +1161,7 @@ class NutritionVideoPipeline:
         sam3_results: dict,
         out_path: Path,
     ) -> None:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
+        import cv2
 
         palette = [
             (255, 59, 48), (255, 149, 0), (255, 204, 0), (52, 199, 89),
@@ -934,48 +1169,59 @@ class NutritionVideoPipeline:
             (162, 132, 194), (90, 200, 250), (255, 230, 167), (167, 235, 167),
         ]
 
-        overlay = image_rgb.copy().astype(np.float32)
-        label_positions = []
+        overlay = image_rgb.copy().astype(np.float32) / 255.0
+        label_info = []
+        h, w = image_rgb.shape[:2]
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        thickness = 1
+        pad = 4
 
         for idx, (name, data) in enumerate(sam3_results.items()):
             mask = self._resize_mask_to_shape(data.get("mask"), image_rgb.shape[:2])
             if mask is None or mask.sum() == 0:
                 continue
 
-            color = np.array(palette[idx % len(palette)], dtype=np.float32)
-            overlay[mask] = 0.45 * overlay[mask] + 0.55 * color
-            bbox = self._mask_bbox(mask)
-            if bbox is None:
-                continue
-            x1, y1, x2, y2 = bbox
-            label_x = int((x1 + x2) / 2)
-            label_y = max(12, y1 - 6)
-            label_positions.append((name, label_x, label_y))
+            color_rgb = np.array(palette[idx % len(palette)], dtype=np.float32) / 255.0
+            for channel in range(3):
+                overlay[:, :, channel] = np.where(
+                    mask,
+                    overlay[:, :, channel] * 0.35 + color_rgb[channel] * 0.65,
+                    overlay[:, :, channel],
+                )
 
-        overlay = np.clip(overlay, 0, 255).astype(np.uint8)
-        fig, ax = plt.subplots(figsize=(8, 6))
-        ax.imshow(overlay)
-        ax.axis("off")
-        for name, x, y in label_positions:
-            ax.text(
-                x,
-                y,
-                name,
-                ha="center",
-                va="bottom",
-                fontsize=8,
-                color="black",
-                bbox={
-                    "boxstyle": "square,pad=0.2",
-                    "facecolor": "white",
-                    "edgecolor": "#cccccc",
-                    "linewidth": 0.8,
-                    "alpha": 0.95,
-                },
-            )
-        fig.tight_layout(pad=0.5)
-        fig.savefig(out_path, dpi=150, bbox_inches="tight")
-        plt.close(fig)
+            mask_uint8 = mask.astype(np.uint8)
+            contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if contours:
+                contour_color_bgr = (
+                    int(palette[idx % len(palette)][2]),
+                    int(palette[idx % len(palette)][1]),
+                    int(palette[idx % len(palette)][0]),
+                )
+                temp_bgr = cv2.cvtColor((np.clip(overlay, 0, 1) * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+                cv2.drawContours(temp_bgr, contours, -1, contour_color_bgr, 2)
+                overlay = cv2.cvtColor(temp_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+
+            ys, xs = np.where(mask)
+            if len(xs) == 0 or len(ys) == 0:
+                continue
+            cx, cy = int(np.mean(xs)), int(np.mean(ys))
+            display_label = name[:40]
+            (tw, th_text), baseline = cv2.getTextSize(display_label, font, font_scale, thickness)
+            tx = max(0, min(cx - tw // 2, w - tw - pad * 2))
+            ty = max(th_text + pad, min(cy + th_text // 2, h - baseline - pad))
+            label_info.append((display_label, tx, ty, tw, th_text, baseline))
+
+        result_bgr = cv2.cvtColor((np.clip(overlay, 0, 1) * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+        for display_label, tx, ty, tw, th_text, baseline in label_info:
+            pill_x1 = max(0, tx - pad)
+            pill_y1 = max(0, ty - th_text - pad)
+            pill_x2 = min(w - 1, tx + tw + pad)
+            pill_y2 = min(h - 1, ty + baseline + pad)
+            cv2.rectangle(result_bgr, (pill_x1, pill_y1), (pill_x2, pill_y2), (255, 255, 255), -1)
+            cv2.putText(result_bgr, display_label, (tx, ty), font, font_scale, (0, 0, 0), thickness, cv2.LINE_AA)
+
+        Image.fromarray(cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)).save(out_path)
 
     def _save_zoedepth_outputs(
         self,
@@ -1446,6 +1692,8 @@ class NutritionVideoPipeline:
         volume_map: dict,
         inferred_items: list[dict],
         questionnaire_items: list[dict],
+        image_rgb: np.ndarray,
+        sam3_results: dict,
         job_id: str,
     ) -> dict:
         item_components = {}
@@ -1459,6 +1707,10 @@ class NutritionVideoPipeline:
             if volume_ml <= 0:
                 continue
 
+            crop_image = self._extract_mask_crop(
+                image_rgb,
+                self._resize_mask_to_shape((sam3_results.get(label) or {}).get("mask"), image_rgb.shape[:2]),
+            )
             nutrition = self._build_volume_nutrition_component(
                 label=label,
                 role_tag="base",
@@ -1466,6 +1718,7 @@ class NutritionVideoPipeline:
                 volume_ml=volume_ml,
                 volume_confidence=volume_confidence,
                 origin="visible_base",
+                crop_image=crop_image,
             )
             logger.info(
                 f"[{job_id}] base '{label}': confidence={confidence:.2f} volume={volume_ml:.1f}ml "
@@ -1494,6 +1747,7 @@ class NutritionVideoPipeline:
                 origin="gemini_visual_inference",
                 reason=item.get("reason"),
                 is_incremental=bool(item.get("is_incremental")),
+                crop_image=None,
             )
             logger.info(
                 f"[{job_id}] inferred {role_tag} '{label}': confidence={confidence:.2f} volume={volume_ml:.1f}ml "
@@ -1671,6 +1925,8 @@ class NutritionVideoPipeline:
             volume_map=volume_map,
             inferred_items=inferred_nonvisible_items,
             questionnaire_items=questionnaire_nutrition,
+            image_rgb=img_rgb,
+            sam3_results=sam3_results,
             job_id=job_id,
         )
         overall_confidence = self._calculate_overall_confidence(
@@ -1681,6 +1937,16 @@ class NutritionVideoPipeline:
             volume_map=volume_map,
             questionnaire_verification=self.last_questionnaire_verification,
             nutrition_results=nutrition_results,
+        )
+        analysis_report = self._build_export_report(
+            job_id=job_id,
+            media_name=image_path.name,
+            media_type="image",
+            first_pass=first_pass,
+            nutrition_results=nutrition_results,
+            overall_confidence=overall_confidence,
+            debug_assets=debug_assets,
+            calibration=calibration,
         )
 
         return {
@@ -1707,6 +1973,7 @@ class NutritionVideoPipeline:
                 "total_objects": len(visible_items),
             },
             "nutrition": nutrition_results,
+            "analysis_report": analysis_report,
             "questionnaire_verification": self.last_questionnaire_verification,
             "pipeline_runtime": {
                 "image_pipeline": "production",
