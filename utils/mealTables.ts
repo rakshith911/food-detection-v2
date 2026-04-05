@@ -42,12 +42,21 @@ const matchesQuestionnaireList = (
   items: QuestionnaireIngredient[] | undefined
 ) => (items || []).some((item) => isIngredientMatch(foodName, item.name || ''));
 
-const createRowFromItem = (item: NutritionItem, index: number, prefix: DishTableKey): DishContent => ({
+const createRow = (
+  name: string,
+  mass_g: number | undefined,
+  total_calories: number | undefined,
+  index: number,
+  prefix: DishTableKey
+): DishContent => ({
   id: `${prefix}_${Date.now()}_${index}`,
-  name: item.food_name || 'Unknown Food',
-  weight: item.mass_g && Math.round(item.mass_g) > 0 ? Math.round(item.mass_g).toString() : '',
-  calories: Math.round(item.total_calories || 0).toString(),
+  name: name || 'Unknown Food',
+  weight: mass_g && Math.round(mass_g) > 0 ? Math.round(mass_g).toString() : '',
+  calories: Math.round(total_calories || 0).toString(),
 });
+
+const createRowFromItem = (item: NutritionItem, index: number, prefix: DishTableKey): DishContent =>
+  createRow(item.food_name || 'Unknown Food', item.mass_g, item.total_calories, index, prefix);
 
 export const createEmptyDishTables = (): DishTableSection[] =>
   TABLE_ORDER.map((key) => ({
@@ -90,9 +99,65 @@ export const buildDishTablesFromItems = (
   questionnaireContext?: QuestionnaireContext
 ): DishTableSection[] => {
   const tables = createEmptyDishTables();
+  let derivedIndex = 0;
+
+  const pushRow = (
+    targetKey: DishTableKey,
+    row: DishContent
+  ) => {
+    const section = tables.find((table) => table.key === targetKey);
+    section?.rows.push(row);
+  };
 
   items.forEach((item, index) => {
     const foodName = item.food_name || '';
+    const hasComponentBreakdown =
+      !!item.base_component ||
+      !!item.extra_component ||
+      !!item.hidden_component;
+
+    if (hasComponentBreakdown) {
+      if (item.base_component) {
+        pushRow(
+          'base',
+          createRow(
+            foodName,
+            item.base_component.mass_g,
+            item.base_component.total_calories,
+            derivedIndex++,
+            'base'
+          )
+        );
+      }
+
+      if (item.extra_component) {
+        pushRow(
+          'highCalorie',
+          createRow(
+            foodName,
+            item.extra_component.mass_g,
+            item.extra_component.total_calories,
+            derivedIndex++,
+            'highCalorie'
+          )
+        );
+      }
+
+      if (item.hidden_component) {
+        pushRow(
+          'hiddenContent',
+          createRow(
+            foodName,
+            item.hidden_component.mass_g,
+            item.hidden_component.total_calories,
+            derivedIndex++,
+            'hiddenContent'
+          )
+        );
+      }
+      return;
+    }
+
     // Trust the backend's role_tag when available — avoids incorrectly moving base items
     // (e.g. "Chicken breast") into hidden just because they share a name with a questionnaire entry.
     const targetKey: DishTableKey =
@@ -103,8 +168,7 @@ export const buildDishTablesFromItems = (
       matchesQuestionnaireList(foodName, questionnaireContext?.extras) ? 'highCalorie' :
       'base';
 
-    const section = tables.find((table) => table.key === targetKey);
-    section?.rows.push(createRowFromItem(item, index, targetKey));
+    pushRow(targetKey, createRowFromItem(item, index, targetKey));
   });
 
   return tables;

@@ -191,7 +191,7 @@ class NutritionRAG:
     @classmethod
     def _normalize_food_name(cls, name: str) -> str:
         name = re.sub(r'\([^)]*\)', '', name)
-        name = re.sub(r',.*', '', name)
+        name = name.replace(',', ' ')
         for pattern, replacement in cls._LABEL_ALIASES:
             name = re.sub(pattern, replacement, name, flags=re.IGNORECASE)
         qualifiers = (
@@ -303,8 +303,9 @@ class NutritionRAG:
         'sauce', 'soup', 'food', 'dish', 'meal', 'item', 'product', 'type',
         'style', 'with', 'from', 'made', 'home', 'store', 'brand', 'kind',
     }
+    _SIGNAL_WORDS = {'red', 'tan', 'yam', 'white', 'green', 'brown', 'pink'}
     _UNPREPARED_TERMS = {
-        'dry', 'unprepared', 'packet', 'mix', 'concentrate', 'powder',
+        'raw', 'uncooked', 'dry', 'unprepared', 'packet', 'mix', 'concentrate', 'powder',
         'seasoning', 'instant', 'flavor', 'flavoured', 'flavored',
     }
     _PREPARED_TERMS = {
@@ -313,9 +314,29 @@ class NutritionRAG:
         'pilaf', 'spanish',
     }
     _RAW_QUERY_TERMS = {
-        'raw', 'dry', 'unprepared', 'powder', 'mix', 'packet', 'instant',
+        'raw', 'uncooked', 'dry', 'unprepared', 'powder', 'mix', 'packet', 'instant',
         'concentrate', 'seasoning',
     }
+    _FORM_GROUPS = {
+        'raw': {
+            'raw', 'uncooked', 'dry', 'dehydrated', 'powder', 'powdered', 'mix',
+            'packet', 'instant', 'concentrate', 'seasoning',
+        },
+        'flour': {'flour', 'meal', 'starch'},
+        'juice': {'juice', 'nectar', 'smoothie'},
+        'soup': {'soup', 'broth', 'bisque', 'chowder'},
+        'sauce_family': {
+            'sauce', 'dressing', 'dip', 'gravy', 'salsa', 'chutney',
+            'ketchup', 'bbq', 'barbecue', 'mayonnaise', 'mayo', 'aioli',
+        },
+    }
+
+    @classmethod
+    def _tokenize_words(cls, text: str, *, keep_generic: bool = False) -> set[str]:
+        tokens = set(re.sub(r'[^a-z0-9 ]', ' ', (text or '').lower()).split())
+        if keep_generic:
+            return tokens
+        return {token for token in tokens if token not in cls._GENERIC_WORDS}
 
     @classmethod
     def _words_overlap(cls, query_lower: str, matched_lower: str) -> bool:
@@ -324,17 +345,39 @@ class NutritionRAG:
         as a substring in the matched name, to block false positives like
         'caramel sauce' → 'tomato chili sauce' (only 'sauce' matches, which is generic).
         """
-        q_words = {w for w in query_lower.split() if len(w) >= 4 and w not in cls._GENERIC_WORDS}
-        m_words = set(re.sub(r'[^\w ]', ' ', matched_lower).split())
+        q_words = {
+            w for w in re.sub(r'[^\w ]', ' ', query_lower).split()
+            if (len(w) >= 4 or w in cls._SIGNAL_WORDS) and w not in cls._GENERIC_WORDS
+        }
+        m_words = {
+            w for w in re.sub(r'[^\w ]', ' ', matched_lower).split()
+            if len(w) >= 4 or w in cls._SIGNAL_WORDS
+        }
         if not q_words:
             # All query words are generic — fall back to any overlap
-            q_words = {w for w in query_lower.split() if len(w) >= 4}
+            q_words = {
+                w for w in re.sub(r'[^\w ]', ' ', query_lower).split()
+                if len(w) >= 4 or w in cls._SIGNAL_WORDS
+            }
         if not q_words:
             return True
         return any(
             qw in mw or mw in qw
-            for qw in q_words for mw in m_words if len(mw) >= 4
+            for qw in q_words for mw in m_words
         )
+
+    @classmethod
+    def _has_conflicting_form(cls, query_lower: str, matched_lower: str) -> bool:
+        query_tokens = cls._tokenize_words(query_lower, keep_generic=True)
+        matched_tokens = cls._tokenize_words(matched_lower, keep_generic=True)
+        if not query_tokens or not matched_tokens:
+            return False
+
+        for terms in cls._FORM_GROUPS.values():
+            if matched_tokens & terms and not query_tokens & terms:
+                return True
+
+        return False
 
     @classmethod
     def _tokenize_for_rank(cls, text: str) -> list[str]:
@@ -539,6 +582,9 @@ class NutritionRAG:
             if not self._words_overlap(normalized, matched.lower()):
                 logger.info(f"Skip (no word overlap): '{food_name}' vs '{matched}'")
                 continue
+            if self._has_conflicting_form(normalized, matched.lower()):
+                logger.info(f"Skip (conflicting form): '{food_name}' vs '{matched}'")
+                continue
 
             rank_score = candidate["rank_score"]
             candidates.append((candidate["cross_score"], candidate["lexical_score"], rank_score, idx, sim, float(value), matched, entry))
@@ -579,6 +625,10 @@ class NutritionRAG:
                     continue
                 matched = self._fao_names[idx] if idx < len(self._fao_names) else ""
                 density = float(self._fao_density[idx].get('density_g_ml', 0.9))
+                if not self._words_overlap(normalized, matched.lower()):
+                    continue
+                if self._has_conflicting_form(normalized, matched.lower()):
+                    continue
                 return density, matched, f"fao_faiss(sim={sim:.2f})"
 
         if self._usda_index is not None:
@@ -596,6 +646,8 @@ class NutritionRAG:
                 if not self._is_reliable_density_entry({**entry, 'source': 'usda'}):
                     continue
                 if not self._words_overlap(normalized, matched.lower()):
+                    continue
+                if self._has_conflicting_form(normalized, matched.lower()):
                     continue
                 return float(density), matched, f"usda_faiss(sim={sim:.2f},{method})"
 
@@ -615,6 +667,10 @@ class NutritionRAG:
                 if any(sk in matched.lower() for sk in self._SKIP_WORDS):
                     if not any(sk in normalized for sk in self._SKIP_WORDS):
                         continue
+                if not self._words_overlap(normalized, matched.lower()):
+                    continue
+                if self._has_conflicting_form(normalized, matched.lower()):
+                    continue
                 entry = self._usda_foods[idx]
                 kcal  = float(entry.get('calories_per_100g', 0))
                 return kcal, matched, f"usda_faiss(sim={sim:.2f})"
@@ -840,6 +896,9 @@ class NutritionRAG:
 
             if not self._words_overlap(normalized, matched.lower()):
                 logger.info(f"Skip (no word overlap): '{food_name}' vs '{matched}'")
+                continue
+            if self._has_conflicting_form(normalized, matched.lower()):
+                logger.info(f"Skip (conflicting form): '{food_name}' vs '{matched}'")
                 continue
 
             candidates.append((

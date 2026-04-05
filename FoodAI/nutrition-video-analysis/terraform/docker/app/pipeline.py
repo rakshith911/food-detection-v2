@@ -660,6 +660,125 @@ class NutritionVideoPipeline:
         }
 
     @staticmethod
+    def _scale_component(component: dict, fraction: float, role_tag: str, reason: Optional[str] = None) -> Optional[dict]:
+        fraction = max(0.0, min(1.0, float(fraction)))
+        if fraction <= 0.0:
+            return None
+
+        scaled = dict(component)
+        scaled["role_tag"] = role_tag
+        scaled["is_incremental"] = role_tag == "high_calorie"
+        if reason:
+            scaled["reason"] = reason
+
+        for key in ("volume_ml", "mass_g", "total_calories"):
+            value = component.get(key)
+            if value is not None:
+                scaled[key] = round(float(value) * fraction, 1)
+
+        return scaled
+
+    @staticmethod
+    def _label_matches_any(label: str, keywords: tuple[str, ...]) -> bool:
+        normalized = (label or "").strip().lower()
+        return any(keyword in normalized for keyword in keywords)
+
+    def _get_visible_excess_policy(
+        self,
+        label: str,
+        cooking_method: Optional[str],
+        vessel_diameter_cm: Optional[float],
+    ) -> Optional[dict]:
+        normalized = (label or "").strip().lower()
+        cooking = (cooking_method or "").strip().lower()
+        vessel_size = float(vessel_diameter_cm or 0.0)
+        compact_vessel = 0 < vessel_size <= 24.0
+
+        if "rice" in normalized:
+            return {
+                "max_volume_ml": 220.0 if compact_vessel else 260.0,
+                "max_kcal": 360.0 if compact_vessel else 420.0,
+                "reason": "excess_rice_portion_for_vessel",
+            }
+
+        if any(token in normalized for token in ("falafel", "fritter", "croquette")):
+            return {
+                "max_volume_ml": 180.0 if compact_vessel else 210.0,
+                "max_kcal": 620.0 if "fried" in cooking else 520.0,
+                "reason": "excess_fried_portion_for_vessel",
+            }
+
+        if any(token in normalized for token in ("sauce", "dressing", "dip", "gravy", "aioli", "mayo", "mayonnaise", "tahini")):
+            return {
+                "max_volume_ml": 30.0 if compact_vessel else 40.0,
+                "max_kcal": 45.0 if compact_vessel else 60.0,
+                "reason": "excess_sauce_portion_for_vessel",
+            }
+
+        return None
+
+    def _apply_visible_item_sanity_split(
+        self,
+        item_components: dict[str, list[dict]],
+        cooking_method: Optional[str] = None,
+        vessel_diameter_cm: Optional[float] = None,
+    ) -> dict[str, list[dict]]:
+        adjusted_components = {}
+
+        for label, components in item_components.items():
+            base_components = [comp for comp in components if comp.get("role_tag") == "base"]
+            other_components = [comp for comp in components if comp.get("role_tag") != "base"]
+            policy = self._get_visible_excess_policy(label, cooking_method, vessel_diameter_cm)
+
+            if not base_components or not policy:
+                adjusted_components[label] = components
+                continue
+
+            base_group = self._aggregate_component_group("base", base_components)
+            total_volume = float(base_group.get("volume_ml") or 0.0)
+            total_kcal = float(base_group.get("total_calories") or 0.0)
+            max_volume = float(policy.get("max_volume_ml") or 0.0)
+            max_kcal = float(policy.get("max_kcal") or 0.0)
+
+            allowed_fractions = [1.0]
+            if total_volume > 0 and max_volume > 0:
+                allowed_fractions.append(max_volume / total_volume)
+            if total_kcal > 0 and max_kcal > 0:
+                allowed_fractions.append(max_kcal / total_kcal)
+            keep_fraction = max(0.0, min(allowed_fractions))
+            extra_fraction = 1.0 - keep_fraction
+
+            if keep_fraction >= 0.98:
+                adjusted_components[label] = components
+                continue
+
+            extra_volume = total_volume * extra_fraction
+            extra_kcal = total_kcal * extra_fraction
+            if extra_kcal < 25.0 or extra_volume < 8.0:
+                adjusted_components[label] = components
+                continue
+
+            base_reason = "visible_base_portion_after_sanity_split"
+            extra_reason = policy.get("reason") or "excess_visible_portion"
+            new_components = []
+
+            for component in base_components:
+                kept = self._scale_component(component, keep_fraction, "base", base_reason)
+                extra = self._scale_component(component, extra_fraction, "high_calorie", extra_reason)
+                if kept and float(kept.get("total_calories") or 0.0) > 0:
+                    new_components.append(kept)
+                if extra and float(extra.get("total_calories") or 0.0) > 0:
+                    new_components.append(extra)
+
+            adjusted_components[label] = new_components + other_components
+            logger.info(
+                f"[sanity_split] '{label}': kept_base={round(total_kcal * keep_fraction, 1)}kcal "
+                f"extra={round(extra_kcal, 1)}kcal reason={extra_reason}"
+            )
+
+        return adjusted_components
+
+    @staticmethod
     def _extract_mask_crop(
         image_rgb: np.ndarray,
         mask: Optional[np.ndarray],
@@ -1614,8 +1733,10 @@ class NutritionVideoPipeline:
             "- Hidden items should come from strong contextual clues in the scene, not generic recipe knowledge alone.\n"
             "- If the dish context suggests a hidden component but the visible scene does not support it, do not include it.\n"
             "- Review every visible ingredient one by one and decide whether it looks like only a normal base portion or a base portion plus an extra amount.\n"
+            "- Use the vessel dimensions, plating area, and estimated visible volumes to sanity-check abundance. If a reported visible portion would imply an unusually heavy or calorie-dense serving for a bowl/platter of this size, prefer returning a visible ingredient again as an extra item representing only the excessive portion.\n"
             "- Base ingredients are the ingredients that visibly belong in the dish by default. If one of those base ingredients also looks unusually abundant, return it again as an extra item representing only the added amount beyond normal.\n"
             "- Example: chicken salad normally contains chicken as a base ingredient. If the portion looks unusually chicken-heavy, keep chicken as the base ingredient and also return chicken as an extra item with only the extra estimated volume.\n"
+            "- Pay special attention to calorie-dense sauces, dressings, oils, mayo-style toppings, fried items, cheese, and rice-heavy platters. If they appear excessive for the vessel size, add an extra item for only the excess amount.\n"
             "- Hidden items are plausible components that are likely present but not directly visible or only partly visible "
             "because they are buried/underneath/inside the dish (example: rice under falafel, gravy under toppings).\n"
             "- Extra items are only incremental high-calorie amounts beyond the visible base portion already counted. "
@@ -1688,6 +1809,7 @@ class NutritionVideoPipeline:
 
     def _analyze_nutrition_from_production(
         self,
+        first_pass: dict,
         visible_items: list[dict],
         volume_map: dict,
         inferred_items: list[dict],
@@ -1802,6 +1924,13 @@ class NutritionVideoPipeline:
                 target_key = self._find_matching_item_key(item_components, item["name"])
             target_key = target_key or item["name"]
             item_components.setdefault(target_key, []).append(nutrition)
+
+        vessel = first_pass.get("plate_or_bowl") or {}
+        item_components = self._apply_visible_item_sanity_split(
+            item_components,
+            cooking_method=first_pass.get("cooking_method"),
+            vessel_diameter_cm=vessel.get("diameter_cm"),
+        )
 
         nutrition_items = [
             self._finalize_component_based_item(label, components)
@@ -1921,6 +2050,7 @@ class NutritionVideoPipeline:
         )
 
         nutrition_results = self._analyze_nutrition_from_production(
+            first_pass=first_pass,
             visible_items=visible_items,
             volume_map=volume_map,
             inferred_items=inferred_nonvisible_items,
