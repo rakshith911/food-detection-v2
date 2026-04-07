@@ -483,11 +483,36 @@ class NutritionRAG:
         if not self._use_unified:
             return []
 
-        clip_hits = self._clip_fused_search(food_name, crop_image, top_k)
-        candidates = []
         normalized = self._normalize_food_name(food_name)
 
+        # Sentence-transformer FAISS search (primary recall — same embedder used to build the index)
+        st_hits: dict[int, float] = {}
+        if self._unified_index is not None and self._embedder is not None:
+            variants = list(dict.fromkeys([normalized, food_name.strip().lower()]))
+            for variant in variants:
+                if not variant.strip():
+                    continue
+                vec = self._embed(variant)
+                dists, idxs = self._unified_index.search(vec, top_k)
+                for i in range(top_k):
+                    idx = int(idxs[0][i])
+                    sim = float(dists[0][i])
+                    if sim < _MIN_FAISS_SIM:
+                        break
+                    if idx not in st_hits or sim > st_hits[idx]:
+                        st_hits[idx] = sim
+
+        # CLIP fused search (adds image-grounded recall when a crop is available)
+        clip_hits = self._clip_fused_search(food_name, crop_image, top_k)
+
+        # Merge: keep best sim per index across both retrievers
+        merged_hits: dict[int, float] = dict(st_hits)
         for idx, clip_sim in clip_hits:
+            if idx not in merged_hits or clip_sim > merged_hits[idx]:
+                merged_hits[idx] = clip_sim
+
+        candidates = []
+        for idx, sim in merged_hits.items():
             if not (0 <= idx < len(self._unified_foods)):
                 continue
             entry = self._unified_foods[idx]
@@ -496,12 +521,12 @@ class NutritionRAG:
                 continue
             cross_score = float(self._cross_encoder.predict([(food_name, matched)])[0]) if self._cross_encoder else float("-inf")
             lexical_score = self._lexical_override_score(normalized, matched.lower())
-            rank_score = self._candidate_rank_score(normalized, matched.lower(), entry, clip_sim)
+            rank_score = self._candidate_rank_score(normalized, matched.lower(), entry, sim)
             candidates.append({
                 "idx": idx,
                 "entry": entry,
                 "matched": matched,
-                "clip_sim": clip_sim,
+                "clip_sim": sim,
                 "cross_score": cross_score,
                 "lexical_score": lexical_score,
                 "rank_score": rank_score,
@@ -696,60 +721,70 @@ class NutritionRAG:
                 prompt = (
                     f"What is the density of '{food_name}' in grams per milliliter (g/ml) "
                     f"as a typical cooked or served food portion? "
-                    f"Reply with ONLY a single decimal number like 0.85 — no units, no explanation."
+                    f"Most foods are between 0.5 and 1.5 g/ml. "
+                    f"Reply with ONLY a single decimal number like 0.85 — no units, no explanation, no other text."
                 )
                 lo, hi = 0.05, 3.0
             else:  # calories_per_100g
                 prompt = (
                     f"How many kilocalories (kcal) are in 100 grams of '{food_name}'? "
-                    f"Use standard nutritional data. "
-                    f"Reply with ONLY a single integer or decimal number — no units, no explanation."
+                    f"Use standard nutritional data (e.g. USDA). "
+                    f"Reply with ONLY a single integer or decimal number — no units, no explanation, no other text."
                 )
                 lo, hi = 1.0, 900.0
 
-            text = ""
-            grounding_metadata = None
-            try:
+            def _call_new_sdk(with_grounding: bool):
                 from google import genai as genai_new
                 from google.genai import types
-
                 client = genai_new.Client(api_key=self._gemini_api_key)
-                config_kwargs = {"temperature": 0.0}
-
-                # Prefer Google Search grounding when the installed SDK supports it,
-                # but degrade cleanly to a plain Gemini lookup if the tool surface
-                # differs across local/prod environments.
-                if hasattr(types, "Tool"):
+                config_kwargs: dict = {"temperature": 0.0}
+                if with_grounding and hasattr(types, "Tool"):
                     if hasattr(types, "GoogleSearch"):
                         config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
                     elif hasattr(types, "GoogleSearchRetrieval"):
                         config_kwargs["tools"] = [
                             types.Tool(google_search_retrieval=types.GoogleSearchRetrieval())
                         ]
-
-                response = client.models.generate_content(
+                resp = client.models.generate_content(
                     model=self._gemini_model,
                     contents=prompt,
                     config=types.GenerateContentConfig(**config_kwargs),
                 )
+                return resp
+
+            text = ""
+            grounding_metadata = None
+            try:
+                response = _call_new_sdk(with_grounding=True)
                 text = (response.text or "").strip()
                 grounding_metadata = self._extract_grounding_metadata(response)
             except Exception as new_sdk_error:
                 logger.warning(
-                    f"Gemini grounding [{field}] new SDK failed for '{food_name}', "
-                    f"retrying legacy client without grounding tool: {new_sdk_error}"
+                    f"Gemini grounding [{field}] new SDK failed for '{food_name}': {new_sdk_error}"
                 )
-                import google.generativeai as genai
+                # Retry without grounding tool (some SDK versions differ)
+                try:
+                    response = _call_new_sdk(with_grounding=False)
+                    text = (response.text or "").strip()
+                except Exception:
+                    pass
 
-                genai.configure(api_key=self._gemini_api_key)
-                model = genai.GenerativeModel(
-                    self._gemini_model,
-                    generation_config={"temperature": 0.0},
-                )
-                response = model.generate_content(prompt)
-                text = (response.text or "").strip()
+            if not text:
+                # Last resort: legacy SDK
+                try:
+                    import google.generativeai as genai
+                    genai.configure(api_key=self._gemini_api_key)
+                    model = genai.GenerativeModel(
+                        self._gemini_model,
+                        generation_config={"temperature": 0.0},
+                    )
+                    response = model.generate_content(prompt)
+                    text = (response.text or "").strip()
+                except Exception as legacy_err:
+                    logger.warning(f"Gemini grounding [{field}] legacy SDK also failed for '{food_name}': {legacy_err}")
 
-            match = re.search(r'\b(\d+\.?\d*)\b', text)
+            # Try to parse the first number out of the response
+            match = re.search(r'(\d+\.?\d*)', text)
             if match:
                 val = float(match.group(1))
                 if lo <= val <= hi:
@@ -764,6 +799,14 @@ class NutritionRAG:
                         })
                         self._gemini_grounding_metadata[cache_key] = grounding_metadata
                     return val
+                else:
+                    logger.warning(
+                        f"Gemini grounding [{field}] '{food_name}': parsed {val} but outside [{lo}, {hi}] range — text was: {text!r}"
+                    )
+            else:
+                logger.warning(
+                    f"Gemini grounding [{field}] '{food_name}': could not parse a number from response: {text!r}"
+                )
         except Exception as e:
             logger.warning(f"Gemini grounding [{field}] failed for '{food_name}': {e}")
         return None
