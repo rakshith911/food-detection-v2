@@ -112,7 +112,7 @@ class NutritionRAG:
         self._cross_encoder = CrossEncoder(self._cross_encoder_model)
         logger.info(f"  Cross-encoder:   {self._cross_encoder_model}")
         self._clip_processor = CLIPProcessor.from_pretrained(self._clip_model_name)
-        self._clip_model = CLIPModel.from_pretrained(self._clip_model_name)
+        self._clip_model = CLIPModel.from_pretrained(self._clip_model_name, use_safetensors=True)
         self._clip_model.eval()
         logger.info(f"  CLIP model:      {self._clip_model_name}")
 
