@@ -105,7 +105,7 @@ resource "aws_codebuild_project" "docker_build" {
 
   source {
     type            = "GITHUB"
-    location        = "https://github.com/leolorence12345/food-detection.git"
+    location        = "https://github.com/rakshith911/food_detection.git"
     git_clone_depth = 1
     buildspec       = "FoodAI/nutrition-video-analysis/terraform/docker/buildspec.yml"
   }

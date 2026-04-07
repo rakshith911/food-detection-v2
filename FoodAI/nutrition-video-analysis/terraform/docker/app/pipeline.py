@@ -218,33 +218,35 @@ class NutritionVideoPipeline:
             }
             prompt = (
                 "You are validating questionnaire ingredient claims against a detected dish. "
-                "The questionnaire is NOT ground truth.\n\n"
+                "The questionnaire is NOT ground truth — treat it as a user hint to verify, not a fact.\n\n"
                 f"Detected dish context:\n{json.dumps(context_payload, ensure_ascii=True)}\n\n"
                 f"Questionnaire items to validate:\n{json.dumps(items_to_check, ensure_ascii=True)}\n\n"
-                "For each questionnaire item, decide whether it is actually plausible for this dish. "
-                "Also decide whether it is already visible/accounted for in the base dish. "
-                "Return ONLY a JSON array. Each entry must be:\n"
-                "{"
-                "\"name\": str, "
-                "\"type\": \"hidden\"|\"extra\", "
-                "\"quantity\": str, "
-                "\"plausible\": true|false, "
-                "\"confidence\": number, "
-                "\"already_visible\": true|false, "
-                "\"verdict\": \"include\"|\"reject\", "
-                "\"reason\": str, "
-                "\"estimated_grams\": number|null, "
-                "\"estimated_kcal\": number|null"
+                "For each questionnaire item, return ONLY a JSON array where each entry is:\n"
+                "{\n"
+                "  \"name\": str,\n"
+                "  \"type\": \"hidden\"|\"extra\",\n"
+                "  \"quantity\": str,\n"
+                "  \"plausible\": true|false,\n"
+                "  \"verification_confidence\": number,\n"
+                "  \"already_visible\": true|false,\n"
+                "  \"verdict\": \"include\"|\"reject\",\n"
+                "  \"reason\": str,\n"
+                "  \"estimated_grams\": number|null,\n"
+                "  \"estimated_kcal\": number|null\n"
                 "}\n\n"
                 "Rules:\n"
-                "- Do not blindly trust the questionnaire.\n"
-                "- Reject ingredients that do not fit the dish context.\n"
-                "- If an ingredient is already visible or clearly already counted in the base dish, set already_visible=true.\n"
-                "- For extras, already_visible=true does NOT mean reject it. If the questionnaire describes an additional amount "
-                "of a visible ingredient beyond the normal base portion, still use verdict=include and estimate only the extra amount.\n"
-                "- For extras, estimated_grams and estimated_kcal must represent only the additional amount described by the questionnaire, not the full base portion.\n"
-                "- Use confidence between 0 and 1.\n"
-                "- Be conservative when uncertain."
+                "- Do not blindly trust the questionnaire. Reject ingredients implausible for this dish.\n"
+                "- Set already_visible=true if the ingredient is clearly already present and counted in the base dish.\n"
+                "- IMPORTANT — already_visible=true does NOT mean reject for extras. "
+                "If the user claims an additional amount of an already-visible ingredient (e.g. 'extra falafel' in falafel over rice), "
+                "set verdict=include and estimate ONLY the incremental extra amount — the base portion is already accounted for.\n"
+                "- For type=hidden: the item is plausible but not visible. estimated_grams/kcal = full hidden portion.\n"
+                "- For type=extra: the item represents an increment ABOVE the standard base portion. "
+                "estimated_grams and estimated_kcal must represent ONLY that extra increment, not the full ingredient amount.\n"
+                "- An ingredient can legitimately be both a base item AND have an extra increment — these are not mutually exclusive.\n"
+                "- verification_confidence reflects how confident you are that this item/amount is real for this dish (0.0 to 1.0).\n"
+                "- Be conservative. When uncertain, lower the confidence rather than rejecting outright.\n"
+                "- Only use verdict=reject for items that are clearly implausible for this dish type."
             )
             model = genai.GenerativeModel("gemini-2.0-flash")
             response = model.generate_content(prompt)
@@ -1544,6 +1546,8 @@ class NutritionVideoPipeline:
         first_pass: dict,
         job_id: str,
         user_context: dict = None,
+        calibrated_depth_image: Image.Image = None,
+        masked_depth_image: Image.Image = None,
     ) -> dict:
         try:
             import google.generativeai as genai
@@ -1560,30 +1564,63 @@ class NutritionVideoPipeline:
         scale_note = (
             f"A {vessel.get('vessel_type') or 'dish'} is present with estimated diameter {float(vessel.get('diameter_cm') or 0):.1f} cm."
             if vessel.get("diameter_cm") else
-            "No reliable vessel dimension was detected; use the depth map and image together for scale."
+            "No reliable vessel dimension was detected; use the depth maps and image together for scale."
         )
 
-        prompt = (
-            "You are given two aligned inputs of the same dish.\n"
-            "Image 1 is the raw RGB photo.\n"
-            "Image 2 is the raw ZoeDepth depth visualization of the same scene.\n"
-            "Use them together to estimate ingredient volumes.\n\n"
-            f"{scale_note}\n"
-            f"Visible ingredients: {json.dumps(labels)}.\n\n"
-            "Return ONLY valid JSON as an array like:\n"
-            "[{\"name\": \"rice\", \"volume_ml\": 180, \"confidence\": 0.82}, ...]\n\n"
-            "Rules:\n"
-            "- Include every visible ingredient exactly once.\n"
-            "- Confidence must be between 0 and 1.\n"
-            "- Estimate realistic food volume in ml for the visible portion only.\n"
-            "- Do not invent hidden or questionnaire-only ingredients here.\n"
-        )
+        has_all_depth = calibrated_depth_image is not None and masked_depth_image is not None
+
+        if has_all_depth:
+            prompt = (
+                "You are given FOUR aligned inputs of the same dish:\n"
+                "  Image 1: the original RGB photo.\n"
+                "  Image 2: the raw ZoeDepth depth map (unscaled) — brighter = closer to camera.\n"
+                "  Image 3: the calibrated depth map (metric, scaled to real-world cm) — use this "
+                "for accurate distance and height measurements.\n"
+                "  Image 4: the masked depth map — the calibrated depth map with each food item "
+                "segmented into its own region. Use this to understand the 3D shape and height "
+                "of each individual ingredient.\n\n"
+                f"{scale_note}\n"
+                f"Visible ingredients: {json.dumps(labels)}.\n\n"
+                "Using all four images together:\n"
+                "- Use Image 4 (masked depth) to measure the surface area and depth profile of each food item.\n"
+                "- Use Image 3 (calibrated depth) to get accurate real-world heights in cm.\n"
+                "- Use Image 1 (RGB) to understand the food type, density, and plating.\n"
+                "- Use Image 2 (raw depth) as a sanity check for relative distances.\n\n"
+                "Return ONLY valid JSON as an array like:\n"
+                "[{\"name\": \"rice\", \"volume_ml\": 180, \"confidence\": 0.82}, ...]\n\n"
+                "Rules:\n"
+                "- Include every visible ingredient exactly once.\n"
+                "- Confidence must be between 0 and 1.\n"
+                "- Estimate realistic food volume in ml for the visible portion only.\n"
+                "- Do not invent hidden or questionnaire-only ingredients here.\n"
+            )
+        else:
+            prompt = (
+                "You are given two aligned inputs of the same dish.\n"
+                "Image 1 is the raw RGB photo.\n"
+                "Image 2 is the raw ZoeDepth depth visualization of the same scene.\n"
+                "Use them together to estimate ingredient volumes.\n\n"
+                f"{scale_note}\n"
+                f"Visible ingredients: {json.dumps(labels)}.\n\n"
+                "Return ONLY valid JSON as an array like:\n"
+                "[{\"name\": \"rice\", \"volume_ml\": 180, \"confidence\": 0.82}, ...]\n\n"
+                "Rules:\n"
+                "- Include every visible ingredient exactly once.\n"
+                "- Confidence must be between 0 and 1.\n"
+                "- Estimate realistic food volume in ml for the visible portion only.\n"
+                "- Do not invent hidden or questionnaire-only ingredients here.\n"
+            )
         prompt += self._build_user_context_suffix(user_context)
 
         model_name = self._flash_model_name()
         gm = genai.GenerativeModel(model_name, generation_config=self._GEMINI_GEN_CONFIG)
         original_pil = Image.fromarray(image_rgb)
-        response = gm.generate_content([prompt, original_pil, raw_depth_image])
+
+        content = [prompt, original_pil, raw_depth_image]
+        if has_all_depth:
+            content += [calibrated_depth_image, masked_depth_image]
+
+        response = gm.generate_content(content)
         response_text = response.text or ""
 
         if "```json" in response_text:
@@ -1660,11 +1697,19 @@ class NutritionVideoPipeline:
                 entry = by_name.get((item.get("name") or "").strip().lower(), {})
                 grams = entry.get("grams")
                 kcal = entry.get("kcal")
+                item_type = item.get("type")
+                # verification_confidence = Gemini's confidence that the claim is real for this dish
+                verification_confidence = float(
+                    item.get("verification_confidence") or item.get("confidence") or 0.0
+                )
                 out.append({
                     "name": item.get("name"),
-                    "role_tag": "high_calorie" if item.get("type") == "extra" else "hidden",
-                    "item_type": item.get("type"),
-                    "confidence": float(entry.get("confidence") or item.get("confidence") or 0.0),
+                    "role_tag": "high_calorie" if item_type == "extra" else "hidden",
+                    # role_tags shows all applicable tags — base stays in base table, this is the extra/hidden tag
+                    "role_tags": ["base", "high_calorie"] if (item_type == "extra" and item.get("already_visible")) else
+                                 ["high_calorie"] if item_type == "extra" else ["hidden"],
+                    "item_type": item_type,
+                    "verification_confidence": verification_confidence,
                     "grams_confidence": float(entry.get("grams_confidence") or 0.0),
                     "kcal_confidence": float(entry.get("kcal_confidence") or 0.0),
                     "quantity": item.get("quantity"),
@@ -1673,7 +1718,7 @@ class NutritionVideoPipeline:
                     "total_calories": float(kcal) if kcal is not None else None,
                     "already_visible": bool(item.get("already_visible")),
                     "reason": item.get("reason"),
-                    "is_incremental": item.get("type") == "extra",
+                    "is_incremental": item_type == "extra",
                     "origin": "questionnaire",
                 })
             return out
@@ -1712,11 +1757,10 @@ class NutritionVideoPipeline:
             for item in visible_items
         ]
         prompt = (
-            "You are reviewing an image-only dish analysis to infer non-base ingredients that should populate "
-            "the Hidden Content or High Calorie tables.\n"
-            "Image 1 is the RGB photo. Image 2 is the aligned raw depth visualization.\n"
-            "Use the actual visuals, not just the metadata, to decide if a visible ingredient appears unusually heavy, abundant, or calorie-dense.\n"
-            "Also use the overall dish scene and context to infer whether likely components are hidden underneath, inside, covered by sauce, or only partially visible.\n\n"
+            "You are a food nutrition analysis expert reviewing an image-only dish analysis.\n"
+            "Image 1 is the original RGB photo. Image 2 is the aligned depth visualization "
+            "(red/bright = closer to camera = taller/thicker, blue/dark = farther = flatter).\n"
+            "Use BOTH images together to identify hidden content and genuinely high-calorie extras.\n\n"
             "Return ONLY valid JSON as an array. Each entry must be:\n"
             "[{\"name\": str, \"type\": \"hidden\"|\"extra\", \"reason\": str, \"confidence\": number, "
             "\"volume_ml\": number, \"is_incremental\": true|false}]\n\n"
@@ -1727,27 +1771,51 @@ class NutritionVideoPipeline:
             f"Plate/bowl context: {json.dumps(first_pass.get('plate_or_bowl') or {}, ensure_ascii=True)}\n"
             f"Reference objects: {json.dumps(first_pass.get('reference_objects') or [], ensure_ascii=True)}\n"
             f"Notes: {json.dumps(first_pass.get('notes') or '')}\n\n"
+            "═══ HIDDEN ITEMS (type=hidden) ═══\n"
+            "Hidden items are calorie-significant components that are NOT directly visible because they are "
+            "buried underneath, inside, or covered by other ingredients.\n"
+            "Examples: rice under curry, noodles buried under toppings, bread inside a wrap, gravy under meat.\n"
             "Rules:\n"
-            "- First understand the likely dish composition from the full scene: meal name, cuisine, cooking method, plating style, visible layering, and the relationship between ingredients.\n"
-            "- Use dish context to reason about hidden items. Example: rice may be hidden under curry or meat, noodles may be buried under toppings, sauce may cover vegetables, fillings may sit inside wraps or sandwiches.\n"
-            "- Hidden items should come from strong contextual clues in the scene, not generic recipe knowledge alone.\n"
-            "- If the dish context suggests a hidden component but the visible scene does not support it, do not include it.\n"
-            "- Review every visible ingredient one by one and decide whether it looks like only a normal base portion or a base portion plus an extra amount.\n"
-            "- Use the vessel dimensions, plating area, and estimated visible volumes to sanity-check abundance. If a reported visible portion would imply an unusually heavy or calorie-dense serving for a bowl/platter of this size, prefer returning a visible ingredient again as an extra item representing only the excessive portion.\n"
-            "- Base ingredients are the ingredients that visibly belong in the dish by default. If one of those base ingredients also looks unusually abundant, return it again as an extra item representing only the added amount beyond normal.\n"
-            "- Example: chicken salad normally contains chicken as a base ingredient. If the portion looks unusually chicken-heavy, keep chicken as the base ingredient and also return chicken as an extra item with only the extra estimated volume.\n"
-            "- Pay special attention to calorie-dense sauces, dressings, oils, mayo-style toppings, fried items, cheese, and rice-heavy platters. If they appear excessive for the vessel size, add an extra item for only the excess amount.\n"
-            "- Hidden items are plausible components that are likely present but not directly visible or only partly visible "
-            "because they are buried/underneath/inside the dish (example: rice under falafel, gravy under toppings).\n"
-            "- Extra items are only incremental high-calorie amounts beyond the visible base portion already counted. "
-            "Use this for things like unusually heavy dressing, cheese, oil, butter, sauce, mayo, etc.\n"
-            "- Extra items can be visually obvious. If a visible ingredient itself appears present in an unusually heavy amount, "
-            "return the same ingredient name as an extra item and set volume_ml to only that extra amount above a normal base portion.\n"
-            "- If an extra item has the same name as a visible ingredient, the returned volume_ml must represent only the "
-            "additional amount beyond the already-counted visible base amount.\n"
-            "- Do not repeat ordinary visible base ingredients as hidden items.\n"
-            "- Do not invent improbable ingredients. Be conservative.\n"
-            "- Omit anything uncertain below 0.6 confidence.\n"
+            "- Only include hidden items with strong visual or contextual clues from the actual scene.\n"
+            "- Do not include items that are already visible in the base ingredient list.\n"
+            "- Do not infer hidden items from generic recipe knowledge alone — the scene must support it.\n"
+            "- Hidden items must themselves be calorie-significant (e.g. rice, bread, pastry, cheese inside — NOT salad leaves).\n\n"
+            "═══ HIGH-CALORIE EXTRAS (type=extra) ═══\n"
+            "Extras are ONLY incremental amounts of genuinely HIGH-CALORIE additions beyond a standard preparation.\n"
+            "High-calorie means roughly >200 kcal per 100g — things like oil, butter, ghee, cheese, cream, "
+            "heavy sauce, mayo, fried batter, extra meat portions.\n\n"
+            "VISUALLY INSPECT for these specific signs before flagging as extra:\n\n"
+            "Extra Oil / Fat / Ghee:\n"
+            "  - Oil pooling on the plate or around the edges of food\n"
+            "  - Glossy, shiny, or greasy surface sheen\n"
+            "  - Oil drips or visible liquid fat separating from the dish\n"
+            "  - Very dark or saturated color indicating oil-soaked food\n"
+            "  - Deep-fried appearance with visible excess oil residue\n\n"
+            "Extra Cream / Cheese / Dairy:\n"
+            "  - Thick creamy sauce or heavy gravy visibly coating food\n"
+            "  - Melted cheese topping, cheese sauce, or cream drizzle clearly visible\n"
+            "  - White or yellow creamy residue, butter pats on surface\n"
+            "  - Alfredo, carbonara, or other heavy cream-based coating\n\n"
+            "Extra Fried / Battered Elements:\n"
+            "  - Unusually thick crispy or fried coating compared to standard\n"
+            "  - Fried toppings (crispy onions, tempura bits, fried garnish)\n"
+            "  - Double-fried appearance or multiple visible breading layers\n\n"
+            "Double / Excess Portions (calorie-dense items only):\n"
+            "  - Portion is visually 2x or more of a normal single serving\n"
+            "  - Multiple pieces when dish is normally one (e.g. 3 chicken thighs)\n"
+            "  - Use depth map to detect stacked or piled calorie-dense items\n"
+            "  - Apply this ONLY to calorie-dense foods: meat, rice, pasta, cheese, fried items\n\n"
+            "CRITICAL — DO NOT flag as extra:\n"
+            "  - Vegetables with low calorie density: lettuce, cucumber, tomato, spinach, peppers, onion, "
+            "mushrooms, zucchini, celery, herbs, or any salad leaf\n"
+            "  - Normal cooking oil used in standard preparation (a thin coat is expected)\n"
+            "  - Standard condiments in small amounts (a drizzle of sauce, a pinch of seasoning)\n"
+            "  - Any ingredient below ~200 kcal per 100g is NOT a high-calorie extra\n\n"
+            "General rules:\n"
+            "- Be conservative: only flag obvious, clearly visible excess — not standard preparation.\n"
+            "- volume_ml must represent ONLY the extra amount above the normal base portion.\n"
+            "- If an extra item shares a name with a visible base ingredient, volume_ml is only the excess.\n"
+            "- Omit anything below 0.6 confidence.\n"
             "- volume_ml must be > 0.\n"
             "- Return at most 4 items total.\n"
         )
@@ -1772,6 +1840,19 @@ class NutritionVideoPipeline:
             metadata={"visible_items": visible_payload},
         )
 
+        # Low-calorie ingredients that should never be flagged as high-calorie extras
+        _LOW_CALORIE_EXTRAS = {
+            "lettuce", "cucumber", "tomato", "tomatoes", "spinach", "kale", "arugula",
+            "rocket", "pepper", "peppers", "capsicum", "onion", "onions", "celery",
+            "mushroom", "mushrooms", "zucchini", "courgette", "broccoli", "cauliflower",
+            "cabbage", "carrot", "carrots", "radish", "radishes", "beetroot", "beet",
+            "asparagus", "green beans", "snap peas", "peas", "edamame", "leek", "leeks",
+            "watercress", "endive", "chicory", "bok choy", "pak choi", "sprouts",
+            "bean sprouts", "herbs", "basil", "parsley", "coriander", "cilantro",
+            "mint", "dill", "chives", "salad", "salad leaves", "mixed leaves",
+            "pickles", "gherkin", "jalapeño", "jalapeno", "chilli", "chili",
+        }
+
         visible_names = {(item["name"] or "").strip().lower() for item in visible_items}
         inferred_items = []
         seen_pairs = set()
@@ -1784,6 +1865,12 @@ class NutritionVideoPipeline:
                 continue
 
             normalized_name = name.lower()
+
+            # Skip low-calorie items flagged as high-calorie extras
+            if item_type == "extra" and any(low in normalized_name for low in _LOW_CALORIE_EXTRAS):
+                logger.info(f"[{job_id}] Skipping low-calorie extra '{name}' — not a high-calorie ingredient")
+                continue
+
             if item_type == "hidden" and normalized_name in visible_names:
                 logger.info(f"[{job_id}] Skipping inferred hidden item '{name}' because it is already visible")
                 continue
@@ -2009,9 +2096,13 @@ class NutritionVideoPipeline:
         )
 
         raw_depth_image = self._render_depth_image(raw_depth)
+        calibrated_depth_image = self._render_depth_image(calibrated_depth)
+        masked_depth_image = self._render_depth_image(calibrated_depth, mask=dish_mask)
         volume_map = self._estimate_volume_from_raw_depth_with_gemini(
             image_rgb=img_rgb,
             raw_depth_image=raw_depth_image,
+            calibrated_depth_image=calibrated_depth_image,
+            masked_depth_image=masked_depth_image,
             visible_items=visible_items,
             first_pass=first_pass,
             job_id=job_id,
@@ -2032,9 +2123,12 @@ class NutritionVideoPipeline:
         verified_questionnaire = [
             item for item in verified_questionnaire
             if item.get("verdict") == "include"
-            and float(item.get("confidence") or 0.0) >= 0.6
+            and float(item.get("verification_confidence") or item.get("confidence") or 0.0) >= 0.6
             and (
-                not item.get("already_visible")
+                # hidden items must not already be visible in base
+                (item.get("type") == "hidden" and not item.get("already_visible"))
+                # extras are always included — already_visible just means the base stays in base table
+                # and the extra increment goes to high_calorie
                 or item.get("type") == "extra"
             )
         ]
