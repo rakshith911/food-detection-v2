@@ -3,6 +3,7 @@
 # dependencies
 node_modules/
 venv/
+gemini/.venv/
 
 # Expo
 .expo/
@@ -46,4 +47,8 @@ FoodAI/nutrition-video-analysis/terraform/docker/outputs/
 FoodAI/nutrition-video-analysis/terraform/docker/PRODUCTION/
 FoodAI/nutrition-video-analysis/terraform/docker/vendor/
 FoodAI/nutrition-video-analysis/terraform/docker/**/__pycache__/
+FoodAI/nutrition-video-analysis/terraform/docker/test/[0-9]*/
+FoodAI/nutrition-video-analysis/terraform/docker/test/gemini_*/
+FoodAI/nutrition-video-analysis/terraform/docker/test/compare/
+FoodAI/nutrition-video-analysis/terraform/docker/test/__pycache__/
 PRODUCTION/
