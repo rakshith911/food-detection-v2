@@ -59,6 +59,7 @@ FoodAI/nutrition-video-analysis/terraform/docker/test/gemini_*/
 FoodAI/nutrition-video-analysis/terraform/docker/test/compare/
 FoodAI/nutrition-video-analysis/terraform/docker/test/__pycache__/
 PRODUCTION/
+RAG/
 
 # local scratch copies
 /clip_rag_module.py
