@@ -147,6 +147,21 @@ class NutritionRAG:
 
         logger.info("NutritionRAG ready")
 
+    @staticmethod
+    def _to_numpy(features) -> np.ndarray:
+        """Extract a numpy array from either a raw tensor or a ModelOutput object (transformers 5.x)."""
+        import torch as _torch
+        if isinstance(features, _torch.Tensor):
+            return features.detach().cpu().numpy().astype(np.float32)
+        # transformers 5.x returns BaseModelOutputWithPooling / similar dataclasses
+        for attr in ("pooler_output", "last_hidden_state", "text_embeds", "image_embeds"):
+            val = getattr(features, attr, None)
+            if val is not None and isinstance(val, _torch.Tensor):
+                t = val.detach().cpu().numpy().astype(np.float32)
+                # pooler_output is (batch, hidden); last_hidden_state is (batch, seq, hidden) — mean-pool
+                return t.mean(axis=1) if t.ndim == 3 else t
+        raise ValueError(f"Cannot extract tensor from CLIP output: {type(features)}")
+
     def _build_clip_index(self) -> None:
         if not self._unified_names or self._clip_model is None or self._clip_processor is None:
             return
@@ -161,7 +176,7 @@ class NutritionRAG:
                     input_ids=inputs["input_ids"],
                     attention_mask=inputs["attention_mask"],
                 )
-            batch_emb = text_features.detach().cpu().numpy().astype(np.float32)
+            batch_emb = self._to_numpy(text_features)
             norms = np.linalg.norm(batch_emb, axis=1, keepdims=True)
             batch_emb = batch_emb / np.clip(norms, 1e-8, None)
             embeddings.append(batch_emb)
@@ -182,6 +197,18 @@ class NutritionRAG:
         (r'\bcrisp\b',       'crumble'),
         (r'\bfritter\b',     'pastry'),
         (r'\bshortbread\b',  'cookie'),
+        # Cooking oils — normalise spray/brand variants to plain oil
+        (r'\bcooking\s+oil\b',          'vegetable oil'),
+        (r'\bcooking\s+spray\b',        'vegetable oil'),
+        (r'\bpam\b',                    'vegetable oil'),
+        (r'\bolive\s+oil\b',            'olive oil'),
+        (r'\bsunflower\s+oil\b',        'sunflower oil'),
+        # Hot/chili sauce — normalise so "hot" is preserved as signal
+        (r'\bred\s+hot\s+sauce\b',      'hot chili sauce'),
+        (r'\bchili\s+sauce\b',          'hot chili sauce'),
+        # Fresh carrots (not canned)
+        (r'\bshredded\s+carrots?\b',    'carrots raw'),
+        (r'\bgrated\s+carrots?\b',      'carrots raw'),
     ]
     _FORM_WORDS_RE = (
         r'\b(bar|slice|slices|piece|pieces|wedge|wedges|portion|portions|'
@@ -253,7 +280,7 @@ class NutritionRAG:
                 input_ids=inputs["input_ids"],
                 attention_mask=inputs["attention_mask"],
             )
-        vec = text_features.detach().cpu().numpy().astype(np.float32)
+        vec = self._to_numpy(text_features)
         vec = vec / np.clip(np.linalg.norm(vec, axis=1, keepdims=True), 1e-8, None)
         return vec
 
@@ -263,7 +290,7 @@ class NutritionRAG:
         inputs = self._clip_processor(images=[crop_image.convert("RGB")], return_tensors="pt")
         with torch.no_grad():
             image_features = self._clip_model.get_image_features(pixel_values=inputs["pixel_values"])
-        vec = image_features.detach().cpu().numpy().astype(np.float32)
+        vec = self._to_numpy(image_features)
         vec = vec / np.clip(np.linalg.norm(vec, axis=1, keepdims=True), 1e-8, None)
         return vec
 
@@ -302,8 +329,15 @@ class NutritionRAG:
     _GENERIC_WORDS = {
         'sauce', 'soup', 'food', 'dish', 'meal', 'item', 'product', 'type',
         'style', 'with', 'from', 'made', 'home', 'store', 'brand', 'kind',
+        'extra', 'additional', 'added',  # strip modifier prefixes from queries
     }
-    _SIGNAL_WORDS = {'red', 'tan', 'yam', 'white', 'green', 'brown', 'pink'}
+    # Short but semantically meaningful words — treated as specific identifiers
+    # even though they are <4 chars, so word-overlap check doesn't treat them as generic
+    _SIGNAL_WORDS = {
+        'red', 'tan', 'yam', 'white', 'green', 'brown', 'pink',
+        'hot', 'soy', 'oil', 'egg', 'ham', 'cod', 'rye', 'nut',
+        'raw', 'dry', 'gel', 'fat', 'ice',
+    }
     _UNPREPARED_TERMS = {
         'raw', 'uncooked', 'dry', 'unprepared', 'packet', 'mix', 'concentrate', 'powder',
         'seasoning', 'instant', 'flavor', 'flavoured', 'flavored',
@@ -318,9 +352,18 @@ class NutritionRAG:
         'concentrate', 'seasoning',
     }
     _FORM_GROUPS = {
-        'raw': {
-            'raw', 'uncooked', 'dry', 'dehydrated', 'powder', 'powdered', 'mix',
+        # 'raw' is handled separately via _FRESH_PRODUCE_TERMS below — do NOT add it here.
+        # Only block truly unusable dry/unready states.
+        'dry_form': {
+            'uncooked', 'dry', 'dehydrated', 'powder', 'powdered', 'mix',
             'packet', 'instant', 'concentrate', 'seasoning',
+        },
+        # Preserved/pickled forms should not match fresh produce queries.
+        # e.g. query "cucumber" must not match "Pickles, cucumber, sour"
+        # Keep narrow — 'salted', 'sour', 'cured' are too broad and cause
+        # false rejections (salted butter, sour cream, cured salmon).
+        'preserved': {
+            'pickle', 'pickled', 'pickles', 'brined', 'brine', 'fermented',
         },
         'flour': {'flour', 'meal', 'starch'},
         'juice': {'juice', 'nectar', 'smoothie'},
@@ -329,6 +372,17 @@ class NutritionRAG:
             'sauce', 'dressing', 'dip', 'gravy', 'salsa', 'chutney',
             'ketchup', 'bbq', 'barbecue', 'mayonnaise', 'mayo', 'aioli',
         },
+    }
+
+    # Fresh produce that is always served raw — 'raw' DB entries ARE the right match.
+    # e.g. "shredded carrots" → "Carrots, raw" ✓  / "yellow rice" → block "Rice, red, raw" ✓
+    _FRESH_PRODUCE_TERMS = {
+        'lettuce', 'cucumber', 'carrot', 'carrots', 'tomato', 'tomatoes',
+        'celery', 'pepper', 'peppers', 'spinach', 'kale', 'cabbage',
+        'broccoli', 'cauliflower', 'zucchini', 'avocado', 'radish',
+        'parsley', 'cilantro', 'mint', 'basil', 'scallion', 'arugula',
+        'onion', 'onions', 'beet', 'beets', 'fennel', 'endive',
+        'watercress', 'radicchio', 'chard', 'leek', 'leeks',
     }
 
     @classmethod
@@ -376,6 +430,15 @@ class NutritionRAG:
         for terms in cls._FORM_GROUPS.values():
             if matched_tokens & terms and not query_tokens & terms:
                 return True
+
+        # Block 'raw' DB entries for cooked/processed food queries UNLESS the query
+        # is asking about fresh produce (which IS naturally served raw).
+        # Example blocks:  "yellow rice" → "Rice, red, raw" (356 kcal) ✗
+        #                  "falafel"     → "Falafel, raw" ✗
+        # Example allows:  "shredded carrots" → "Carrots, raw" ✓
+        #                  "sliced cucumber"  → "Cucumber, peeled, raw" ✓
+        if 'raw' in matched_tokens and not (query_tokens & cls._FRESH_PRODUCE_TERMS):
+            return True
 
         return False
 
@@ -570,7 +633,7 @@ class NutritionRAG:
         """
         Search unified FAISS index, re-rank with cross-encoder.
         field: 'density_g_ml' or 'calories_per_100g'
-        Returns (value, matched_name, source) or (None, None, None).
+        Returns (value, matched_name, source, entry) or (None, None, None, None).
         """
         normalized = self._normalize_food_name(food_name)
         retrieved_candidates = self._apply_lexical_override(
@@ -615,7 +678,7 @@ class NutritionRAG:
             candidates.append((candidate["cross_score"], candidate["lexical_score"], rank_score, idx, sim, float(value), matched, entry))
 
         if not candidates:
-            return None, None, None
+            return None, None, None, None
 
         candidates.sort(key=lambda item: (-item[0], -item[1], -item[2], -item[4]))
         best = candidates[0]
@@ -623,7 +686,7 @@ class NutritionRAG:
         cross_score, lexical_score, rank_score, idx, sim, value, matched, entry = best
         if cross_score < _MIN_RERANK_SCORE:
             logger.info(f"[{field}] '{food_name}' top rerank score too low ({cross_score:.2f}) - using Gemini fallback path")
-            return None, None, None
+            return None, None, None, None
         src = entry.get('source', 'unified')
         source = f"{src}_faiss(sim={sim:.2f})"
         if field == 'density_g_ml':
@@ -632,7 +695,7 @@ class NutritionRAG:
             f"[{field}] '{food_name}' → '{matched}' "
             f"({source}, clip={sim:.2f}, cross={cross_score:.2f}, lexical={lexical_score:.2f}, rank={rank_score:.2f}): {value}"
         )
-        return value, matched, source
+        return value, matched, source, entry
 
     # ──────────────────────────────────────────────────────────────────────────
     # Legacy lookup (separate FAO + USDA, used if unified not loaded)
@@ -979,29 +1042,30 @@ class NutritionRAG:
         return self._get_density_with_match(food_name, crop_image=crop_image)[0]
 
     def _get_density_with_match(self, food_name: str, top_k: int = 10, crop_image: Optional[Image.Image] = None):
-        """Return (density_g_ml, matched_name, source). Used standalone if needed."""
+        """Return (density_g_ml, matched_name, source, entry|None)."""
         if self._use_unified:
-            density, matched, source = self._lookup_unified(food_name, 'density_g_ml', top_k, crop_image=crop_image)
+            density, matched, source, entry = self._lookup_unified(food_name, 'density_g_ml', top_k, crop_image=crop_image)
         else:
             density, matched, source = self._lookup_legacy_density(food_name)
+            entry = None
 
         if density is not None:
-            return float(density), matched, source
+            return float(density), matched, source, entry
 
         density = self._gemini_lookup(food_name, 'density_g_ml')
         if density is not None:
-            return density, food_name, "gemini_grounding"
+            return density, food_name, "gemini_grounding", None
 
         logger.warning(f"No density found for '{food_name}' — all lookups failed")
-        return 0.9, "fallback", "fallback_default"
+        return 0.9, "fallback", "fallback_default", None
 
     def get_calories_per_100g(self, food_name: str, crop_image: Optional[Image.Image] = None) -> float:
         return self._get_calories_with_match(food_name, crop_image=crop_image)[0]
 
     def _get_calories_with_match(self, food_name: str, top_k: int = 10, crop_image: Optional[Image.Image] = None):
-        """Return (kcal_per_100g, matched_name, source). Used standalone if needed."""
+        """Return (kcal_per_100g, matched_name, source). Entry not needed here."""
         if self._use_unified:
-            kcal, matched, source = self._lookup_unified(food_name, 'calories_per_100g', top_k, crop_image=crop_image)
+            kcal, matched, source, _ = self._lookup_unified(food_name, 'calories_per_100g', top_k, crop_image=crop_image)
         else:
             kcal, matched, source = self._lookup_legacy_calories(food_name)
 
@@ -1034,27 +1098,49 @@ class NutritionRAG:
 
     def _resolve_nutrition(self, food_name: str, crop_image: Optional[Image.Image] = None):
         """
-        Prefer one shared entry when its density is reliable.
-        Otherwise resolve density and calories independently so unreliable CoFID
-        macro-only density is not used for runtime mass estimation.
-        Returns (
-            density, kcal_per_100g,
-            density_matched, density_source,
-            calorie_matched, calorie_source,
-        ).
+        Unified-DB-first resolution — Gemini is a last resort, never the primary source.
+
+        Priority order:
+          1. _lookup_best_entry: find a single unified DB entry with BOTH density AND kcal.
+             This is the ideal path — one entry, nutritionally consistent, no Gemini needed.
+          2. If no entry has both: fall back to density-first split:
+             a. Find density  →  USDA cup ratio  >  CoFID specific gravity  >  FAO  >  Gemini
+             b. If density entry also has kcal → reuse it (avoids a second search)
+             c. Else: separate FAISS kcal lookup from unified DB  →  Gemini only if DB fails
+
+        Returns (density, kcal_per_100g, density_matched, density_source, calorie_matched, calorie_source).
         """
+        # ── Step 1: try to get both from a single unified DB entry ───────────────
         if self._use_unified:
             entry, matched, sim, source_tag = self._lookup_best_entry(food_name, crop_image=crop_image)
-        else:
-            entry, matched, sim, source_tag = None, None, None, None
+            if entry is not None:
+                density     = float(entry['density_g_ml'])
+                kcal_per_100g = float(entry['calories_per_100g'])
+                logger.info(
+                    f"[best_entry] '{food_name}' → '{matched}' "
+                    f"({source_tag}, density={density}, kcal={kcal_per_100g})"
+                )
+                return density, kcal_per_100g, matched, source_tag, matched, source_tag
 
-        if entry is not None and self._is_reliable_density_entry(entry):
-            density      = float(entry['density_g_ml'])
-            kcal_per_100g = float(entry['calories_per_100g'])
-            return density, kcal_per_100g, matched, source_tag, matched, source_tag
+        # ── Step 2: split density + kcal lookups ────────────────────────────────
+        density, density_matched, density_source, density_entry = self._get_density_with_match(
+            food_name, crop_image=crop_image
+        )
 
-        density, density_matched, density_source = self._get_density_with_match(food_name, crop_image=crop_image)
-        kcal_per_100g, calorie_matched, calorie_source = self._get_calories_with_match(food_name, crop_image=crop_image)
+        # If the density entry also carries kcal, reuse it.
+        if density_entry is not None:
+            kcal_per_100g = density_entry.get('calories_per_100g')
+            if kcal_per_100g is not None and float(kcal_per_100g) > 0:
+                logger.info(
+                    f"[shared_lookup] '{food_name}' → '{density_matched}' "
+                    f"({density_source}, reusing entry for kcal={kcal_per_100g})"
+                )
+                return density, float(kcal_per_100g), density_matched, density_source, density_matched, density_source
+
+        # Density had no kcal (e.g. FAO entry) or came from Gemini — separate kcal lookup.
+        kcal_per_100g, calorie_matched, calorie_source = self._get_calories_with_match(
+            food_name, crop_image=crop_image
+        )
         return density, kcal_per_100g, density_matched, density_source, calorie_matched, calorie_source
 
     def get_nutrition_for_food(

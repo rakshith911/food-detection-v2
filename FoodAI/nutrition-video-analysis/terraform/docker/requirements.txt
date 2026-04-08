@@ -28,7 +28,7 @@ matplotlib==3.7.5
 h5py==3.10.0
 
 # RAG & NLP
-sentence-transformers==3.3.1
+sentence-transformers>=5.0.0,<6.0.0
 scikit-learn==1.5.2
 faiss-cpu==1.7.4
 

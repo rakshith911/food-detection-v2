@@ -29,10 +29,19 @@ if len(sys.argv) > 2:
 from unittest.mock import MagicMock
 import types
 
-# Mock torch, cv2, boto3 and other heavy libs if not installed
-for mod in ['torch', 'cv2', 'boto3']:
+# Import torch for real first — new transformers/safetensors checks torch.__version__
+# at import time, which breaks if torch is a MagicMock.
+import torch  # noqa: F401  (real torch 2.4.1 is installed in this venv)
+
+# Mock cv2, boto3 if not installed
+import importlib.machinery
+for mod in ['cv2', 'boto3']:
     if mod not in sys.modules:
-        sys.modules[mod] = MagicMock()
+        m = MagicMock()
+        # Python 3.9's importlib.util.find_spec requires __spec__ to be set on any
+        # module present in sys.modules — bypass MagicMock's dunder interception.
+        object.__setattr__(m, '__spec__', importlib.machinery.ModuleSpec(mod, loader=None))
+        sys.modules[mod] = m
 
 # Mock numpy properly (needs to be real numpy for PIL)
 import numpy as np
