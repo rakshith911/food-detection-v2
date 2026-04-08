@@ -475,7 +475,8 @@ class NutritionVideoPipeline:
             "- visible_ingredients must contain only visually present food ingredients/components.\n"
             "- role_tag for visible ingredients must always be 'base'.\n"
             "- Detect a plate or bowl if present and estimate its real-world diameter in cm.\n"
-            "- Detect reference objects if present, including cards, utensils, cans, cups, or packaged items, and estimate their real-world width/height in cm.\n"
+            "- Detect reference objects if present, including cards, utensils, cans, cups, packaged items, trays, takeout containers, parchment paper, baking paper, foil liners, wrappers, or other visible base/support objects whose dimensions can be reasonably estimated, and estimate their real-world width/height in cm.\n"
+            "- If there is no plate/bowl but the food sits on a visible paper, tray, liner, wrapper, or container with estimable dimensions, include it in reference_objects.\n"
             "- Confidence must be between 0 and 1.\n"
             "- Do not include questionnaire-only hidden or extra items in visible_ingredients.\n"
         )
@@ -599,9 +600,17 @@ class NutritionVideoPipeline:
         reason: Optional[str] = None,
         is_incremental: bool = False,
         crop_image: Optional[Image.Image] = None,
+        job_id: str = "",
     ) -> dict:
         rag = self.models.rag
         nutrition = rag.get_nutrition_for_food(label, volume_ml, quantity=1, crop_image=crop_image)
+        if role_tag == "base" and origin == "visible_base":
+            nutrition = self._verify_visible_rag_match_with_gemini(
+                label=label,
+                nutrition=nutrition,
+                crop_image=crop_image,
+                job_id=job_id,
+            )
         nutrition = self._attach_grounding_metadata(
             nutrition,
             rag,
@@ -630,7 +639,139 @@ class NutritionVideoPipeline:
             "origin": origin,
             "density_grounding_metadata": nutrition.get("density_grounding_metadata"),
             "calorie_grounding_metadata": nutrition.get("calorie_grounding_metadata"),
+            "rerank_score": nutrition.get("rerank_score"),
+            "faiss_score": nutrition.get("faiss_score"),
+            "rag_candidates": nutrition.get("rag_candidates"),
+            "rag_verification": nutrition.get("rag_verification"),
         }
+
+    def _verify_visible_rag_match_with_gemini(
+        self,
+        label: str,
+        nutrition: dict,
+        crop_image: Optional[Image.Image],
+        job_id: str,
+    ) -> dict:
+        verification_threshold = 0.5
+        if crop_image is None:
+            return nutrition
+
+        rag = self.models.rag
+        chosen_description = (nutrition.get("calorie_matched") or "").strip()
+        rag_candidates = nutrition.get("rag_candidates") or []
+        verifier_candidates = rag.get_verifier_candidates(label, chosen_description, rag_candidates)
+        if len(verifier_candidates) < 2:
+            return nutrition
+
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=self.config.GEMINI_API_KEY)
+        except Exception as e:
+            logger.warning(f"[{job_id}] Gemini RAG verifier init failed for '{label}': {e}")
+            return nutrition
+
+        prompt = (
+            "You are verifying a USDA nutrition-database match for a visible food ingredient crop.\n"
+            "Your job is to decide which exact USDA description best matches the visible ingredient and its preparation/form.\n"
+            "Focus on distinctions like raw vs cooked, sauce vs whole ingredient, powder vs fresh, dry mix vs plated prepared food, fat added vs not.\n"
+            "Do NOT hallucinate a new USDA item. You must return one exact description string from the candidate list only.\n"
+            "First judge the image on its own. Then compare against the candidate descriptions.\n"
+            "Treat our current pick as just one candidate, not as ground truth.\n\n"
+            f"Ingredient label: {json.dumps(label)}\n"
+            f"Our current selected match: {json.dumps(chosen_description)}\n"
+            f"Candidate options: {json.dumps(verifier_candidates, ensure_ascii=True)}\n\n"
+            "Return ONLY valid JSON with this schema:\n"
+            "{\"our_pick\":str,\"your_pick\":str,\"match_confidence\":number,"
+            "\"current_pick_match\":number,\"reason\":str}\n"
+            "Rules:\n"
+            "- your_pick must be EXACTLY one of the candidate description strings.\n"
+            "- match_confidence is how well your_pick matches the visible crop, from 0.0 to 1.0.\n"
+            "- current_pick_match is how well our current pick matches the visible crop, from 0.0 to 1.0.\n"
+        )
+
+        try:
+            model_name = self._flash_model_name()
+            model = genai.GenerativeModel(model_name, generation_config=self._GEMINI_GEN_CONFIG)
+            response = model.generate_content([prompt, crop_image])
+            response_text = (response.text or "").strip()
+            if "```" in response_text:
+                response_text = response_text.split("```")[1]
+                if response_text.startswith("json"):
+                    response_text = response_text[4:]
+            parsed = json.loads(response_text.strip())
+            self._record_gemini_output(
+                stage="production_visible_rag_verifier",
+                job_id=job_id,
+                model_name=model_name,
+                prompt=prompt,
+                response_text=response_text,
+                parsed_output=parsed,
+                metadata={
+                    "label": label,
+                    "current_match": chosen_description,
+                    "candidates": verifier_candidates,
+                },
+            )
+        except Exception as e:
+            logger.warning(f"[{job_id}] Gemini RAG verifier failed for '{label}': {e}")
+            return nutrition
+
+        selected_description = (parsed.get("your_pick") or "").strip()
+        confidence = float(parsed.get("match_confidence") or 0.0)
+        current_pick_match = float(parsed.get("current_pick_match") or 0.0)
+        reason = (parsed.get("reason") or "").strip()
+        candidate_descriptions = {c.get("description") for c in verifier_candidates}
+
+        verified = dict(nutrition)
+        verified["rag_verification"] = {
+            "decision": "switch" if selected_description and selected_description != chosen_description else "keep",
+            "selected_description": selected_description or chosen_description,
+            "confidence": confidence,
+            "current_pick_match": current_pick_match,
+            "reason": reason,
+            "current_match": chosen_description,
+            "candidates": verifier_candidates,
+            "threshold": verification_threshold,
+        }
+
+        if (
+            confidence < verification_threshold
+            or not selected_description
+            or selected_description not in candidate_descriptions
+            or selected_description == chosen_description
+        ):
+            return verified
+
+        candidate = rag.get_usda_candidate_by_description(selected_description)
+        if not candidate:
+            return verified
+
+        mass_g = float(verified.get("mass_g") or 0.0)
+        if mass_g <= 0:
+            density = float(verified.get("density_g_per_ml") or 0.0)
+            volume_ml = float(verified.get("volume_ml") or 0.0)
+            mass_g = density * volume_ml
+        if mass_g <= 0:
+            return verified
+
+        calories_per_100g = float(candidate.get("calories_per_100g") or 0.0)
+        try:
+            verified_density = rag.get_density(selected_description)
+        except Exception:
+            verified_density = None
+        if verified_density and verified_density > 0:
+            verified["density_g_per_ml"] = self._round_optional(verified_density, 4)
+            verified["density_source"] = "gemini_verified_match_density"
+            verified["density_matched"] = selected_description
+            volume_ml = float(verified.get("volume_ml") or 0.0)
+            if volume_ml > 0:
+                mass_g = verified_density * volume_ml
+                verified["mass_g"] = self._round_optional(mass_g, 1)
+        verified["calories_per_100g"] = self._round_optional(calories_per_100g, 1)
+        verified["total_calories"] = self._round_optional((mass_g / 100.0) * calories_per_100g, 1)
+        verified["calorie_matched"] = selected_description
+        verified["calorie_source"] = "usda_clip_rag_gemini_verified"
+        return verified
 
     def _build_questionnaire_component(self, item: dict) -> dict:
         mass_g = float(item.get("mass_g") or 0.0) if item.get("mass_g") is not None else None
@@ -854,6 +995,9 @@ class NutritionVideoPipeline:
 
         role_tags = list(grouped_components.keys()) or ["base"]
         primary_role = "base" if "base" in role_tags else role_tags[0]
+        representative_component = grouped_components.get("base", {}).get("entries", [None])[0]
+        if representative_component is None and components:
+            representative_component = components[0]
 
         item = {
             "food_name": label,
@@ -876,6 +1020,10 @@ class NutritionVideoPipeline:
             "base_component": grouped_components.get("base"),
             "extra_component": grouped_components.get("high_calorie"),
             "hidden_component": grouped_components.get("hidden"),
+            "rerank_score": representative_component.get("rerank_score") if representative_component else None,
+            "faiss_score": representative_component.get("faiss_score") if representative_component else None,
+            "rag_candidates": representative_component.get("rag_candidates") if representative_component else None,
+            "rag_verification": representative_component.get("rag_verification") if representative_component else None,
         }
 
         for prefix, role_tag in (("base", "base"), ("extra", "high_calorie"), ("hidden", "hidden")):
@@ -1495,11 +1643,14 @@ class NutritionVideoPipeline:
                 "confidence": float(vessel.get("confidence") or 0.0),
             })
         for ref in first_pass.get("reference_objects") or []:
-            size_cm = ref.get("width_cm") or ref.get("height_cm")
-            if size_cm:
+            width_cm = ref.get("width_cm")
+            height_cm = ref.get("height_cm")
+            if width_cm or height_cm:
                 candidates.append({
                     "name": ref.get("name") or "reference_object",
-                    "known_size_cm": size_cm,
+                    "known_width_cm": float(width_cm) if width_cm else None,
+                    "known_height_cm": float(height_cm) if height_cm else None,
+                    "known_size_cm": float(width_cm or height_cm),
                     "confidence": float(ref.get("confidence") or 0.0),
                 })
 
@@ -1512,10 +1663,27 @@ class NutritionVideoPipeline:
             if mask is None or bbox is None:
                 continue
             x1, y1, x2, y2 = bbox
-            pixel_size = max(x2 - x1, y2 - y1)
-            if pixel_size <= 0:
+            pixel_width = x2 - x1
+            pixel_height = y2 - y1
+            if pixel_width <= 0 or pixel_height <= 0:
                 continue
-            geom_depth_m = (float(candidate["known_size_cm"]) / 100.0) * self.config.ZOE_FX / float(pixel_size)
+
+            geom_depth_candidates = []
+            known_width_cm = candidate.get("known_width_cm")
+            known_height_cm = candidate.get("known_height_cm")
+            if known_width_cm:
+                geom_depth_candidates.append((float(known_width_cm) / 100.0) * self.config.ZOE_FX / float(pixel_width))
+            if known_height_cm:
+                geom_depth_candidates.append((float(known_height_cm) / 100.0) * self.config.ZOE_FY / float(pixel_height))
+            if not geom_depth_candidates and candidate.get("known_size_cm"):
+                pixel_size = max(pixel_width, pixel_height)
+                geom_depth_candidates.append(
+                    (float(candidate["known_size_cm"]) / 100.0) * self.config.ZOE_FX / float(pixel_size)
+                )
+            if not geom_depth_candidates:
+                continue
+
+            geom_depth_m = float(np.median(np.asarray(geom_depth_candidates, dtype=np.float32)))
             ref_pixels = raw_depth[mask.astype(bool)]
             ref_pixels = ref_pixels[np.isfinite(ref_pixels) & (ref_pixels > 0.01)]
             if ref_pixels.size < 20:
@@ -1531,6 +1699,8 @@ class NutritionVideoPipeline:
                 "reference_depth_raw_m": raw_ref_depth_m,
                 "reference_geom_depth_m": geom_depth_m,
                 "reference_size_cm": float(candidate["known_size_cm"]),
+                "reference_width_cm": known_width_cm,
+                "reference_height_cm": known_height_cm,
                 "bbox": bbox,
                 "confidence": float(candidate["confidence"]),
             }
@@ -1784,11 +1954,15 @@ class NutritionVideoPipeline:
             "Extras are ONLY incremental amounts of genuinely HIGH-CALORIE additions beyond a standard preparation.\n"
             "High-calorie means roughly >200 kcal per 100g — things like oil, butter, ghee, cheese, cream, "
             "heavy sauce, mayo, fried batter, extra meat portions.\n\n"
+            "An ingredient is NOT an extra just because it is visible. It is an extra only if the image strongly indicates an amount clearly ABOVE what is usual for that ingredient in this kind of dish.\n"
+            "Think in terms of: 'more than usual', 'clearly excessive', 'separate added layer', 'overflowing topping', or 'distinct additional serving'.\n\n"
             "VISUALLY INSPECT for these specific signs before flagging as extra:\n\n"
             "Extra Oil / Fat / Ghee:\n"
             "  - Oil pooling on the plate or around the edges of food\n"
-            "  - Glossy, shiny, or greasy surface sheen\n"
             "  - Oil drips or visible liquid fat separating from the dish\n"
+            "  - Distinct puddles, streaks, or droplets of oil are visible\n"
+            "  - Glossy, shiny, or greasy surface sheen ALONE is NOT enough\n"
+            "  - Deep-fried appearance by itself is NOT enough to count extra oil\n"
             "  - Very dark or saturated color indicating oil-soaked food\n"
             "  - Deep-fried appearance with visible excess oil residue\n\n"
             "Extra Cream / Cheese / Dairy:\n"
@@ -1810,11 +1984,16 @@ class NutritionVideoPipeline:
             "mushrooms, zucchini, celery, herbs, or any salad leaf\n"
             "  - Normal cooking oil used in standard preparation (a thin coat is expected)\n"
             "  - Standard condiments in small amounts (a drizzle of sauce, a pinch of seasoning)\n"
+            "  - A large visible base portion of rice, fries, falafel, meat, pasta, or other main dish component is NOT automatically an extra just because the serving is large\n"
+            "  - Do NOT duplicate visible base ingredients as extras unless there is clear visual evidence of an additional distinct excess layer, extra serving, or separately added topping\n"
             "  - Any ingredient below ~200 kcal per 100g is NOT a high-calorie extra\n\n"
             "General rules:\n"
             "- Be conservative: only flag obvious, clearly visible excess — not standard preparation.\n"
+            "- Only return an extra when you are highly confident it is more than the usual amount for that ingredient in this type of dish.\n"
             "- volume_ml must represent ONLY the extra amount above the normal base portion.\n"
             "- If an extra item shares a name with a visible base ingredient, volume_ml is only the excess.\n"
+            "- For rice/falafel/main-protein labels already present as visible base items, return an extra ONLY if there is unmistakable visual evidence of a separate additional serving or overflow beyond the base item itself.\n"
+            "- For oil, return an extra ONLY when visible pooled/separated oil is clearly seen. Do not infer extra oil from gloss, frying, or sheen alone.\n"
             "- Omit anything below 0.6 confidence.\n"
             "- volume_ml must be > 0.\n"
             "- Return at most 4 items total.\n"
@@ -1852,6 +2031,16 @@ class NutritionVideoPipeline:
             "mint", "dill", "chives", "salad", "salad leaves", "mixed leaves",
             "pickles", "gherkin", "jalapeño", "jalapeno", "chilli", "chili",
         }
+        _BASE_STAPLE_EXTRAS = {
+            "rice", "yellow rice", "white rice", "brown rice",
+            "falafel", "fries", "french fries", "meat", "chicken", "beef", "lamb", "pasta",
+        }
+        _OIL_EXTRA_KEYWORDS = ("pool", "puddle", "droplet", "drip", "separate", "separated", "residue", "visible oil")
+        _EXTRA_REASON_KEYWORDS = (
+            "extra", "excess", "beyond standard", "more than usual", "heavily", "thick layer",
+            "separate added", "overflow", "additional serving", "distinct added", "double serving",
+            "pooled", "puddle", "drip", "droplet",
+        )
 
         visible_names = {(item["name"] or "").strip().lower() for item in visible_items}
         inferred_items = []
@@ -1865,11 +2054,40 @@ class NutritionVideoPipeline:
                 continue
 
             normalized_name = name.lower()
+            reason_text = (item.get("reason") or "").strip().lower()
+
+            if item_type == "extra" and confidence < 0.85:
+                logger.info(
+                    f"[{job_id}] Skipping extra '{name}' — confidence {confidence:.2f} below strict extra threshold"
+                )
+                continue
+
+            if item_type == "extra" and not any(keyword in reason_text for keyword in _EXTRA_REASON_KEYWORDS):
+                logger.info(
+                    f"[{job_id}] Skipping extra '{name}' — reason does not clearly describe beyond-usual excess"
+                )
+                continue
 
             # Skip low-calorie items flagged as high-calorie extras
             if item_type == "extra" and any(low in normalized_name for low in _LOW_CALORIE_EXTRAS):
                 logger.info(f"[{job_id}] Skipping low-calorie extra '{name}' — not a high-calorie ingredient")
                 continue
+
+            # Do not treat a large visible base staple as an "extra" unless Gemini
+            # is describing a clearly separate added portion, not just a big serving.
+            if item_type == "extra" and normalized_name in visible_names and normalized_name in _BASE_STAPLE_EXTRAS:
+                logger.info(
+                    f"[{job_id}] Skipping staple extra '{name}' — visible base portion size alone is not an extra"
+                )
+                continue
+
+            # Oil is only an extra when Gemini cites explicit pooled/separated oil evidence.
+            if item_type == "extra" and "oil" in normalized_name:
+                if confidence < 0.85 or not any(keyword in reason_text for keyword in _OIL_EXTRA_KEYWORDS):
+                    logger.info(
+                        f"[{job_id}] Skipping oil extra '{name}' — insufficient explicit pooled/separated oil evidence"
+                    )
+                    continue
 
             if item_type == "hidden" and normalized_name in visible_names:
                 logger.info(f"[{job_id}] Skipping inferred hidden item '{name}' because it is already visible")
@@ -1928,6 +2146,7 @@ class NutritionVideoPipeline:
                 volume_confidence=volume_confidence,
                 origin="visible_base",
                 crop_image=crop_image,
+                job_id=job_id,
             )
             logger.info(
                 f"[{job_id}] base '{label}': confidence={confidence:.2f} volume={volume_ml:.1f}ml "
@@ -1957,6 +2176,7 @@ class NutritionVideoPipeline:
                 reason=item.get("reason"),
                 is_incremental=bool(item.get("is_incremental")),
                 crop_image=None,
+                job_id=job_id,
             )
             logger.info(
                 f"[{job_id}] inferred {role_tag} '{label}': confidence={confidence:.2f} volume={volume_ml:.1f}ml "
@@ -2012,12 +2232,10 @@ class NutritionVideoPipeline:
             target_key = target_key or item["name"]
             item_components.setdefault(target_key, []).append(nutrition)
 
-        vessel = first_pass.get("plate_or_bowl") or {}
-        item_components = self._apply_visible_item_sanity_split(
-            item_components,
-            cooking_method=first_pass.get("cooking_method"),
-            vessel_diameter_cm=vessel.get("diameter_cm"),
-        )
+        # High-calorie / extra components must come from explicit Gemini visual
+        # confirmation or questionnaire input only. Do not auto-promote visible
+        # base portions (for example rice or sauce) into "high_calorie" via
+        # heuristic sanity splitting.
 
         nutrition_items = [
             self._finalize_component_based_item(label, components)

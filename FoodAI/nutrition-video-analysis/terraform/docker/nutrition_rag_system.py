@@ -356,7 +356,7 @@ class NutritionRAG:
         # Only block truly unusable dry/unready states.
         'dry_form': {
             'uncooked', 'dry', 'dehydrated', 'powder', 'powdered', 'mix',
-            'packet', 'instant', 'concentrate', 'seasoning',
+            'packet', 'instant', 'concentrate', 'seasoning', 'unprepared',
         },
         # Preserved/pickled forms should not match fresh produce queries.
         # e.g. query "cucumber" must not match "Pickles, cucumber, sour"
@@ -623,6 +623,32 @@ class NutritionRAG:
 
     _SKIP_WORDS = {'oil', 'fat', 'extract', 'powder', 'concentrate', 'flavoring', 'supplement'}
 
+    # Hardcoded density overrides for foods where the unified DB cup-ratio measurement
+    # is known to be wrong.  Checked before FAISS lookup in _resolve_nutrition.
+    _DENSITY_HARDCODED: dict = {
+        # Fresh tomatoes: ~1.0 g/ml (mostly water), DB cup ratio gives ~0.67
+        "tomato":           1.00,
+        "tomatoes":         1.00,
+        # Falafel: dense fried chickpea balls (~1.07 g/ml), DB cup ratio gives 0.60
+        "falafel":          1.07,
+        "falafel ball":     1.07,
+        "falafel balls":    1.07,
+        # Hot / chili sauces: liquid ~1.06 g/ml, DB matches pepper solids giving 0.57
+        "hot sauce":        1.06,
+        "red hot sauce":    1.06,
+        "red chili sauce":  1.06,
+        "chili sauce":      1.06,
+        "sriracha":         1.06,
+        "hot chili sauce":  1.06,
+        "chili garlic sauce": 1.06,
+        # Cooking oils: pure oil ~0.92 g/ml
+        "cooking oil":      0.92,
+        "vegetable oil":    0.92,
+        "olive oil":        0.91,
+        "canola oil":       0.92,
+        "sunflower oil":    0.92,
+    }
+
     def _lookup_unified(
         self,
         food_name: str,
@@ -670,9 +696,28 @@ class NutritionRAG:
             if not self._words_overlap(normalized, matched.lower()):
                 logger.info(f"Skip (no word overlap): '{food_name}' vs '{matched}'")
                 continue
+            # Form-conflict check:
+            # Always applied for density (wrong-form density = wrong mass calculation).
+            # For kcal: applied as normal EXCEPT when the food name is a multi-word
+            # specific dish phrase that appears verbatim in the matched description.
+            # This lets USDA dry-packet entries through for named dishes like:
+            #   "yellow rice" → "Yellow rice with seasoning, dry packet mix, unprepared" ✓
+            # while still blocking generic single-word queries from canned/sauce matches:
+            #   "tomato"      → "Tomato products, canned, sauce"  ✗ (blocked)
+            #   "diced onions"→ "Onions, frozen, chopped, unprepared" ✗ (phrase not in desc)
             if self._has_conflicting_form(normalized, matched.lower()):
-                logger.info(f"Skip (conflicting form): '{food_name}' vs '{matched}'")
-                continue
+                if field == 'density_g_ml':
+                    logger.info(f"Skip (conflicting form for density): '{food_name}' vs '{matched}'")
+                    continue
+                # kcal: only pass through if query is a multi-word phrase found verbatim
+                food_phrase = food_name.strip().lower()
+                phrase_in_desc = (
+                    len(food_phrase.split()) >= 2
+                    and food_phrase in matched.lower()
+                )
+                if not phrase_in_desc:
+                    logger.info(f"Skip (conflicting form for kcal): '{food_name}' vs '{matched}'")
+                    continue
 
             rank_score = candidate["rank_score"]
             candidates.append((candidate["cross_score"], candidate["lexical_score"], rank_score, idx, sim, float(value), matched, entry))
@@ -758,7 +803,10 @@ class NutritionRAG:
                 if not self._words_overlap(normalized, matched.lower()):
                     continue
                 if self._has_conflicting_form(normalized, matched.lower()):
-                    continue
+                    food_phrase = food_name.strip().lower()
+                    phrase_in_desc = len(food_phrase.split()) >= 2 and food_phrase in matched.lower()
+                    if not phrase_in_desc:
+                        continue
                 entry = self._usda_foods[idx]
                 kcal  = float(entry.get('calories_per_100g', 0))
                 return kcal, matched, f"usda_faiss(sim={sim:.2f})"
@@ -1098,50 +1146,97 @@ class NutritionRAG:
 
     def _resolve_nutrition(self, food_name: str, crop_image: Optional[Image.Image] = None):
         """
-        Unified-DB-first resolution — Gemini is a last resort, never the primary source.
+        ZOE-pipeline-aligned resolution — always kcal-first, then density separately.
 
-        Priority order:
-          1. _lookup_best_entry: find a single unified DB entry with BOTH density AND kcal.
-             This is the ideal path — one entry, nutritionally consistent, no Gemini needed.
-          2. If no entry has both: fall back to density-first split:
-             a. Find density  →  USDA cup ratio  >  CoFID specific gravity  >  FAO  >  Gemini
-             b. If density entry also has kcal → reuse it (avoids a second search)
-             c. Else: separate FAISS kcal lookup from unified DB  →  Gemini only if DB fails
+        Step 1 — Find the best USDA/unified kcal match via CLIP-FAISS + cross-encoder.
+                 Dry/mix/packet USDA entries are intentionally NOT blocked here;
+                 the cross-encoder is the sole quality gate.  This lets "yellow rice"
+                 correctly reach "Yellow rice with seasoning, dry packet mix, unprepared"
+                 (343 kcal/100g) instead of falling back to a generic cooked-rice entry.
+
+        Step 1a — If the winning kcal entry ALSO carries a reliable density reading,
+                  reuse it immediately (nutritionally self-consistent, no second search).
+
+        Step 2 — Density lookup — two queries tried in order:
+                  (a) The matched food description from Step 1
+                      → shares form-tokens (dry/mix/packet) with real density DB entries
+                        so _has_conflicting_form does NOT wrongly block them.
+                  (b) The raw ingredient name as fallback.
+                 This mirrors the ZOE pipeline's
+                 `_lookup_density_from_queries(rag_result["description"], ingredient_name)`.
+
+        Note: _lookup_best_entry is NOT used as the primary path.  It can confuse
+        cross-entry matches (e.g. "yellow rice" → "Wild rice, cooked" because that
+        entry happens to have both fields) when the correct kcal entry has no density.
 
         Returns (density, kcal_per_100g, density_matched, density_source, calorie_matched, calorie_source).
         """
-        # ── Step 1: try to get both from a single unified DB entry ───────────────
+        # Check hardcoded density overrides FIRST — these win over everything else,
+        # including DB cup-ratio measurements that are known to be wrong (e.g. tomato,
+        # falafel, hot sauce).
+        _food_key = food_name.strip().lower()
+        _hardcoded_density: Optional[float] = self._DENSITY_HARDCODED.get(_food_key)
+        if _hardcoded_density is not None:
+            logger.info(f"[density] '{food_name}' → hardcoded override {_hardcoded_density:.3f} g/ml")
+
+        # ── Step 1: kcal via CLIP-FAISS + cross-encoder ──────────────────────────
+        kcal_entry: Optional[dict] = None
         if self._use_unified:
-            entry, matched, sim, source_tag = self._lookup_best_entry(food_name, crop_image=crop_image)
-            if entry is not None:
-                density     = float(entry['density_g_ml'])
-                kcal_per_100g = float(entry['calories_per_100g'])
+            kcal_per_100g, calorie_matched, calorie_source, kcal_entry = self._lookup_unified(
+                food_name, 'calories_per_100g', crop_image=crop_image
+            )
+        else:
+            kcal_per_100g, calorie_matched, calorie_source = self._lookup_legacy_calories(food_name)
+
+        if kcal_per_100g is None:
+            kcal_per_100g_gem = self._gemini_lookup(food_name, 'calories_per_100g')
+            if kcal_per_100g_gem is not None:
+                kcal_per_100g   = kcal_per_100g_gem
+                calorie_matched = food_name
+                calorie_source  = "gemini_grounding"
+            else:
+                logger.warning(f"No calories found for '{food_name}' — using default")
+                kcal_per_100g   = 200.0
+                calorie_matched = "fallback"
+                calorie_source  = "fallback_default"
+
+        # ── Step 1a: reuse kcal entry density if reliable AND no hardcoded override ──
+        # Skip this shortcut when a hardcoded density exists — the override always wins.
+        if _hardcoded_density is None and kcal_entry is not None and self._is_reliable_density_entry(kcal_entry):
+            density = float(kcal_entry['density_g_ml'])
+            logger.info(
+                f"[shared_entry] '{food_name}' → '{calorie_matched}' "
+                f"({calorie_source}, reusing entry density={density}, kcal={kcal_per_100g})"
+            )
+            return density, float(kcal_per_100g), calorie_matched, calorie_source, calorie_matched, calorie_source
+
+        # ── Step 2: density — hardcoded → matched description → raw name ─────────
+        density: Optional[float] = _hardcoded_density
+        density_matched: Optional[str] = food_name if _hardcoded_density is not None else None
+        density_source: Optional[str]  = "hardcoded_override" if _hardcoded_density is not None else None
+
+        density_queries = list(dict.fromkeys(
+            q for q in [calorie_matched, food_name] if q and q.strip()
+        ))
+
+        for dq in density_queries if density is None else []:
+            d, dm, ds, _de = self._get_density_with_match(dq, crop_image=crop_image)
+            # Accept only real DB / Gemini hits — not the bare "fallback_default".
+            if d is not None and float(d) > 0 and ds != "fallback_default":
+                density, density_matched, density_source = d, dm, ds
                 logger.info(
-                    f"[best_entry] '{food_name}' → '{matched}' "
-                    f"({source_tag}, density={density}, kcal={kcal_per_100g})"
+                    f"[density] '{food_name}' — found via query '{dq}' → '{dm}' "
+                    f"({ds}, {d:.3f} g/ml)"
                 )
-                return density, kcal_per_100g, matched, source_tag, matched, source_tag
+                break
 
-        # ── Step 2: split density + kcal lookups ────────────────────────────────
-        density, density_matched, density_source, density_entry = self._get_density_with_match(
-            food_name, crop_image=crop_image
-        )
+        if density is None:
+            # All FAISS queries returned fallback_default; invoke Gemini / 0.9 default.
+            density, density_matched, density_source, _ = self._get_density_with_match(
+                food_name, crop_image=crop_image
+            )
 
-        # If the density entry also carries kcal, reuse it.
-        if density_entry is not None:
-            kcal_per_100g = density_entry.get('calories_per_100g')
-            if kcal_per_100g is not None and float(kcal_per_100g) > 0:
-                logger.info(
-                    f"[shared_lookup] '{food_name}' → '{density_matched}' "
-                    f"({density_source}, reusing entry for kcal={kcal_per_100g})"
-                )
-                return density, float(kcal_per_100g), density_matched, density_source, density_matched, density_source
-
-        # Density had no kcal (e.g. FAO entry) or came from Gemini — separate kcal lookup.
-        kcal_per_100g, calorie_matched, calorie_source = self._get_calories_with_match(
-            food_name, crop_image=crop_image
-        )
-        return density, kcal_per_100g, density_matched, density_source, calorie_matched, calorie_source
+        return density, float(kcal_per_100g), density_matched, density_source, calorie_matched, calorie_source
 
     def get_nutrition_for_food(
         self,

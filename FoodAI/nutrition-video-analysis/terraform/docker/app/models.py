@@ -326,7 +326,7 @@ def load_nutrition_rag(
 
     import sys
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-    from nutrition_rag_system import NutritionRAG
+    from zoe_nutrition_rag import NutritionRAG
 
     rag = NutritionRAG(
         unified_faiss_path=unified_faiss_path,

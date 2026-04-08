@@ -504,7 +504,7 @@ class GeminiSegmentationProvider:
                     model=self.model_name,
                     contents=[pil_image, prompt],
                     config=types.GenerateContentConfig(
-                        temperature=0.5,
+                        temperature=0.0,
                         thinking_config=types.ThinkingConfig(thinking_budget=0),
                     ),
                 )
@@ -517,7 +517,7 @@ class GeminiSegmentationProvider:
                     genai.configure(api_key=self.api_key)
                     model = genai.GenerativeModel(
                         self.model_name,
-                        generation_config={"temperature": 0.5},
+                        generation_config={"temperature": 0.0},
                     )
                     response = model.generate_content([pil_image, prompt])
                     return response.text or ""
@@ -529,6 +529,46 @@ class GeminiSegmentationProvider:
         if last_error:
             raise last_error
         raise RuntimeError("Gemini segmentation failed without an error")
+
+    @staticmethod
+    def _clean_response_text(response_text: str) -> str:
+        """Remove JSON entries whose mask value is not a valid base64 data URI.
+
+        Gemini occasionally emits <start_of_mask><seg_N> tokens for items it
+        cannot segment, which corrupts the JSON and causes supervision to return
+        0 detections.  We parse the array, drop bad entries, and re-serialise.
+        """
+        import re as _re
+
+        # Extract the JSON array from the response (may be wrapped in ```json ... ```)
+        match = _re.search(r"\[.*\]", response_text, _re.DOTALL)
+        if not match:
+            return response_text
+
+        raw_json = match.group(0)
+        try:
+            items = json.loads(raw_json)
+        except json.JSONDecodeError:
+            # Try removing individual bad entries line-by-line
+            lines = raw_json.splitlines()
+            cleaned_lines = [l for l in lines if "<start_of_mask>" not in l and "<seg_" not in l]
+            raw_json = "\n".join(cleaned_lines)
+            try:
+                items = json.loads(raw_json)
+            except json.JSONDecodeError:
+                return response_text
+
+        valid_items = [
+            item for item in items
+            if isinstance(item, dict)
+            and isinstance(item.get("mask"), str)
+            and item["mask"].startswith("data:image/")
+        ]
+        dropped = len(items) - len(valid_items)
+        if dropped:
+            print(f"  [Gemini segmentation] dropped {dropped} item(s) with malformed masks")
+
+        return json.dumps(valid_items)
 
     @staticmethod
     def _simplify_prompt_label(label: str) -> str:
@@ -581,6 +621,7 @@ class GeminiSegmentationProvider:
         orig_w, orig_h = pil_image.size
         target_h = int(1024 * orig_h / orig_w)
         segmentation_image = pil_image.resize((1024, target_h), Image.Resampling.LANCZOS)
+        print(f"  [Gemini segmentation] image resized: {orig_w}x{orig_h} → 1024x{target_h}")
 
         ingredients_str = ", ".join(seg_prompts)
         prompt = (
@@ -589,17 +630,26 @@ class GeminiSegmentationProvider:
             "in the key \"box_2d\", the segmentation mask in key \"mask\", and the text label in key "
             "\"label\". Use descriptive labels."
         )
-
+        print(f"  [Gemini segmentation] prompt: {prompt}")
+        print(f"  [Gemini segmentation] calling {self.model_name} (temperature=0.0) ...")
+        t0 = time.time()
         response_text = self._generate_response(prompt, segmentation_image)
+        print(f"  [Gemini segmentation] response received in {time.time() - t0:.1f}s  ({len(response_text or '')} chars)")
+
+        # Strip malformed mask entries (Gemini sometimes emits <start_of_mask><seg_N>
+        # tokens instead of base64 PNGs for the last few items, which breaks JSON parsing).
+        response_text = self._clean_response_text(response_text)
 
         # Parse with supervision exactly like the notebook:
         # resolution_wh=pil_image.size uses ORIGINAL image dimensions (not 1024px)
+        print(f"  [Gemini segmentation] parsing response with supervision ...")
         try:
             detections = sv.Detections.from_vlm(
                 vlm=sv.VLM.GOOGLE_GEMINI_2_5,
                 result=response_text,
                 resolution_wh=pil_image.size,
             )
+            print(f"  [Gemini segmentation] supervision parsed {len(detections)} detections")
         except Exception as exc:
             preview = (response_text or "")[:300].replace("\n", "\\n")
             print(f"  [Gemini segmentation] supervision parse failed: {exc}")
@@ -625,6 +675,7 @@ class GeminiSegmentationProvider:
             returned_label = str(class_names[i]) if i < len(class_names) else f"item_{i}"
             matched_label = self._match_label(returned_label, prompts)
             if matched_label is None:
+                print(f"    [{i}] '{returned_label}' → no match (skipped)")
                 continue
 
             if detections.mask is not None and i < len(detections.mask):
@@ -633,17 +684,21 @@ class GeminiSegmentationProvider:
                 binary_mask = None
 
             if binary_mask is None:
+                print(f"    [{i}] '{returned_label}' → matched '{matched_label}' but no mask (skipped)")
                 continue
 
             coverage = float(binary_mask.mean())
             if coverage < min_coverage or coverage > max_coverage:
+                print(f"    [{i}] '{returned_label}' → matched '{matched_label}' coverage={coverage:.4f} out of range [{min_coverage},{max_coverage}] (skipped)")
                 continue
 
             score = float(detections.confidence[i]) if detections.confidence is not None else coverage
             if score < float(results[matched_label]["score"]):
+                print(f"    [{i}] '{returned_label}' → matched '{matched_label}' score={score:.4f} < existing {results[matched_label]['score']:.4f} (skipped)")
                 continue
 
             results[matched_label] = {"mask": binary_mask, "score": score}
+            print(f"    [{i}] '{returned_label}' → matched '{matched_label}'  coverage={coverage:.4f}  score={score:.4f}  ✓")
 
             # Convert xyxy box back to box_2d (0-1000 space) for reporting
             x0, y0, x1, y1 = detections.xyxy[i]
@@ -667,7 +722,13 @@ class GeminiSegmentationProvider:
         self.last_debug_payloads = [{"prompt": prompt, "response_text": response_text}]
         self.last_results = results
         self.last_soft_masks = {}
-        print(f"  [Gemini segmentation] matched labels: {list(summary.keys())}")
+        matched = list(summary.keys())
+        unmatched = [p for p in prompts if results[p]["mask"] is None]
+        print(f"  [Gemini segmentation] matched  ({len(matched)}): {matched}")
+        if unmatched:
+            print(f"  [Gemini segmentation] no mask  ({len(unmatched)}): {unmatched}")
+        for label, info in summary.items():
+            print(f"    {label:<30} coverage={info['coverage']:.4f}  score={info['score']:.4f}  box={info['box_2d']}")
         return results
 
 
@@ -811,7 +872,7 @@ def main() -> int:
     run_output_dir = (
         Path(args.output_dir).expanduser().resolve()
         if args.output_dir
-        else (SCRIPT_DIR / run_stamp)
+        else (SCRIPT_DIR / "GEMINI_OUTPUTS" / run_stamp)
     )
     run_output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -865,12 +926,13 @@ def main() -> int:
                 # Falling back to the legacy image/video pipeline would pull in SAM2 and
                 # invalidate the Gemini-vs-SAM3 comparison we are trying to test.
                 print("  [Pipeline] starting production image pipeline with Gemini segmentation override")
+                t_pipeline = time.time()
                 result = pipeline._run_production_image_pipeline(
                     image_path,
                     job_id,
                     user_context=user_context,
                 )
-                print("  [Pipeline] production image pipeline completed")
+                print(f"  [Pipeline] production image pipeline completed in {time.time() - t_pipeline:.1f}s")
                 write_json(image_dir / "result.json", result)
                 save_provider_artifacts(provider, image_dir, job_id)
                 save_notebook_style_overlay(image_path, provider, image_dir)
