@@ -313,28 +313,47 @@ export class NutritionAnalysisAPI {
             console.log('[Nutrition API] Detailed results fetched successfully');
             data.detailed_results = detailedResults;
 
-            // Extract items array from detailed results - check multiple possible locations
+            // Extract items array from detailed results.
+            // Prefer the richest source so role_tag / extra_component / hidden_component survive.
+            const candidateItemSources: Array<{ label: string; items: any[] | undefined }> = [
+              { label: 'full_results.nutrition.items', items: detailedResults.full_results?.nutrition?.items },
+              { label: 'nutrition.items', items: detailedResults.nutrition?.items },
+              { label: 'items', items: detailedResults.items },
+              { label: 'detected_items', items: detailedResults.detected_items },
+            ];
+
+            const getItemRichness = (items: any[] | undefined) => {
+              if (!items?.length) return -1;
+              return items.reduce((score, item) => {
+                if (item?.role_tag) score += 4;
+                if (item?.role_tags?.length) score += 2;
+                if (item?.base_component) score += 3;
+                if (item?.extra_component) score += 5;
+                if (item?.hidden_component) score += 5;
+                return score;
+              }, 0);
+            };
+
+            const rankedSources = candidateItemSources
+              .map((source) => ({
+                ...source,
+                richness: getItemRichness(source.items),
+                count: source.items?.length || 0,
+              }))
+              .filter((source) => source.count > 0)
+              .sort((a, b) => {
+                if (b.richness !== a.richness) return b.richness - a.richness;
+                return b.count - a.count;
+              });
+
             let itemsArray: any[] | null = null;
-            
-            // Location 1: detected_items (top-level)
-            if (detailedResults.detected_items && detailedResults.detected_items.length > 0) {
-              console.log('[Nutrition API] Found items in detected_items');
-              itemsArray = detailedResults.detected_items;
-            }
-            // Location 2: items (top-level)
-            else if (detailedResults.items && detailedResults.items.length > 0) {
-              console.log('[Nutrition API] Found items at top level');
-              itemsArray = detailedResults.items;
-            }
-            // Location 3: full_results.nutrition.items
-            else if (detailedResults.full_results?.nutrition?.items && detailedResults.full_results.nutrition.items.length > 0) {
-              console.log('[Nutrition API] Found items in full_results.nutrition.items');
-              itemsArray = detailedResults.full_results.nutrition.items;
-            }
-            // Location 4: nutrition.items
-            else if (detailedResults.nutrition?.items && detailedResults.nutrition.items.length > 0) {
-              console.log('[Nutrition API] Found items in nutrition.items');
-              itemsArray = detailedResults.nutrition.items;
+            if (rankedSources.length > 0) {
+              const bestSource = rankedSources[0];
+              console.log(
+                `[Nutrition API] Using items from ${bestSource.label} ` +
+                `(count=${bestSource.count}, richness=${bestSource.richness})`
+              );
+              itemsArray = bestSource.items || null;
             }
             
             if (itemsArray && itemsArray.length > 0) {
