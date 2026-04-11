@@ -299,79 +299,14 @@ class NutritionVideoPipeline:
         }
 
         if getattr(self.config, "USE_PRODUCTION_IMAGE_PIPELINE", True):
-            try:
-                logger.info(
-                    f"[{job_id}] Attempting production image pipeline "
-                    f"(Gemini -> SAM3 -> ZoeDepth -> Gemini volume) "
-                    f"using SAM3={self.config.SAM3_MODEL_DIR} "
-                    f"ZoeDepth={self.config.ZOEDEPTH_CHECKPOINT} "
-                    f"MiDaS={self.config.MIDAS_REPO_DIR}"
-                )
-                return self._run_production_image_pipeline(image_path, job_id, user_context=user_context)
-            except Exception as e:
-                logger.warning(
-                    f"[{job_id}] Production image pipeline failed, falling back to legacy pipeline: {e}",
-                    exc_info=True,
-                )
-
-        try:
-            # Load image as a single frame
-            img = cv2.imread(str(image_path))
-            if img is None:
-                raise ValueError(f"Could not load image: {image_path}")
-
-            # Resize if needed
-            if self.config.RESIZE_WIDTH:
-                h, w = img.shape[:2]
-                if w > self.config.RESIZE_WIDTH:
-                    new_h = int(h * self.config.RESIZE_WIDTH / w)
-                    img = cv2.resize(img, (self.config.RESIZE_WIDTH, new_h))
-            
-            # Convert BGR to RGB (cv2 loads as BGR, but PIL/Florence-2 expect RGB)
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-            frames = [img]
-            logger.info(f"[{job_id}] Loaded image as single frame")
-
-            # Step 2: Run tracking pipeline with depth
-            tracking_results = self._run_tracking_pipeline(frames, job_id, user_context=user_context)
-
-            # Step 3: Analyze nutrition
-            print("🍎 Analyzing nutrition...")
-            import sys
-            sys.stdout.flush()
-            nutrition_results = self._analyze_nutrition(tracking_results, job_id)
-            print("✓ Nutrition analysis complete")
-            sys.stdout.flush()
-
-            # Step 4: Compile complete results
-            final_results = {
-                'job_id': job_id,
-                'media_name': image_path.name,
-                'media_type': 'image',
-                'timestamp': datetime.utcnow().isoformat(),
-                'num_frames_processed': 1,
-                'calibration': self.calibration,
-                'florence_detections': self.florence_detections,  # Store Florence-2 detection results
-                'tracking': tracking_results,
-                'nutrition': nutrition_results,
-                'questionnaire_verification': self.last_questionnaire_verification,
-                'gemini_outputs': self.gemini_outputs,
-                'pipeline_runtime': {
-                    'image_pipeline': 'legacy',
-                    'fallback_reason': 'production_disabled_or_failed',
-                    'sam2_checkpoint': str(self.config.SAM2_CHECKPOINT),
-                    'device': self.device,
-                },
-                'status': 'completed'
-            }
-
-            logger.info(f"[{job_id}] ✓ Image processing completed successfully")
-            return final_results
-
-        except Exception as e:
-            logger.error(f"[{job_id}] Image processing failed: {e}", exc_info=True)
-            raise
+            logger.info(
+                f"[{job_id}] Attempting production image pipeline "
+                f"(Gemini -> SAM3 -> ZoeDepth -> Gemini volume) "
+                f"using SAM3={self.config.SAM3_MODEL_DIR} "
+                f"ZoeDepth={self.config.ZOEDEPTH_CHECKPOINT} "
+                f"MiDaS={self.config.MIDAS_REPO_DIR}"
+            )
+            return self._run_production_image_pipeline(image_path, job_id, user_context=user_context)
 
     def process_video(self, video_path: Path, job_id: str, user_context: dict = None) -> Dict:
         """
@@ -713,8 +648,8 @@ class NutritionVideoPipeline:
                 },
             )
         except Exception as e:
-            logger.warning(f"[{job_id}] Gemini RAG verifier failed for '{label}': {e}")
-            return nutrition
+            logger.error(f"[{job_id}] Gemini RAG verifier failed for '{label}': {e}", exc_info=True)
+            raise
 
         selected_description = (parsed.get("your_pick") or "").strip()
         confidence = float(parsed.get("match_confidence") or 0.0)
@@ -746,27 +681,30 @@ class NutritionVideoPipeline:
         if not candidate:
             return verified
 
-        mass_g = float(verified.get("mass_g") or 0.0)
-        if mass_g <= 0:
-            density = float(verified.get("density_g_per_ml") or 0.0)
-            volume_ml = float(verified.get("volume_ml") or 0.0)
-            mass_g = density * volume_ml
-        if mass_g <= 0:
+        mass_g = verified.get("mass_g")
+        density_g_per_ml = verified.get("density_g_per_ml")
+        volume_ml_val = verified.get("volume_ml")
+        if not mass_g and density_g_per_ml and volume_ml_val:
+            mass_g = float(density_g_per_ml) * float(volume_ml_val)
+        if not mass_g or float(mass_g) <= 0:
+            logger.warning(f"[{job_id}] Cannot apply RAG verification for '{label}': mass_g unavailable")
             return verified
 
-        calories_per_100g = float(candidate.get("calories_per_100g") or 0.0)
-        try:
-            verified_density = rag.get_density(selected_description)
-        except Exception:
-            verified_density = None
+        calories_per_100g = candidate.get("calories_per_100g")
+        if not calories_per_100g:
+            logger.warning(f"[{job_id}] Cannot apply RAG verification for '{label}': calories_per_100g missing in candidate")
+            return verified
+        calories_per_100g = float(calories_per_100g)
+
+        verified_density = rag.get_density(selected_description)
         if verified_density and verified_density > 0:
             verified["density_g_per_ml"] = self._round_optional(verified_density, 4)
             verified["density_source"] = "gemini_verified_match_density"
             verified["density_matched"] = selected_description
-            volume_ml = float(verified.get("volume_ml") or 0.0)
-            if volume_ml > 0:
-                mass_g = verified_density * volume_ml
+            if volume_ml_val and float(volume_ml_val) > 0:
+                mass_g = verified_density * float(volume_ml_val)
                 verified["mass_g"] = self._round_optional(mass_g, 1)
+        mass_g = float(mass_g)
         verified["calories_per_100g"] = self._round_optional(calories_per_100g, 1)
         verified["total_calories"] = self._round_optional((mass_g / 100.0) * calories_per_100g, 1)
         verified["calorie_matched"] = selected_description
@@ -6835,8 +6773,8 @@ Example:
                 total_mass += item_mass
                 total_calories += item_calories
             except Exception as e:
-                logger.warning(f"[{job_id}] Skipping item '{item_key}' due to error: {e}", exc_info=True)
-                continue
+                logger.error(f"[{job_id}] Nutrition lookup failed for item '{item_key}': {e}", exc_info=True)
+                raise
         
         # Collect unquantified ingredients from florence_detections
         all_unquantified = []

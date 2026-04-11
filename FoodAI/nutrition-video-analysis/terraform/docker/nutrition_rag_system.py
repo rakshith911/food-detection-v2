@@ -31,6 +31,16 @@ _MIN_RERANK_SCORE = -5.0
 # needs a stricter threshold than the main USDA/CoFID retrieval DB.
 _MIN_SIM_BY_SOURCE = {'fao': 0.65, 'usda': 0.50, 'cofid': 0.60}
 
+
+class NutritionLookupError(LookupError):
+    """Raised when nutrition lookup cannot resolve required data."""
+
+    def __init__(self, food_name: str, missing_fields: list[str]):
+        self.food_name = food_name
+        self.missing_fields = missing_fields
+        joined = ", ".join(missing_fields)
+        super().__init__(f"Could not resolve {joined} for '{food_name}'")
+
 class NutritionRAG:
     """
     Unified nutrition lookup:
@@ -519,7 +529,7 @@ class NutritionRAG:
             ('milliliter', 1.0, 'ml'),
             ('millilitre', 1.0, 'ml'),
             (' ml', 1.0, 'ml'),
-            ('cup', 240.0, 'cup'),
+            ('cup', 236.588, 'cup'),
             ('tablespoon', 15.0, 'tbsp'),
             ('tbsp', 15.0, 'tbsp'),
             ('teaspoon', 5.0, 'tsp'),
@@ -603,7 +613,10 @@ class NutritionRAG:
     def _derive_usda_density_entry(self, entry: Optional[dict]) -> Optional[dict]:
         if not entry or (entry.get('source') or '').strip().lower() != 'usda':
             return entry
-        if entry.get('density_g_ml') is not None:
+        density_method = (entry.get('density_method') or '').strip().lower()
+        # Recompute cup-based USDA densities so they stay aligned with the
+        # canonical USDA cup volume used by _portion_volume_ml().
+        if entry.get('density_g_ml') is not None and not density_method.startswith('usda_portion(cup'):
             return entry
 
         self._load_usda_portion_data()
@@ -1402,31 +1415,6 @@ class NutritionRAG:
 
     _SKIP_WORDS = {'oil', 'fat', 'extract', 'powder', 'concentrate', 'flavoring', 'supplement'}
 
-    # Hardcoded density overrides for foods where the unified DB cup-ratio measurement
-    # is known to be wrong.  Checked before FAISS lookup in _resolve_nutrition.
-    _DENSITY_HARDCODED: dict = {
-        # Fresh tomatoes: ~1.0 g/ml (mostly water), DB cup ratio gives ~0.67
-        "tomato":           1.00,
-        "tomatoes":         1.00,
-        # Falafel: dense fried chickpea balls (~1.07 g/ml), DB cup ratio gives 0.60
-        "falafel":          1.07,
-        "falafel ball":     1.07,
-        "falafel balls":    1.07,
-        # Hot / chili sauces: liquid ~1.06 g/ml, DB matches pepper solids giving 0.57
-        "hot sauce":        1.06,
-        "red hot sauce":    1.06,
-        "red chili sauce":  1.06,
-        "chili sauce":      1.06,
-        "sriracha":         1.06,
-        "hot chili sauce":  1.06,
-        "chili garlic sauce": 1.06,
-        # Cooking oils: pure oil ~0.92 g/ml
-        "cooking oil":      0.92,
-        "vegetable oil":    0.92,
-        "olive oil":        0.91,
-        "canola oil":       0.92,
-        "sunflower oil":    0.92,
-    }
     def _lookup_served_dish_lexical(
         self,
         food_name: str,
@@ -1949,30 +1937,44 @@ class NutritionRAG:
             return cached_value
         try:
             if field == 'density_g_ml':
-                prompt = (
-                    f"What is the average density of '{food_name}' in grams per milliliter (g/ml)? "
-                    f"First prefer authoritative food-composition sources such as USDA FoodData Central, "
-                    f"CoFID, and FAO/INFOODS if they contain the item or an equivalent prepared form. "
-                    f"If those do not contain the item, use grounded web search to estimate a typical cooked "
-                    f"or served density. Most foods are between 0.5 and 1.5 g/ml. "
-                    f"Reply with ONLY a single decimal number like 0.85 and no other text."
+                prompt_grounded = (
+                    f"What is the density of '{food_name}' in grams per milliliter (g/ml)? "
+                    f"Search in this exact order: "
+                    f"1. USDA FoodData Central (fdc.nal.usda.gov) — search for the item or nearest prepared equivalent. "
+                    f"2. CoFID (UK composition database) — if not in USDA. "
+                    f"3. Broader web sources (food science, nutrition databases) — if not in either. "
+                    f"Typical food densities are 0.5–1.5 g/ml. "
+                    f"Reply with ONLY a single decimal number, e.g. 0.85"
+                )
+                prompt_context = (
+                    f"Estimate the density of '{food_name}' in grams per milliliter (g/ml) "
+                    f"based on its physical characteristics (water content, fat content, texture). "
+                    f"Typical range: 0.5–1.5 g/ml. "
+                    f"Reply with ONLY a single decimal number, e.g. 0.85"
                 )
                 lo, hi = 0.05, 3.0
-            else:  # calories_per_100g
-                prompt = (
+            else:
+                prompt_grounded = (
                     f"How many kilocalories (kcal) are in 100 grams of '{food_name}'? "
-                    f"First prefer authoritative food-composition sources such as USDA FoodData Central, "
-                    f"CoFID, and FAO/INFOODS if they contain the item or an equivalent prepared form. "
-                    f"Reply with ONLY a single integer or decimal number and no other text."
+                    f"Search in this exact order: "
+                    f"1. USDA FoodData Central (fdc.nal.usda.gov) — search for the item or nearest prepared equivalent. "
+                    f"2. CoFID (UK composition database) — if not in USDA. "
+                    f"3. Broader web sources (food science, nutrition databases) — if not in either. "
+                    f"Reply with ONLY a single integer or decimal number, e.g. 250"
+                )
+                prompt_context = (
+                    f"Estimate how many kilocalories (kcal) are in 100 grams of '{food_name}' "
+                    f"based on its known ingredients and cooking method. "
+                    f"Reply with ONLY a single integer or decimal number, e.g. 250"
                 )
                 lo, hi = 1.0, 900.0
 
-            def _call_new_sdk(with_grounding: bool):
+            def _call_with_grounding(prompt: str):
                 from google import genai as genai_new
                 from google.genai import types
                 client = genai_new.Client(api_key=self._gemini_api_key)
                 config_kwargs: dict = {"temperature": 0.0}
-                if with_grounding and hasattr(types, "Tool"):
+                if hasattr(types, "Tool"):
                     if hasattr(types, "GoogleSearch"):
                         config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
                     elif hasattr(types, "GoogleSearchRetrieval"):
@@ -1986,75 +1988,89 @@ class NutritionRAG:
                 )
                 return resp
 
+            def _call_context_only(prompt: str):
+                from google import genai as genai_new
+                from google.genai import types
+                client = genai_new.Client(api_key=self._gemini_api_key)
+                resp = client.models.generate_content(
+                    model=self._gemini_model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(temperature=0.0),
+                )
+                return resp
+
             text = ""
             grounding_metadata = None
+
+            # Step 1: grounded search (USDA → CoFID → web)
             try:
-                response = _call_new_sdk(with_grounding=True)
+                response = _call_with_grounding(prompt_grounded)
                 text = (response.text or "").strip()
                 grounding_metadata = self._extract_grounding_metadata(response)
-            except Exception as new_sdk_error:
+            except Exception as grounding_err:
                 logger.warning(
-                    f"Gemini grounding [{field}] new SDK failed for '{food_name}': {new_sdk_error}"
+                    f"Gemini grounding [{field}] failed for '{food_name}': {grounding_err}"
                 )
-                # Retry without grounding tool (some SDK versions differ)
-                try:
-                    response = _call_new_sdk(with_grounding=False)
-                    text = (response.text or "").strip()
-                except Exception:
-                    pass
 
-            if not text:
-                # Last resort: legacy SDK
-                try:
-                    import google.generativeai as genai
-                    genai.configure(api_key=self._gemini_api_key)
-                    model = genai.GenerativeModel(
-                        self._gemini_model,
-                        generation_config={"temperature": 0.0},
-                    )
-                    response = model.generate_content(prompt)
-                    text = (response.text or "").strip()
-                except Exception as legacy_err:
-                    logger.warning(f"Gemini grounding [{field}] legacy SDK also failed for '{food_name}': {legacy_err}")
+            # Step 2: if grounding returned no parseable number, use context-based estimation
+            val = None
+            m = re.search(r'(\d+\.?\d*)', text)
+            if m:
+                candidate = float(m.group(1))
+                if lo <= candidate <= hi:
+                    val = candidate
 
-            # Try to parse the first number out of the response
-            match = re.search(r'(\d+\.?\d*)', text)
-            if match:
-                val = float(match.group(1))
-                if lo <= val <= hi:
-                    if not self._is_reasonable_gemini_value(food_name, field, val, grounding_metadata):
-                        logger.warning(
-                            "Gemini grounding [%s] '%s': rejected implausible value %s",
-                            field, food_name, val,
-                        )
-                        return None
-                    logger.info(f"Gemini grounding [{field}] '{food_name}': {val}")
-                    self._gemini_cache[cache_key] = val
-                    if grounding_metadata and grounding_metadata.get("grounded"):
-                        grounding_metadata.update({
-                            "food_name": food_name,
-                            "field": field,
-                            "value": val,
-                            "model": self._gemini_model,
-                        })
-                        self._gemini_grounding_metadata[cache_key] = grounding_metadata
-                    self._persist_gemini_cache_entry(
-                        food_name=food_name,
-                        field=field,
-                        value=val,
-                        grounding_metadata=self._gemini_grounding_metadata.get(cache_key),
-                    )
-                    return val
-                else:
+            if val is None:
+                logger.info(
+                    f"Gemini grounding [{field}] '{food_name}': no value from grounded search, "
+                    f"trying context-based estimation"
+                )
+                try:
+                    response2 = _call_context_only(prompt_context)
+                    text2 = (response2.text or "").strip()
+                    m2 = re.search(r'(\d+\.?\d*)', text2)
+                    if m2:
+                        candidate2 = float(m2.group(1))
+                        if lo <= candidate2 <= hi:
+                            val = candidate2
+                            grounding_metadata = {"grounded": False, "source": "gemini_context_estimation"}
+                except Exception as context_err:
                     logger.warning(
-                        f"Gemini grounding [{field}] '{food_name}': parsed {val} but outside [{lo}, {hi}] range — text was: {text!r}"
+                        f"Gemini context estimation [{field}] failed for '{food_name}': {context_err}"
                     )
-            else:
+
+            if val is None:
                 logger.warning(
-                    f"Gemini grounding [{field}] '{food_name}': could not parse a number from response: {text!r}"
+                    f"Gemini [{field}] '{food_name}': all attempts failed — no value returned"
                 )
+                return None
+
+            if not self._is_reasonable_gemini_value(food_name, field, val, grounding_metadata):
+                logger.warning(
+                    "Gemini [%s] '%s': rejected implausible value %s",
+                    field, food_name, val,
+                )
+                return None
+
+            logger.info(f"Gemini [{field}] '{food_name}': {val}")
+            self._gemini_cache[cache_key] = val
+            if grounding_metadata and grounding_metadata.get("grounded"):
+                grounding_metadata.update({
+                    "food_name": food_name,
+                    "field": field,
+                    "value": val,
+                    "model": self._gemini_model,
+                })
+                self._gemini_grounding_metadata[cache_key] = grounding_metadata
+            self._persist_gemini_cache_entry(
+                food_name=food_name,
+                field=field,
+                value=val,
+                grounding_metadata=self._gemini_grounding_metadata.get(cache_key),
+            )
+            return val
         except Exception as e:
-            logger.warning(f"Gemini grounding [{field}] failed for '{food_name}': {e}")
+            logger.warning(f"Gemini [{field}] failed for '{food_name}': {e}")
         return None
 
     def _is_reasonable_gemini_value(
@@ -2273,11 +2289,6 @@ class NutritionRAG:
 
     def _get_density_with_match(self, food_name: str, top_k: int = 10, crop_image: Optional[Image.Image] = None):
         """Return (density_g_ml, matched_name, source, entry|None)."""
-        food_key = food_name.strip().lower()
-        hardcoded_density = self._DENSITY_HARDCODED.get(food_key)
-        if hardcoded_density is not None:
-            return float(hardcoded_density), food_name, "hardcoded_override", None
-
         if self._use_unified:
             density, matched, source, entry = self._lookup_unified(food_name, 'density_g_ml', top_k, crop_image=crop_image)
             if density is None and self._fao_index is not None:
@@ -2300,8 +2311,8 @@ class NutritionRAG:
         if density is not None:
             return density, food_name, "gemini_grounding", None
 
-        logger.warning(f"No density found for '{food_name}' — all lookups failed")
-        return 0.9, "fallback", "fallback_default", None
+        logger.warning(f"No density found for '{food_name}'")
+        return None, None, None, None
 
     def get_calories_per_100g(self, food_name: str, crop_image: Optional[Image.Image] = None) -> float:
         return self._get_calories_with_match(food_name, crop_image=crop_image)[0]
@@ -2326,8 +2337,8 @@ class NutritionRAG:
         if kcal is not None:
             return kcal, food_name, "gemini_grounding"
 
-        logger.warning(f"No calories found for '{food_name}' — all lookups failed")
-        return 200.0, "fallback", "fallback_default"
+        logger.warning(f"No calories found for '{food_name}'")
+        return None, None, None
 
     def get_nutrition(self, food_name: str, volume_ml: float, crop_image: Optional[Image.Image] = None) -> dict:
         density, kcal_per_100g, density_matched, density_source, calorie_matched, calorie_source = self._resolve_nutrition(food_name, crop_image=crop_image)
@@ -2373,14 +2384,6 @@ class NutritionRAG:
 
         Returns (density, kcal_per_100g, density_matched, density_source, calorie_matched, calorie_source).
         """
-        # Check hardcoded density overrides FIRST — these win over everything else,
-        # including DB cup-ratio measurements that are known to be wrong (e.g. tomato,
-        # falafel, hot sauce).
-        _food_key = food_name.strip().lower()
-        _hardcoded_density: Optional[float] = self._DENSITY_HARDCODED.get(_food_key)
-        if _hardcoded_density is not None:
-            logger.info(f"[density] '{food_name}' → hardcoded override {_hardcoded_density:.3f} g/ml")
-
         # ── Step 1: kcal via CLIP-FAISS + cross-encoder ──────────────────────────
         kcal_entry: Optional[dict] = None
         if self._use_unified:
@@ -2391,23 +2394,28 @@ class NutritionRAG:
             kcal_per_100g, calorie_matched, calorie_source = self._lookup_legacy_calories(food_name)
 
         if kcal_per_100g is None:
-            kcal_per_100g_gem = self._gemini_lookup(food_name, 'calories_per_100g')
-            if kcal_per_100g_gem is not None:
-                kcal_per_100g   = kcal_per_100g_gem
-                calorie_matched = food_name
-                calorie_source  = "gemini_grounding"
+            # Try branded foods before Gemini
+            branded_kcal, branded_matched, branded_source, _ = self._lookup_branded_fallback(
+                food_name, 'calories_per_100g'
+            )
+            if branded_kcal is not None:
+                kcal_per_100g   = float(branded_kcal)
+                calorie_matched = branded_matched
+                calorie_source  = branded_source
             else:
-                logger.warning(f"No calories found for '{food_name}' — using default")
-                kcal_per_100g   = 200.0
-                calorie_matched = "fallback"
-                calorie_source  = "fallback_default"
+                kcal_per_100g_gem = self._gemini_lookup(food_name, 'calories_per_100g')
+                if kcal_per_100g_gem is not None:
+                    kcal_per_100g   = kcal_per_100g_gem
+                    calorie_matched = food_name
+                    calorie_source  = "gemini_grounding"
+                else:
+                    raise NutritionLookupError(food_name, ["calories_per_100g"])
 
         if kcal_entry is not None:
             kcal_entry = self._derive_usda_density_entry(kcal_entry)
 
-        # ── Step 1a: reuse kcal entry density if reliable AND no hardcoded override ──
-        # Skip this shortcut when a hardcoded density exists — the override always wins.
-        if _hardcoded_density is None and kcal_entry is not None and self._is_reliable_density_entry(kcal_entry):
+        # ── Step 1a: reuse kcal entry density if reliable ──
+        if kcal_entry is not None and self._is_reliable_density_entry(kcal_entry):
             density = float(kcal_entry['density_g_ml'])
             logger.info(
                 f"[shared_entry] '{food_name}' → '{calorie_matched}' "
@@ -2415,19 +2423,18 @@ class NutritionRAG:
             )
             return density, float(kcal_per_100g), calorie_matched, calorie_source, calorie_matched, calorie_source
 
-        # ── Step 2: density — hardcoded → matched description → raw name ─────────
-        density: Optional[float] = _hardcoded_density
-        density_matched: Optional[str] = food_name if _hardcoded_density is not None else None
-        density_source: Optional[str]  = "hardcoded_override" if _hardcoded_density is not None else None
+        # ── Step 2: density — matched description → raw name ─────────
+        density: Optional[float] = None
+        density_matched: Optional[str] = None
+        density_source: Optional[str] = None
 
         density_queries = list(dict.fromkeys(
             q for q in [food_name, calorie_matched] if q and q.strip()
         ))
 
-        for dq in density_queries if density is None else []:
+        for dq in density_queries:
             d, dm, ds, _de = self._get_density_with_match(dq, crop_image=crop_image)
-            # Accept only real DB / Gemini hits — not the bare "fallback_default".
-            if d is not None and float(d) > 0 and ds != "fallback_default":
+            if d is not None and float(d) > 0:
                 density, density_matched, density_source = d, dm, ds
                 logger.info(
                     f"[density] '{food_name}' — found via query '{dq}' → '{dm}' "
@@ -2436,10 +2443,7 @@ class NutritionRAG:
                 break
 
         if density is None:
-            # All FAISS queries returned fallback_default; invoke Gemini / 0.9 default.
-            density, density_matched, density_source, _ = self._get_density_with_match(
-                food_name, crop_image=crop_image
-            )
+            raise NutritionLookupError(food_name, ["density_g_ml"])
 
         return density, float(kcal_per_100g), density_matched, density_source, calorie_matched, calorie_source
 
