@@ -559,11 +559,15 @@ class NutritionRAG:
         self._usda_portion_index = {}
         self._usda_measure_units = {}
 
-        raw_dir_candidates = [
-            Path(__file__).resolve().parents[4] / 'FoodData_Central_csv_2025-12-18',
-            Path(__file__).resolve().parents[4] / 'usda_data' / 'usda_raw',
-            Path(__file__).resolve().parent / 'data' / 'usda_raw',
-        ]
+        _file_resolved = Path(__file__).resolve()
+        _ancestors = list(_file_resolved.parents)
+        raw_dir_candidates = []
+        if len(_ancestors) > 4:
+            raw_dir_candidates += [
+                _ancestors[4] / 'FoodData_Central_csv_2025-12-18',
+                _ancestors[4] / 'usda_data' / 'usda_raw',
+            ]
+        raw_dir_candidates.append(_file_resolved.parent / 'data' / 'usda_raw')
         raw_dir = next((path for path in raw_dir_candidates if path.exists()), None)
         if raw_dir is None:
             logger.info("USDA raw portion tables not found; skipping USDA portion density fallback")
