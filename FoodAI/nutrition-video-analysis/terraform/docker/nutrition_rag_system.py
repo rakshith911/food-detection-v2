@@ -1923,155 +1923,241 @@ class NutritionRAG:
     # Gemini grounding fallback
     # ──────────────────────────────────────────────────────────────────────────
 
-    def _gemini_lookup(self, food_name: str, field: str) -> Optional[float]:
+    def _gemini_lookup(self, food_name: str, field: str, meal_context: Optional[str] = None) -> Optional[float]:
         """
-        Query Gemini with Google Search grounding for density or calories.
+        Query Gemini for density or calories using a strict 3-step grounding order:
+          Step 1 — Grounded search targeting USDA FoodData Central + CoFID specifically.
+          Step 2 — Grounded broader web search (only if Step 1 yields no parseable value).
+          Step 3 — Context-based estimation using dish/meal context (only if Step 2 also fails).
+        Raises if the API key is missing or an unrecoverable API error occurs.
         field: 'density_g_ml' or 'calories_per_100g'
         """
         if not self._gemini_api_key:
-            return None
+            raise NutritionLookupError(
+                food_name,
+                [field],
+                reason="Gemini API key not configured — cannot perform grounded lookup",
+            )
         cache_key = f"{food_name}::{field}"
         cached_value = self._get_cached_gemini_value(food_name, field)
         if cached_value is not None:
             logger.info("Gemini cache hit [%s] '%s': %s", field, food_name, cached_value)
             return cached_value
-        try:
-            if field == 'density_g_ml':
-                prompt_grounded = (
-                    f"What is the density of '{food_name}' in grams per milliliter (g/ml)? "
-                    f"Search in this exact order: "
-                    f"1. USDA FoodData Central (fdc.nal.usda.gov) — search for the item or nearest prepared equivalent. "
-                    f"2. CoFID (UK composition database) — if not in USDA. "
-                    f"3. Broader web sources (food science, nutrition databases) — if not in either. "
-                    f"Typical food densities are 0.5–1.5 g/ml. "
-                    f"Reply with ONLY a single decimal number, e.g. 0.85"
-                )
-                prompt_context = (
-                    f"Estimate the density of '{food_name}' in grams per milliliter (g/ml) "
-                    f"based on its physical characteristics (water content, fat content, texture). "
-                    f"Typical range: 0.5–1.5 g/ml. "
-                    f"Reply with ONLY a single decimal number, e.g. 0.85"
-                )
-                lo, hi = 0.05, 3.0
-            else:
-                prompt_grounded = (
-                    f"How many kilocalories (kcal) are in 100 grams of '{food_name}'? "
-                    f"Search in this exact order: "
-                    f"1. USDA FoodData Central (fdc.nal.usda.gov) — search for the item or nearest prepared equivalent. "
-                    f"2. CoFID (UK composition database) — if not in USDA. "
-                    f"3. Broader web sources (food science, nutrition databases) — if not in either. "
-                    f"Reply with ONLY a single integer or decimal number, e.g. 250"
-                )
-                prompt_context = (
-                    f"Estimate how many kilocalories (kcal) are in 100 grams of '{food_name}' "
-                    f"based on its known ingredients and cooking method. "
-                    f"Reply with ONLY a single integer or decimal number, e.g. 250"
-                )
-                lo, hi = 1.0, 900.0
 
-            def _call_with_grounding(prompt: str):
-                from google import genai as genai_new
-                from google.genai import types
-                client = genai_new.Client(api_key=self._gemini_api_key)
-                config_kwargs: dict = {"temperature": 0.0}
-                if hasattr(types, "Tool"):
-                    if hasattr(types, "GoogleSearch"):
-                        config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
-                    elif hasattr(types, "GoogleSearchRetrieval"):
-                        config_kwargs["tools"] = [
-                            types.Tool(google_search_retrieval=types.GoogleSearchRetrieval())
-                        ]
-                resp = client.models.generate_content(
-                    model=self._gemini_model,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(**config_kwargs),
-                )
-                return resp
+        if field == 'density_g_ml':
+            # Step 1: USDA/CoFID targeted search
+            prompt_usda_cofid = (
+                f"What is the density of '{food_name}' in grams per milliliter (g/ml)? "
+                f"Search ONLY in USDA FoodData Central (fdc.nal.usda.gov) and the UK CoFID "
+                f"(composition of foods) database. "
+                f"If found, reply with ONLY a single decimal number, e.g. 0.85. "
+                f"If not found in either database, reply with exactly: NOT_FOUND"
+            )
+            # Step 2: Broader web search
+            prompt_web = (
+                f"What is the density of '{food_name}' in grams per milliliter (g/ml)? "
+                f"Search food science journals, nutrition databases, and authoritative web sources. "
+                f"Only report a value if you are highly confident (sourced from a reliable reference). "
+                f"Reply with the value and source URL, e.g. '0.85 (source: example.com)'. "
+                f"If no reliable value found, reply with exactly: NOT_FOUND"
+            )
+            # Step 3: Context estimation with dish context
+            context_clause = (
+                f" This item is part of a dish containing: {meal_context}."
+                if meal_context else ""
+            )
+            prompt_context = (
+                f"Estimate the density of '{food_name}' in grams per milliliter (g/ml) "
+                f"based on its physical characteristics (water content, fat content, texture).{context_clause} "
+                f"Typical food densities range from 0.1 (very airy/dry) to 1.5 (dense/wet). "
+                f"Reply with ONLY a single decimal number, e.g. 0.85"
+            )
+            lo, hi = 0.05, 3.0
+        else:
+            # Step 1: USDA/CoFID targeted search
+            prompt_usda_cofid = (
+                f"How many kilocalories (kcal) are in 100 grams of '{food_name}'? "
+                f"Search ONLY in USDA FoodData Central (fdc.nal.usda.gov) and the UK CoFID "
+                f"(composition of foods) database. "
+                f"If found, reply with ONLY a single integer or decimal number, e.g. 250. "
+                f"If not found in either database, reply with exactly: NOT_FOUND"
+            )
+            # Step 2: Broader web search
+            prompt_web = (
+                f"How many kilocalories (kcal) are in 100 grams of '{food_name}'? "
+                f"Search food science journals, nutrition databases, and authoritative web sources. "
+                f"Only report a value if you are highly confident (sourced from a reliable reference). "
+                f"Reply with the value and source URL, e.g. '250 (source: example.com)'. "
+                f"If no reliable value found, reply with exactly: NOT_FOUND"
+            )
+            # Step 3: Context estimation with dish context
+            context_clause = (
+                f" This item appears in a dish containing: {meal_context}."
+                if meal_context else ""
+            )
+            prompt_context = (
+                f"Estimate how many kilocalories (kcal) are in 100 grams of '{food_name}' "
+                f"based on its known ingredients and cooking method.{context_clause} "
+                f"Reply with ONLY a single integer or decimal number, e.g. 250"
+            )
+            lo, hi = 1.0, 900.0
 
-            def _call_context_only(prompt: str):
-                from google import genai as genai_new
-                from google.genai import types
-                client = genai_new.Client(api_key=self._gemini_api_key)
-                resp = client.models.generate_content(
-                    model=self._gemini_model,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(temperature=0.0),
-                )
-                return resp
+        def _call_with_grounding(prompt: str):
+            from google import genai as genai_new
+            from google.genai import types
+            client = genai_new.Client(api_key=self._gemini_api_key)
+            config_kwargs: dict = {"temperature": 0.0}
+            if hasattr(types, "Tool"):
+                if hasattr(types, "GoogleSearch"):
+                    config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+                elif hasattr(types, "GoogleSearchRetrieval"):
+                    config_kwargs["tools"] = [
+                        types.Tool(google_search_retrieval=types.GoogleSearchRetrieval())
+                    ]
+            resp = client.models.generate_content(
+                model=self._gemini_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(**config_kwargs),
+            )
+            return resp
 
-            text = ""
-            grounding_metadata = None
+        def _call_context_only(prompt: str):
+            from google import genai as genai_new
+            from google.genai import types
+            client = genai_new.Client(api_key=self._gemini_api_key)
+            resp = client.models.generate_content(
+                model=self._gemini_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(temperature=0.0),
+            )
+            return resp
 
-            # Step 1: grounded search (USDA → CoFID → web)
-            try:
-                response = _call_with_grounding(prompt_grounded)
-                text = (response.text or "").strip()
-                grounding_metadata = self._extract_grounding_metadata(response)
-            except Exception as grounding_err:
-                logger.warning(
-                    f"Gemini grounding [{field}] failed for '{food_name}': {grounding_err}"
-                )
-
-            # Step 2: if grounding returned no parseable number, use context-based estimation
-            val = None
+        def _parse_value(text: str) -> Optional[float]:
+            if not text or "NOT_FOUND" in text.upper():
+                return None
             m = re.search(r'(\d+\.?\d*)', text)
             if m:
                 candidate = float(m.group(1))
                 if lo <= candidate <= hi:
-                    val = candidate
+                    return candidate
+            return None
 
-            if val is None:
+        val = None
+        grounding_metadata = None
+        grounding_step = None
+
+        # ── Step 1: USDA / CoFID grounded search ────────────────────────────────
+        try:
+            resp1 = _call_with_grounding(prompt_usda_cofid)
+            text1 = (resp1.text or "").strip()
+            meta1 = self._extract_grounding_metadata(resp1)
+            val = _parse_value(text1)
+            if val is not None:
+                grounding_metadata = meta1
+                grounding_step = "usda_cofid"
                 logger.info(
-                    f"Gemini grounding [{field}] '{food_name}': no value from grounded search, "
-                    f"trying context-based estimation"
+                    f"Gemini [{field}] '{food_name}': found in USDA/CoFID grounding → {val}"
                 )
-                try:
-                    response2 = _call_context_only(prompt_context)
-                    text2 = (response2.text or "").strip()
-                    m2 = re.search(r'(\d+\.?\d*)', text2)
-                    if m2:
-                        candidate2 = float(m2.group(1))
-                        if lo <= candidate2 <= hi:
-                            val = candidate2
-                            grounding_metadata = {"grounded": False, "source": "gemini_context_estimation"}
-                except Exception as context_err:
-                    logger.warning(
-                        f"Gemini context estimation [{field}] failed for '{food_name}': {context_err}"
-                    )
-
-            if val is None:
-                logger.warning(
-                    f"Gemini [{field}] '{food_name}': all attempts failed — no value returned"
-                )
-                return None
-
-            if not self._is_reasonable_gemini_value(food_name, field, val, grounding_metadata):
-                logger.warning(
-                    "Gemini [%s] '%s': rejected implausible value %s",
-                    field, food_name, val,
-                )
-                return None
-
-            logger.info(f"Gemini [{field}] '{food_name}': {val}")
-            self._gemini_cache[cache_key] = val
-            if grounding_metadata and grounding_metadata.get("grounded"):
-                grounding_metadata.update({
-                    "food_name": food_name,
-                    "field": field,
-                    "value": val,
-                    "model": self._gemini_model,
-                })
-                self._gemini_grounding_metadata[cache_key] = grounding_metadata
-            self._persist_gemini_cache_entry(
-                food_name=food_name,
-                field=field,
-                value=val,
-                grounding_metadata=self._gemini_grounding_metadata.get(cache_key),
-            )
-            return val
         except Exception as e:
-            logger.warning(f"Gemini [{field}] failed for '{food_name}': {e}")
-        return None
+            # API-level failure (auth, quota, network) — propagate so caller can raise
+            raise NutritionLookupError(
+                food_name, [field],
+                reason=f"Gemini API error during USDA/CoFID grounding: {e}",
+            ) from e
+
+        # ── Step 2: Broader web search (only if Step 1 found nothing) ───────────
+        if val is None:
+            logger.info(
+                f"Gemini [{field}] '{food_name}': not found in USDA/CoFID, trying web search"
+            )
+            try:
+                resp2 = _call_with_grounding(prompt_web)
+                text2 = (resp2.text or "").strip()
+                meta2 = self._extract_grounding_metadata(resp2)
+                val = _parse_value(text2)
+                if val is not None:
+                    grounding_metadata = meta2
+                    grounding_step = "web_search"
+                    # Extract source URL from response text if present
+                    src_m = re.search(r'\(source:\s*([^)]+)\)', text2, re.IGNORECASE)
+                    if src_m and grounding_metadata:
+                        grounding_metadata["web_source"] = src_m.group(1).strip()
+                    logger.info(
+                        f"Gemini [{field}] '{food_name}': found via web search → {val} "
+                        f"(source: {grounding_metadata.get('web_source') if grounding_metadata else 'unknown'})"
+                    )
+            except Exception as e:
+                raise NutritionLookupError(
+                    food_name, [field],
+                    reason=f"Gemini API error during web search grounding: {e}",
+                ) from e
+
+        # ── Step 3: Context-based estimation using dish context ─────────────────
+        if val is None:
+            logger.info(
+                f"Gemini [{field}] '{food_name}': web search also found nothing, "
+                f"using context-based estimation (meal_context={meal_context!r})"
+            )
+            try:
+                resp3 = _call_context_only(prompt_context)
+                text3 = (resp3.text or "").strip()
+                val = _parse_value(text3)
+                if val is not None:
+                    grounding_metadata = {
+                        "grounded": False,
+                        "source": "gemini_context_estimation",
+                        "meal_context": meal_context,
+                    }
+                    grounding_step = "context_estimation"
+                    logger.info(
+                        f"Gemini [{field}] '{food_name}': context estimation → {val}"
+                    )
+            except Exception as e:
+                raise NutritionLookupError(
+                    food_name, [field],
+                    reason=f"Gemini API error during context estimation: {e}",
+                ) from e
+
+        if val is None:
+            logger.warning(
+                f"Gemini [{field}] '{food_name}': all 3 steps returned no value"
+            )
+            return None
+
+        if not self._is_reasonable_gemini_value(food_name, field, val, grounding_metadata):
+            logger.warning(
+                "Gemini [%s] '%s': rejected implausible value %s (step=%s)",
+                field, food_name, val, grounding_step,
+            )
+            return None
+
+        logger.info(f"Gemini [{field}] '{food_name}': {val} (via {grounding_step})")
+        self._gemini_cache[cache_key] = val
+        if grounding_metadata and grounding_metadata.get("grounded"):
+            grounding_metadata.update({
+                "food_name": food_name,
+                "field": field,
+                "value": val,
+                "model": self._gemini_model,
+                "grounding_step": grounding_step,
+            })
+            self._gemini_grounding_metadata[cache_key] = grounding_metadata
+        elif grounding_metadata and grounding_step in ("web_search", "context_estimation"):
+            grounding_metadata.update({
+                "food_name": food_name,
+                "field": field,
+                "value": val,
+                "model": self._gemini_model,
+                "grounding_step": grounding_step,
+            })
+            self._gemini_grounding_metadata[cache_key] = grounding_metadata
+        self._persist_gemini_cache_entry(
+            food_name=food_name,
+            field=field,
+            value=val,
+            grounding_metadata=self._gemini_grounding_metadata.get(cache_key),
+        )
+        return val
 
     def _is_reasonable_gemini_value(
         self,
@@ -2284,10 +2370,10 @@ class NutritionRAG:
     # Public API
     # ──────────────────────────────────────────────────────────────────────────
 
-    def get_density(self, food_name: str, crop_image: Optional[Image.Image] = None) -> float:
-        return self._get_density_with_match(food_name, crop_image=crop_image)[0]
+    def get_density(self, food_name: str, crop_image: Optional[Image.Image] = None, meal_context: Optional[str] = None) -> float:
+        return self._get_density_with_match(food_name, crop_image=crop_image, meal_context=meal_context)[0]
 
-    def _get_density_with_match(self, food_name: str, top_k: int = 10, crop_image: Optional[Image.Image] = None):
+    def _get_density_with_match(self, food_name: str, top_k: int = 10, crop_image: Optional[Image.Image] = None, meal_context: Optional[str] = None):
         """Return (density_g_ml, matched_name, source, entry|None)."""
         if self._use_unified:
             density, matched, source, entry = self._lookup_unified(food_name, 'density_g_ml', top_k, crop_image=crop_image)
@@ -2307,17 +2393,17 @@ class NutritionRAG:
         if branded_density is not None:
             return float(branded_density), branded_matched, branded_source, branded_entry
 
-        density = self._gemini_lookup(food_name, 'density_g_ml')
+        density = self._gemini_lookup(food_name, 'density_g_ml', meal_context=meal_context)
         if density is not None:
             return density, food_name, "gemini_grounding", None
 
         logger.warning(f"No density found for '{food_name}'")
         return None, None, None, None
 
-    def get_calories_per_100g(self, food_name: str, crop_image: Optional[Image.Image] = None) -> float:
-        return self._get_calories_with_match(food_name, crop_image=crop_image)[0]
+    def get_calories_per_100g(self, food_name: str, crop_image: Optional[Image.Image] = None, meal_context: Optional[str] = None) -> float:
+        return self._get_calories_with_match(food_name, crop_image=crop_image, meal_context=meal_context)[0]
 
-    def _get_calories_with_match(self, food_name: str, top_k: int = 10, crop_image: Optional[Image.Image] = None):
+    def _get_calories_with_match(self, food_name: str, top_k: int = 10, crop_image: Optional[Image.Image] = None, meal_context: Optional[str] = None):
         """Return (kcal_per_100g, matched_name, source). Entry not needed here."""
         if self._use_unified:
             kcal, matched, source, _ = self._lookup_unified(food_name, 'calories_per_100g', top_k, crop_image=crop_image)
@@ -2333,15 +2419,15 @@ class NutritionRAG:
         if branded_kcal is not None:
             return float(branded_kcal), branded_matched, branded_source
 
-        kcal = self._gemini_lookup(food_name, 'calories_per_100g')
+        kcal = self._gemini_lookup(food_name, 'calories_per_100g', meal_context=meal_context)
         if kcal is not None:
             return kcal, food_name, "gemini_grounding"
 
         logger.warning(f"No calories found for '{food_name}'")
         return None, None, None
 
-    def get_nutrition(self, food_name: str, volume_ml: float, crop_image: Optional[Image.Image] = None) -> dict:
-        density, kcal_per_100g, density_matched, density_source, calorie_matched, calorie_source = self._resolve_nutrition(food_name, crop_image=crop_image)
+    def get_nutrition(self, food_name: str, volume_ml: float, crop_image: Optional[Image.Image] = None, meal_context: Optional[str] = None) -> dict:
+        density, kcal_per_100g, density_matched, density_source, calorie_matched, calorie_source = self._resolve_nutrition(food_name, crop_image=crop_image, meal_context=meal_context)
         mass_g     = volume_ml * density
         total_kcal = (mass_g / 100.0) * kcal_per_100g
         return {
@@ -2357,7 +2443,7 @@ class NutritionRAG:
             "calorie_source":    calorie_source,
         }
 
-    def _resolve_nutrition(self, food_name: str, crop_image: Optional[Image.Image] = None):
+    def _resolve_nutrition(self, food_name: str, crop_image: Optional[Image.Image] = None, meal_context: Optional[str] = None):
         """
         ZOE-pipeline-aligned resolution — always kcal-first, then density separately.
 
@@ -2403,7 +2489,7 @@ class NutritionRAG:
                 calorie_matched = branded_matched
                 calorie_source  = branded_source
             else:
-                kcal_per_100g_gem = self._gemini_lookup(food_name, 'calories_per_100g')
+                kcal_per_100g_gem = self._gemini_lookup(food_name, 'calories_per_100g', meal_context=meal_context)
                 if kcal_per_100g_gem is not None:
                     kcal_per_100g   = kcal_per_100g_gem
                     calorie_matched = food_name
@@ -2433,7 +2519,7 @@ class NutritionRAG:
         ))
 
         for dq in density_queries:
-            d, dm, ds, _de = self._get_density_with_match(dq, crop_image=crop_image)
+            d, dm, ds, _de = self._get_density_with_match(dq, crop_image=crop_image, meal_context=meal_context)
             if d is not None and float(d) > 0:
                 density, density_matched, density_source = d, dm, ds
                 logger.info(
@@ -2454,6 +2540,7 @@ class NutritionRAG:
         mass_g: Optional[float] = None,
         quantity: int = 1,
         crop_image: Optional[Image.Image] = None,
+        meal_context: Optional[str] = None,
     ) -> dict:
         rag_candidates = [
             {
@@ -2467,7 +2554,7 @@ class NutritionRAG:
                 self._retrieve_candidates(food_name, crop_image=crop_image, top_k=8),
             )[:5]
         ] if self._use_unified else []
-        density, kcal_per_100g, density_matched, density_source, calorie_matched, calorie_source = self._resolve_nutrition(food_name, crop_image=crop_image)
+        density, kcal_per_100g, density_matched, density_source, calorie_matched, calorie_source = self._resolve_nutrition(food_name, crop_image=crop_image, meal_context=meal_context)
         if mass_g is None or mass_g <= 0:
             mass_g = volume_ml * density
         total_kcal = (mass_g / 100.0) * kcal_per_100g

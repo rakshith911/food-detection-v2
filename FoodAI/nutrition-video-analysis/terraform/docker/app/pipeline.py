@@ -536,9 +536,10 @@ class NutritionVideoPipeline:
         is_incremental: bool = False,
         crop_image: Optional[Image.Image] = None,
         job_id: str = "",
+        meal_context: Optional[str] = None,
     ) -> dict:
         rag = self.models.rag
-        nutrition = rag.get_nutrition_for_food(label, volume_ml, quantity=1, crop_image=crop_image)
+        nutrition = rag.get_nutrition_for_food(label, volume_ml, quantity=1, crop_image=crop_image, meal_context=meal_context)
         if role_tag == "base" and origin == "visible_base":
             nutrition = self._verify_visible_rag_match_with_gemini(
                 label=label,
@@ -6716,6 +6717,14 @@ Example:
         total_mass = 0
         total_calories = 0
 
+        # Build meal context string from all food labels in this frame (used by Gemini context estimation)
+        all_food_labels = [
+            item_data['label']
+            for item_data in tracking_results['objects'].values()
+            if item_data.get('label') and not _skip_re.search(item_data['label'].lower())
+        ]
+        meal_context = ", ".join(all_food_labels) if all_food_labels else None
+
         for item_key, item_data in tracking_results['objects'].items():
             try:
                 label = item_data['label']
@@ -6733,7 +6742,7 @@ Example:
                 # Priority 1: Gemini volume estimate (from depth pass) + FAO density + USDA kcal
                 gemini_volume_ml = item_data.get('gemini_volume_ml')
                 if gemini_volume_ml and gemini_volume_ml > 0:
-                    nutrition = rag.get_nutrition_for_food(label, gemini_volume_ml, quantity=int(quantity))
+                    nutrition = rag.get_nutrition_for_food(label, gemini_volume_ml, quantity=int(quantity), meal_context=meal_context)
                     density = float(nutrition.get('density_g_per_ml') or 0.0)
                     kcal_per_100g = float(nutrition.get('calories_per_100g') or 0.0)
                     mass_g = float(nutrition.get('mass_g') or 0.0)
@@ -6756,7 +6765,7 @@ Example:
                     # Priority 2: fallback to Gemini detection grams + USDA kcal
                     gemini_grams_g = item_data['statistics'].get('gemini_grams_g')
                     nutrition = rag.get_nutrition_for_food(
-                        label, max_volume, mass_g=gemini_grams_g, quantity=quantity
+                        label, max_volume, mass_g=gemini_grams_g, quantity=quantity, meal_context=meal_context
                     )
                     logger.info(
                         f"[{job_id}] '{label}': fallback mass={nutrition.get('mass_g', 0):.1f}g "
