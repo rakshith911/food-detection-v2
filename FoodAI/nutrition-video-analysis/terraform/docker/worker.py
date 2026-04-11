@@ -641,12 +641,6 @@ def download_models_from_s3():
     
     # Define models to download
     models = [
-        ('checkpoints/sam2.1_hiera_base_plus.pt', '/app/checkpoints/sam2.1_hiera_base_plus.pt'),
-        ('checkpoints/sam2.1_hiera_large.pt', '/app/checkpoints/sam2.1_hiera_large.pt'),
-        ('checkpoints/sam2.1_hiera_small.pt', '/app/checkpoints/sam2.1_hiera_small.pt'),
-        ('checkpoints/sam2.1_hiera_tiny.pt', '/app/checkpoints/sam2.1_hiera_tiny.pt'),
-        ('gdino_checkpoints/groundingdino_swint_ogc.pth', '/app/gdino_checkpoints/groundingdino_swint_ogc.pth'),
-        ('gdino_checkpoints/groundingdino_swinb_cogcoor.pth', '/app/gdino_checkpoints/groundingdino_swinb_cogcoor.pth'),
         # Unified RAG index (USDA + CoFID) plus separate FAO density fallback
         ('rag/unified_faiss.index', '/app/data/rag/unified_faiss.index'),
         ('rag/unified_foods.json', '/app/data/rag/unified_foods.json'),
