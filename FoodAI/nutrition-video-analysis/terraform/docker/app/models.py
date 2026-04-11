@@ -473,7 +473,8 @@ class ModelManager:
         """Preload all models (useful for container warmup)"""
         logger.info("Preloading all models...")
         _ = self.florence2
-        _ = self.sam2
+        if not getattr(self.config, "USE_PRODUCTION_IMAGE_PIPELINE", True):
+            _ = self.sam2
         _ = self.sam3
         _ = self.depth_anything
         _ = self.zoedepth

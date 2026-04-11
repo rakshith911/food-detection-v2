@@ -1295,6 +1295,103 @@ class NutritionRAG:
                 return reordered
         return candidates
 
+    def _find_entry_by_description(self, description: str) -> Optional[dict]:
+        target = (description or "").strip().lower()
+        if not target:
+            return None
+
+        for entry in self._unified_foods:
+            if (entry.get("description") or "").strip().lower() == target:
+                return self._derive_usda_density_entry(entry)
+
+        for entry in self._usda_foods:
+            if (entry.get("description") or "").strip().lower() == target:
+                return self._derive_usda_density_entry(entry)
+
+        return None
+
+    @staticmethod
+    def _score_verifier_description(query: str, description: str) -> float:
+        query_text = (query or "").strip().lower()
+        desc_text = (description or "").strip().lower()
+        if not query_text or not desc_text:
+            return float("-inf")
+
+        query_words = [word for word in re.findall(r"[a-z0-9]+", query_text) if len(word) > 1]
+        desc_words = set(re.findall(r"[a-z0-9]+", desc_text))
+        score = 0.0
+        if query_text == desc_text:
+            score += 20.0
+        if query_text in desc_text:
+            score += 8.0
+        for word in query_words:
+            if word in desc_words:
+                score += 2.5
+        if "powder" in desc_text:
+            score -= 8.0
+        if "sauce" in desc_text and "sauce" not in query_text:
+            score -= 4.0
+        if "frozen" in desc_text and "frozen" not in query_text:
+            score -= 2.0
+        return score
+
+    def get_verifier_candidates(
+        self,
+        food_name: str,
+        chosen_description: Optional[str],
+        rag_candidates: Optional[list[dict]],
+        limit: int = 8,
+    ) -> list[dict]:
+        descriptions: list[str] = []
+
+        def add_description(text: Optional[str]) -> None:
+            normalized = (text or "").strip()
+            if normalized and normalized not in descriptions:
+                descriptions.append(normalized)
+
+        add_description(chosen_description)
+        for candidate in rag_candidates or []:
+            add_description(candidate.get("description"))
+
+        candidate_pool = self._unified_foods or self._usda_foods
+        lexical_ranked = sorted(
+            candidate_pool,
+            key=lambda food: self._score_verifier_description(food_name, food.get("description") or ""),
+            reverse=True,
+        )
+        for food in lexical_ranked[: limit * 3]:
+            add_description(food.get("description"))
+            if len(descriptions) >= limit:
+                break
+
+        verifier_candidates = []
+        for description in descriptions[:limit]:
+            entry = self._find_entry_by_description(description)
+            if not entry:
+                continue
+            verifier_candidates.append(
+                {
+                    "description": description,
+                    "calories_per_100g": float(entry.get("calories_per_100g") or 0.0),
+                    "fat_per_100g": float(entry.get("fat_g") or 0.0),
+                    "carb_per_100g": float(entry.get("carbs_g") or 0.0),
+                    "protein_per_100g": float(entry.get("protein_g") or 0.0),
+                }
+            )
+        return verifier_candidates
+
+    def get_usda_candidate_by_description(self, description: str) -> Optional[dict]:
+        entry = self._find_entry_by_description(description)
+        if not entry:
+            return None
+        return {
+            "description": entry.get("description"),
+            "calories_per_100g": float(entry.get("calories_per_100g") or 0.0),
+            "fat_per_100g": float(entry.get("fat_g") or 0.0),
+            "carb_per_100g": float(entry.get("carbs_g") or 0.0),
+            "protein_per_100g": float(entry.get("protein_g") or 0.0),
+        }
+
     # ──────────────────────────────────────────────────────────────────────────
     # Unified lookup (density or calories)
     # ──────────────────────────────────────────────────────────────────────────
@@ -2350,6 +2447,18 @@ class NutritionRAG:
         quantity: int = 1,
         crop_image: Optional[Image.Image] = None,
     ) -> dict:
+        rag_candidates = [
+            {
+                "description": candidate["matched"],
+                "clip_sim": round(float(candidate["clip_sim"]), 4),
+                "cross_score": round(float(candidate["cross_score"]), 4),
+                "selection_score": round(float(candidate["selection_score"]), 4),
+            }
+            for candidate in self._apply_lexical_override(
+                self._normalize_food_name(food_name),
+                self._retrieve_candidates(food_name, crop_image=crop_image, top_k=8),
+            )[:5]
+        ] if self._use_unified else []
         density, kcal_per_100g, density_matched, density_source, calorie_matched, calorie_source = self._resolve_nutrition(food_name, crop_image=crop_image)
         if mass_g is None or mass_g <= 0:
             mass_g = volume_ml * density
@@ -2374,4 +2483,5 @@ class NutritionRAG:
                 self.get_grounding_metadata(food_name, 'calories_per_100g')
                 if calorie_source == "gemini_grounding" else None
             ),
+            "rag_candidates": rag_candidates,
         }

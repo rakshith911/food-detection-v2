@@ -64,3 +64,24 @@ RAG/
 # local scratch copies
 /clip_rag_module.py
 /nutrition_lookup.py
+
+# large raw nutrition datasets
+/FoodData_Central_csv_2025-12-18/
+/McCance_Widdowsons_Composition_of_Foods_Integrated_Dataset_2021..xlsx
+
+# generated nutrition database artifacts
+/unified_data/unified_faiss.index
+/unified_data/unified_food_names.json
+/unified_data/unified_foods.json
+/unified_data/unified_foods_full.json
+/unified_data/build_report.json
+/unified_data/gemini_density_cache.json
+/branded_data/
+/fao_data/fao_foods.json
+
+# benchmark downloads and run outputs
+/FoodAI/nutrition-video-analysis/terraform/docker/benchmark_eval/datasets/
+/FoodAI/nutrition-video-analysis/terraform/docker/benchmark_eval/results/
+
+# python cache
+/scripts/__pycache__/
