@@ -1,12 +1,14 @@
 """
 Nutrition RAG System
-Single unified FAISS index (FAO + USDA + CoFID) with cross-encoder re-ranking.
-Google Search grounding (via Gemini) is the only fallback — no hardcoded keyword dicts.
+Unified FAISS index (USDA + CoFID) with cross-encoder re-ranking, plus a
+separate FAO density fallback.
+Google Search grounding (via Gemini) is the only web fallback.
 """
 import csv
 import json
 import logging
 import re
+import tempfile
 import numpy as np
 from pathlib import Path
 from typing import Any, Optional
@@ -25,16 +27,17 @@ logger = logging.getLogger(__name__)
 _MIN_FAISS_SIM = 0.45
 _MIN_RERANK_SCORE = -5.0
 
-# Per-source minimum similarity — FAO has only 634 entries and can match off-target
-# at lower similarities; USDA/CoFID are larger and more tolerant.
+# Per-source minimum similarity — FAO is a small density-only fallback set and
+# needs a stricter threshold than the main USDA/CoFID retrieval DB.
 _MIN_SIM_BY_SOURCE = {'fao': 0.65, 'usda': 0.50, 'cofid': 0.60}
 
 class NutritionRAG:
     """
     Unified nutrition lookup:
-      1. FAISS search over FAO + USDA + CoFID (11k+ foods)
+      1. FAISS search over unified USDA + CoFID for kcal and density
       2. Cross-encoder re-ranking of top candidates
-      3. Gemini grounding (Google Search) as sole fallback
+      3. Separate FAO fallback for density only
+      4. Gemini grounding (Google Search) as sole web fallback
     """
 
     def __init__(
@@ -47,12 +50,14 @@ class NutritionRAG:
         fao_faiss_path: Optional[Path] = None,
         fao_density_path: Optional[Path] = None,
         fao_names_path: Optional[Path] = None,
+        branded_foods_path: Optional[Path] = None,
         usda_faiss_path: Optional[Path] = None,
         usda_foods_path: Optional[Path] = None,
         usda_names_path: Optional[Path] = None,
         usda_density_faiss_path: Optional[Path] = None,
         usda_density_path: Optional[Path] = None,
         usda_density_names_path: Optional[Path] = None,
+        gemini_density_cache_path: Optional[Path] = None,
         gemini_api_key: Optional[str] = None,
         gemini_model: str = "gemini-flash-latest",
         embedding_model: str = "all-MiniLM-L6-v2",
@@ -67,9 +72,13 @@ class NutritionRAG:
         self._fao_faiss_path    = Path(fao_faiss_path)    if fao_faiss_path    else None
         self._fao_density_path  = Path(fao_density_path)  if fao_density_path  else None
         self._fao_names_path    = Path(fao_names_path)    if fao_names_path    else None
+        self._branded_foods_path = Path(branded_foods_path) if branded_foods_path else None
         self._usda_faiss_path   = Path(usda_faiss_path)   if usda_faiss_path   else None
         self._usda_foods_path   = Path(usda_foods_path)   if usda_foods_path   else None
         self._usda_names_path   = Path(usda_names_path)   if usda_names_path   else None
+        self._gemini_density_cache_path = (
+            Path(gemini_density_cache_path) if gemini_density_cache_path else None
+        )
 
         self._gemini_api_key    = gemini_api_key
         self._gemini_model      = gemini_model
@@ -92,6 +101,7 @@ class NutritionRAG:
         self._fao_index   = None
         self._fao_density = []
         self._fao_names   = []
+        self._branded_foods: Optional[list[dict]] = None
         self._usda_index  = None
         self._usda_foods  = []
         self._usda_names  = []
@@ -99,6 +109,7 @@ class NutritionRAG:
         self._use_unified = False
         self._gemini_cache: dict = {}  # food_name+field -> value
         self._gemini_grounding_metadata: dict = {}  # food_name+field -> grounding metadata
+        self._gemini_persistent_cache: dict = {}
         self._usda_desc_to_fdc_id: Optional[dict[str, str]] = None
         self._usda_portion_index: Optional[dict[str, list[dict[str, str]]]] = None
         self._usda_measure_units: Optional[dict[str, str]] = None
@@ -111,6 +122,7 @@ class NutritionRAG:
     def load(self):
         """Load indexes and retrieval/reranking models."""
         logger.info("Loading NutritionRAG...")
+        self._load_persistent_gemini_cache()
 
         self._embedder = SentenceTransformer(self._embedding_model)
         logger.info(f"  Embedding model: {self._embedding_model}")
@@ -130,8 +142,15 @@ class NutritionRAG:
             with open(self._unified_names_path) as f:
                 self._unified_names = json.load(f)
             self._use_unified = True
-            logger.info(f"  Unified index:   {len(self._unified_foods)} entries (FAO+USDA+CoFID)")
+            logger.info(f"  Unified index:   {len(self._unified_foods)} entries (USDA+CoFID)")
             self._build_clip_index()
+            if self._fao_faiss_path and self._fao_faiss_path.exists():
+                self._fao_index = faiss.read_index(str(self._fao_faiss_path))
+                with open(self._fao_density_path) as f:
+                    self._fao_density = json.load(f)
+                with open(self._fao_names_path) as f:
+                    self._fao_names = json.load(f)
+                logger.info(f"  FAO fallback:   {len(self._fao_density)} density entries")
         else:
             # Fall back to separate FAO + USDA indexes
             logger.info("  Unified index not found — falling back to separate FAO + USDA indexes")
@@ -151,6 +170,211 @@ class NutritionRAG:
                 logger.info(f"  USDA index:      {len(self._usda_foods)} entries")
 
         logger.info("NutritionRAG ready")
+
+    def _ensure_branded_foods_loaded(self) -> None:
+        if self._branded_foods is not None:
+            return
+        self._branded_foods = []
+        if not self._branded_foods_path or not self._branded_foods_path.exists():
+            return
+        try:
+            with open(self._branded_foods_path, encoding="utf-8") as f:
+                self._branded_foods = json.load(f)
+            logger.info("  Branded fallback: %s entries", len(self._branded_foods))
+        except Exception as exc:
+            logger.warning("Failed to load branded fallback dataset: %s", exc)
+            self._branded_foods = []
+
+    def _lookup_branded_fallback(
+        self,
+        food_name: str,
+        field: str,
+    ):
+        self._ensure_branded_foods_loaded()
+        if not self._branded_foods:
+            return None, None, None, None
+
+        normalized = self._normalize_food_name(food_name)
+        query_tokens = self._tokenize_words(normalized, keep_generic=True)
+        candidates = []
+
+        for entry in self._branded_foods:
+            value = entry.get(field)
+            if value is None:
+                continue
+            if field == "density_g_ml" and not self._is_reliable_density_entry(entry):
+                continue
+
+            matched = entry.get("description") or ""
+            if not matched:
+                continue
+            matched_lower = matched.lower()
+            matched_norm = self._normalize_food_name(matched_lower)
+            if not self._words_overlap(normalized, matched_lower):
+                continue
+
+            text_blob = " | ".join(
+                str(entry.get(key) or "")
+                for key in ("description", "ingredients_text", "household_serving_fulltext", "brand_name")
+            ).lower()
+            matched_tokens = self._tokenize_words(text_blob, keep_generic=True)
+
+            score = 0.0
+            if matched_norm == normalized:
+                score += 120.0
+            if normalized and normalized in matched_norm:
+                score += 50.0
+
+            overlap = len(query_tokens & matched_tokens)
+            missing = len(query_tokens - matched_tokens)
+            score += overlap * 8.0
+            score -= missing * 6.0
+            score += self._compatibility_adjustment(normalized, matched_lower, field=field)
+
+            if self._is_mixed_dish_candidate_for_condiment_query(normalized, matched_lower):
+                score -= 40.0
+
+            if score < 20.0:
+                continue
+
+            candidates.append((score, float(value), matched, entry))
+
+        if not candidates:
+            return None, None, None, None
+
+        candidates.sort(reverse=True, key=lambda item: item[0])
+        best_score, value, matched, entry = candidates[0]
+        source = "branded_lexical"
+        if field == "density_g_ml":
+            source += f",{entry.get('density_method', 'unknown')}"
+        logger.info(
+            f"[{field}] '{food_name}' branded fallback → '{matched}' "
+            f"({source}, score={best_score:.2f}): {value}"
+        )
+        return value, matched, source, entry
+
+    @staticmethod
+    def _normalize_cache_key(food_name: str, field: str) -> str:
+        return f"{food_name.strip().lower()}::{field}"
+
+    def _load_persistent_gemini_cache(self) -> None:
+        self._gemini_persistent_cache = {}
+        if not self._gemini_density_cache_path or not self._gemini_density_cache_path.exists():
+            return
+        try:
+            with open(self._gemini_density_cache_path, encoding="utf-8") as f:
+                payload = json.load(f)
+            entries = payload.get("entries", []) if isinstance(payload, dict) else payload
+            if not isinstance(entries, list):
+                logger.warning(
+                    "Gemini density cache file had unexpected format: %s",
+                    self._gemini_density_cache_path,
+                )
+                return
+            loaded = 0
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                query = (entry.get("normalized_query") or entry.get("query") or "").strip().lower()
+                field = (entry.get("field") or "").strip()
+                value = entry.get("value")
+                if not query or not field or value is None:
+                    continue
+                try:
+                    numeric_value = float(value)
+                except (TypeError, ValueError):
+                    continue
+                key = self._normalize_cache_key(query, field)
+                self._gemini_persistent_cache[key] = {
+                    **entry,
+                    "normalized_query": query,
+                    "field": field,
+                    "value": numeric_value,
+                }
+                if entry.get("grounding_metadata"):
+                    self._gemini_grounding_metadata[key] = json.loads(
+                        json.dumps(entry["grounding_metadata"])
+                    )
+                loaded += 1
+            logger.info("  Gemini density cache: %s entries", loaded)
+        except Exception as exc:
+            logger.warning("Failed to load Gemini density cache: %s", exc)
+
+    def _persist_gemini_cache_entry(
+        self,
+        food_name: str,
+        field: str,
+        value: float,
+        grounding_metadata: Optional[dict] = None,
+        source_type: str = "gemini_grounding",
+    ) -> None:
+        if not self._gemini_density_cache_path:
+            return
+        key = self._normalize_cache_key(food_name, field)
+        entry = {
+            "query": food_name,
+            "normalized_query": food_name.strip().lower(),
+            "field": field,
+            "value": float(value),
+            "source_type": source_type,
+            "model": self._gemini_model,
+            "grounding_metadata": json.loads(json.dumps(grounding_metadata)) if grounding_metadata else None,
+        }
+        self._gemini_persistent_cache[key] = entry
+        try:
+            self._gemini_density_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "version": 1,
+                "entries": sorted(
+                    self._gemini_persistent_cache.values(),
+                    key=lambda item: (item.get("field") or "", item.get("normalized_query") or ""),
+                ),
+            }
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=str(self._gemini_density_cache_path.parent),
+                delete=False,
+            ) as tmp:
+                json.dump(payload, tmp, indent=2, ensure_ascii=True)
+                tmp.write("\n")
+                temp_path = Path(tmp.name)
+            temp_path.replace(self._gemini_density_cache_path)
+        except Exception as exc:
+            logger.warning("Failed to persist Gemini density cache entry for '%s': %s", food_name, exc)
+            try:
+                if 'temp_path' in locals() and temp_path.exists():
+                    temp_path.unlink()
+            except Exception:
+                pass
+
+    def _get_cached_gemini_value(self, food_name: str, field: str) -> Optional[float]:
+        runtime_key = f"{food_name}::{field}"
+        if runtime_key in self._gemini_cache:
+            value = self._gemini_cache[runtime_key]
+            metadata = self._gemini_grounding_metadata.get(runtime_key)
+            if self._is_reasonable_gemini_value(food_name, field, value, metadata):
+                return value
+            self._gemini_cache.pop(runtime_key, None)
+            self._gemini_grounding_metadata.pop(runtime_key, None)
+        persistent_key = self._normalize_cache_key(food_name, field)
+        cached = self._gemini_persistent_cache.get(persistent_key)
+        if not cached:
+            return None
+        value = cached.get("value")
+        if value is None:
+            return None
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            return None
+        metadata = cached.get("grounding_metadata")
+        if not self._is_reasonable_gemini_value(food_name, field, numeric_value, metadata):
+            return None
+        self._gemini_cache[runtime_key] = numeric_value
+        if metadata:
+            self._gemini_grounding_metadata[runtime_key] = json.loads(json.dumps(metadata))
+        return numeric_value
 
     @staticmethod
     def _to_numpy(features) -> np.ndarray:
@@ -245,12 +469,35 @@ class NutritionRAG:
         except (TypeError, ValueError):
             return None
 
-    @classmethod
-    def _portion_volume_ml(cls, row: dict[str, str], measure_name: str) -> Optional[tuple[float, str]]:
-        amount = cls._safe_float(row.get('amount'))
-        if amount is None or amount <= 0:
+    @staticmethod
+    def _parse_portion_amount(text: str) -> Optional[float]:
+        text = (text or '').strip().lower()
+        if not text:
             return None
 
+        mixed = re.match(r'^(\d+)\s+(\d+)/(\d+)\b', text)
+        if mixed:
+            whole = float(mixed.group(1))
+            num = float(mixed.group(2))
+            den = float(mixed.group(3))
+            if den:
+                return whole + (num / den)
+
+        fraction = re.match(r'^(\d+)/(\d+)\b', text)
+        if fraction:
+            num = float(fraction.group(1))
+            den = float(fraction.group(2))
+            if den:
+                return num / den
+
+        numeric = re.match(r'^(\d+(?:\.\d+)?)\b', text)
+        if numeric:
+            return float(numeric.group(1))
+
+        return None
+
+    @classmethod
+    def _portion_volume_ml(cls, row: dict[str, str], measure_name: str) -> Optional[tuple[float, str]]:
         text = " ".join(
             part for part in (
                 measure_name,
@@ -259,6 +506,14 @@ class NutritionRAG:
             )
             if part
         ).lower()
+
+        amount = cls._safe_float(row.get('amount'))
+        if amount is None or amount <= 0:
+            amount = cls._parse_portion_amount(row.get('portion_description') or '')
+        if amount is None or amount <= 0:
+            amount = cls._parse_portion_amount(text)
+        if amount is None or amount <= 0:
+            return None
 
         unit_candidates = (
             ('milliliter', 1.0, 'ml'),
@@ -305,6 +560,7 @@ class NutritionRAG:
         self._usda_measure_units = {}
 
         raw_dir_candidates = [
+            Path(__file__).resolve().parents[4] / 'FoodData_Central_csv_2025-12-18',
             Path(__file__).resolve().parents[4] / 'usda_data' / 'usda_raw',
             Path(__file__).resolve().parent / 'data' / 'usda_raw',
         ]
@@ -509,6 +765,7 @@ class NutritionRAG:
     _PICKLED_TERMS = {'pickled', 'pickle', 'pickles', 'brined', 'fermented'}
     _COOKED_TERMS = {'cooked', 'roasted', 'fried', 'grilled', 'baked', 'steamed', 'boiled', 'sauteed', 'sautéed'}
     _RAWISH_TERMS = {'raw', 'fresh'}
+    _SWEET_TERMS = {'sweet', 'dessert', 'sugared', 'sugary', 'syrup', 'candied'}
     _DIP_SPREAD_TERMS = {
         'hummus', 'tzatziki', 'ganoush', 'baba', 'dip', 'spread', 'puree', 'purée',
         'aioli', 'mayo', 'mayonnaise',
@@ -541,6 +798,15 @@ class NutritionRAG:
     _WHOLE_DISH_TERMS = {
         'pie', 'platter', 'bowl', 'dinner', 'casserole', 'lasagna', 'burger',
         'sandwich', 'entree', 'meal',
+    }
+    _PROCESSED_PRODUCE_TERMS = {
+        'puree', 'purée', 'paste', 'concentrate', 'canned', 'stewed',
+        'sauce', 'soup', 'juice', 'dried', 'sun-dried', 'powder',
+    }
+    _VARIETY_TERMS = {
+        'grape', 'cherry', 'plum', 'roma', 'pear', 'heirloom',
+        'green', 'spring', 'scallion', 'tops', 'top', 'only',
+        'wild', 'brown', 'red', 'black',
     }
     _RAW_QUERY_TERMS = {
         'raw', 'uncooked', 'dry', 'unprepared', 'powder', 'mix', 'packet', 'instant',
@@ -579,6 +845,27 @@ class NutritionRAG:
         'onion', 'onions', 'beet', 'beets', 'fennel', 'endive',
         'watercress', 'radicchio', 'chard', 'leek', 'leeks',
     }
+    _PRODUCE_TOKEN_ALIASES = {
+        'tomato': {'tomato', 'tomatoes'},
+        'tomatoes': {'tomato', 'tomatoes'},
+        'onion': {'onion', 'onions'},
+        'onions': {'onion', 'onions'},
+        'cucumber': {'cucumber', 'cucumbers'},
+        'cucumbers': {'cucumber', 'cucumbers'},
+        'pepper': {'pepper', 'peppers'},
+        'peppers': {'pepper', 'peppers'},
+        'carrot': {'carrot', 'carrots'},
+        'carrots': {'carrot', 'carrots'},
+        'beet': {'beet', 'beets'},
+        'beets': {'beet', 'beets'},
+        'leek': {'leek', 'leeks'},
+        'leeks': {'leek', 'leeks'},
+    }
+    _CANONICAL_PRODUCE_MODIFIERS = {
+        'red', 'ripe', 'year', 'round', 'average', 'white', 'yellow', 'green',
+        'whole', 'mature', 'baby', 'sweet', 'large', 'small', 'medium',
+    }
+    _DISH_QUERY_EXCLUDED = {'with', 'made', 'and', 'or', 'style', 'homemade', 'home'}
 
     @classmethod
     def _tokenize_words(cls, text: str, *, keep_generic: bool = False) -> set[str]:
@@ -642,6 +929,7 @@ class NutritionRAG:
             "vegetable": has_any(cls._VEGETABLE_TERMS),
             "dairy": has_any(cls._DAIRY_TERMS),
             "whole_dish": has_any(cls._WHOLE_DISH_TERMS),
+            "sweet": has_any(cls._SWEET_TERMS),
         }
 
     @classmethod
@@ -666,12 +954,28 @@ class NutritionRAG:
                 score += 16.0
             elif matched_profile["whole_dish"] or matched_profile["vegetable"]:
                 score -= 24.0
+            query_tokens = cls._tokenize_words(query_lower, keep_generic=True)
+            matched_tokens = cls._tokenize_words(matched_lower, keep_generic=True)
+            extra_protein = (matched_tokens & cls._PROTEIN_TERMS) - query_tokens
+            extra_starch = (matched_tokens & cls._STARCH_TERMS) - query_tokens
+            if extra_protein:
+                score -= 26.0 * len(extra_protein)
+            if extra_starch:
+                score -= 20.0 * len(extra_starch)
 
         if query_profile["sauce"]:
             if matched_profile["sauce"] or matched_profile["dip_or_spread"]:
                 score += 12.0
             elif matched_profile["whole_dish"] or matched_profile["vegetable"]:
                 score -= 18.0
+            query_tokens = cls._tokenize_words(query_lower, keep_generic=True)
+            matched_tokens = cls._tokenize_words(matched_lower, keep_generic=True)
+            extra_protein = (matched_tokens & cls._PROTEIN_TERMS) - query_tokens
+            extra_starch = (matched_tokens & cls._STARCH_TERMS) - query_tokens
+            if extra_protein:
+                score -= 30.0 * len(extra_protein)
+            if extra_starch:
+                score -= 24.0 * len(extra_starch)
         elif matched_profile["sauce"] and not query_profile["dip_or_spread"]:
             score -= 10.0
 
@@ -695,10 +999,62 @@ class NutritionRAG:
         if query_profile["rawish"] and matched_profile["sauce"]:
             score -= 18.0
 
+        if matched_profile["sweet"] and not query_profile["sweet"]:
+            score -= 22.0
+
+        query_tokens = cls._tokenize_words(query_lower, keep_generic=True)
+        matched_tokens = cls._tokenize_words(matched_lower, keep_generic=True)
+
+        specific_query_tokens = {
+            token for token in query_tokens
+            if token not in cls._GENERIC_WORDS and len(token) >= 4
+        }
+        if len(specific_query_tokens) == 1:
+            extra_variety = (matched_tokens & cls._VARIETY_TERMS) - query_tokens
+            if extra_variety:
+                score -= 12.0 * len(extra_variety)
+
+            if not (query_tokens & cls._COOKED_TERMS) and (matched_tokens & cls._COOKED_TERMS):
+                score -= 14.0
+
+            if query_profile["vegetable"] and ('raw' in matched_tokens or 'fresh' in matched_tokens):
+                score += 8.0
+
+            if query_profile["vegetable"]:
+                processed_mismatch = (matched_tokens & cls._PROCESSED_PRODUCE_TERMS) - query_tokens
+                if processed_mismatch:
+                    score -= 18.0 * len(processed_mismatch)
+
+        if 'rice' in query_tokens:
+            rice_variant_terms = {'wild', 'brown', 'red', 'black'}
+            mismatch = (matched_tokens & rice_variant_terms) - query_tokens
+            if mismatch:
+                score -= 18.0 * len(mismatch)
+
         if field == 'density_g_ml' and matched_profile["oil_or_fat"] and not query_profile["oil_or_fat"]:
             score -= 40.0
 
         return score
+
+    @classmethod
+    def _is_standalone_condiment_query(cls, query_lower: str) -> bool:
+        tokens = cls._tokenize_words(query_lower, keep_generic=True)
+        profile = cls._classify_tokens(query_lower)
+        if not (profile["sauce"] or profile["dip_or_spread"]):
+            return False
+        if profile["protein"] or profile["whole_dish"]:
+            return False
+        return len(tokens) <= 3
+
+    @classmethod
+    def _is_mixed_dish_candidate_for_condiment_query(cls, query_lower: str, matched_lower: str) -> bool:
+        if not cls._is_standalone_condiment_query(query_lower):
+            return False
+        query_tokens = cls._tokenize_words(query_lower, keep_generic=True)
+        matched_tokens = cls._tokenize_words(matched_lower, keep_generic=True)
+        extra_protein = (matched_tokens & cls._PROTEIN_TERMS) - query_tokens
+        extra_starch = (matched_tokens & cls._STARCH_TERMS) - query_tokens
+        return bool(extra_protein or extra_starch)
 
     @classmethod
     def _has_conflicting_form(cls, query_lower: str, matched_lower: str) -> bool:
@@ -734,6 +1090,14 @@ class NutritionRAG:
     def _query_implies_served_dish(cls, query_lower: str) -> bool:
         query_tokens = set(cls._tokenize_for_rank(query_lower))
         return not bool(query_tokens & cls._RAW_QUERY_TERMS)
+
+    @classmethod
+    def _dish_query_tokens(cls, text: str) -> set[str]:
+        return {
+            token
+            for token in cls._tokenize_words(text, keep_generic=True)
+            if len(token) >= 3 and token not in cls._DISH_QUERY_EXCLUDED
+        }
 
     @classmethod
     def _candidate_rank_score(
@@ -780,6 +1144,8 @@ class NutritionRAG:
                 score += 8.0
             if has_unprepared_marker:
                 score -= 18.0
+            if len(query_tokens) >= 2 and overlap_count >= 2:
+                score -= 12.0 * len(matched_all_tokens & cls._UNPREPARED_TERMS)
 
         # Strongly discourage falling back to a generic single-food label like "Rice"
         # when the query is more specific, e.g. "yellow rice".
@@ -790,6 +1156,16 @@ class NutritionRAG:
         # when the query itself is a multi-word plated dish.
         if len(query_tokens) >= 2 and entry.get('source') == 'fao' and len(matched_tokens) <= 2:
             score -= 6.0
+
+        if {'yellow', 'rice'} <= query_tokens:
+            if {'yellow', 'rice'} <= matched_all_tokens:
+                score += 18.0
+            if 'cooked' in matched_all_tokens:
+                score += 12.0
+            if 'no' in matched_all_tokens and 'fat' in matched_all_tokens:
+                score += 10.0
+            if matched_all_tokens & cls._UNPREPARED_TERMS:
+                score -= 24.0
 
         score += cls._compatibility_adjustment(query_lower, matched_lower, field='calories_per_100g')
 
@@ -862,10 +1238,16 @@ class NutritionRAG:
             if not (0 <= idx < len(self._unified_foods)):
                 continue
             entry = self._unified_foods[idx]
-            matched = self._unified_names[idx] if idx < len(self._unified_names) else ""
-            if not matched:
+            retrieval_text = entry.get("retrieval_text") or (
+                self._unified_names[idx] if idx < len(self._unified_names) else ""
+            )
+            matched = entry.get("description") or retrieval_text
+            if not retrieval_text or not matched:
                 continue
-            cross_score = float(self._cross_encoder.predict([(food_name, matched)])[0]) if self._cross_encoder else float("-inf")
+            cross_score = (
+                float(self._cross_encoder.predict([(food_name, retrieval_text)])[0])
+                if self._cross_encoder else float("-inf")
+            )
             lexical_score = self._lexical_override_score(normalized, matched.lower())
             rank_score = self._candidate_rank_score(normalized, matched.lower(), entry, sim)
             compatibility_score = self._compatibility_adjustment(normalized, matched.lower(), field='calories_per_100g')
@@ -874,6 +1256,7 @@ class NutritionRAG:
                 "idx": idx,
                 "entry": entry,
                 "matched": matched,
+                "retrieval_text": retrieval_text,
                 "clip_sim": sim,
                 "cross_score": cross_score,
                 "lexical_score": lexical_score,
@@ -943,6 +1326,309 @@ class NutritionRAG:
         "canola oil":       0.92,
         "sunflower oil":    0.92,
     }
+    def _lookup_served_dish_lexical(
+        self,
+        food_name: str,
+        field: str,
+    ):
+        if not self._use_unified or not self._unified_foods or not self._unified_names:
+            return None, None, None, None
+
+        normalized = self._normalize_food_name(food_name)
+        query_tokens = self._dish_query_tokens(normalized)
+        if len(query_tokens) < 2:
+            return None, None, None, None
+
+        query_profile = self._classify_tokens(normalized)
+        if query_profile["vegetable"] and not query_profile["starch"] and not query_profile["protein"]:
+            return None, None, None, None
+        if not self._query_implies_served_dish(normalized):
+            return None, None, None, None
+
+        candidates = []
+        for idx, (entry, matched) in enumerate(zip(self._unified_foods, self._unified_names)):
+            candidate_entry = entry
+            if field == 'density_g_ml':
+                candidate_entry = self._derive_usda_density_entry(candidate_entry)
+                if not self._is_reliable_density_entry(candidate_entry):
+                    continue
+
+            value = candidate_entry.get(field)
+            if value is None:
+                continue
+
+            matched_lower = matched.lower()
+            if self._is_mixed_dish_candidate_for_condiment_query(normalized, matched_lower):
+                continue
+            if not self._words_overlap(normalized, matched_lower):
+                continue
+            if self._has_conflicting_form(normalized, matched_lower):
+                continue
+
+            matched_all_tokens = set(re.sub(r'[^a-z0-9 ]', ' ', matched_lower).split())
+            overlap_count = len(query_tokens & matched_all_tokens)
+            if overlap_count < min(2, len(query_tokens)):
+                continue
+
+            score = 40.0
+            if query_tokens <= matched_all_tokens:
+                score += 50.0
+            normalized_matched = self._normalize_food_name(matched)
+            if normalized in normalized_matched:
+                score += 20.0
+            if normalized_matched.startswith(normalized):
+                score += 12.0
+
+            prepared_markers = matched_all_tokens & self._PREPARED_TERMS
+            unprepared_markers = matched_all_tokens & self._UNPREPARED_TERMS
+            score += 12.0 * len(prepared_markers)
+            score -= 16.0 * len(unprepared_markers)
+
+            if 'no' in matched_all_tokens and 'fat' in matched_all_tokens:
+                score += 10.0
+            if 'cooked' in matched_all_tokens:
+                score += 10.0
+
+            extra_tokens = query_tokens.symmetric_difference(query_tokens & matched_all_tokens)
+            score -= 4.0 * max(0, len(extra_tokens) - max(0, overlap_count - 2))
+            score += self._compatibility_adjustment(normalized, matched_lower, field=field)
+            score -= 0.05 * len(matched_lower)
+
+            candidates.append((
+                score,
+                overlap_count,
+                idx,
+                float(value),
+                matched,
+                candidate_entry,
+            ))
+
+        if not candidates:
+            return None, None, None, None
+
+        candidates.sort(reverse=True)
+        best_score, _overlap_count, _idx, value, matched, entry = candidates[0]
+        if best_score < 55.0:
+            return None, None, None, None
+
+        source = f"{entry.get('source', 'unified')}_served_lexical"
+        if field == 'density_g_ml':
+            source += f",{entry.get('density_method', 'unknown')}"
+        logger.info(
+            f"[{field}] '{food_name}' served lexical → '{matched}' "
+            f"({source}, score={best_score:.2f}): {value}"
+        )
+        return value, matched, source, entry
+
+    def _lookup_single_ingredient_lexical(
+        self,
+        food_name: str,
+        field: str,
+    ):
+        if not self._use_unified or not self._unified_foods or not self._unified_names:
+            return None, None, None, None
+
+        normalized = self._normalize_food_name(food_name)
+        all_query_tokens = [
+            token for token in self._tokenize_words(normalized, keep_generic=True)
+            if token
+        ]
+        query_tokens = [
+            token for token in self._tokenize_words(normalized, keep_generic=True)
+            if token not in self._GENERIC_WORDS
+        ]
+        if len(all_query_tokens) != 1 or len(query_tokens) != 1:
+            return None, None, None, None
+
+        query_token = query_tokens[0]
+        query_profile = self._classify_tokens(normalized)
+        candidates = []
+
+        for idx, (entry, matched) in enumerate(zip(self._unified_foods, self._unified_names)):
+            value = entry.get(field)
+            if value is None:
+                continue
+            if field == 'density_g_ml' and not self._is_reliable_density_entry(entry):
+                continue
+
+            matched_lower = matched.lower()
+            if self._is_mixed_dish_candidate_for_condiment_query(normalized, matched_lower):
+                continue
+            if not self._words_overlap(normalized, matched_lower):
+                continue
+
+            matched_tokens = self._tokenize_words(matched_lower, keep_generic=True)
+            normalized_matched = self._normalize_food_name(matched)
+            if any(needle in matched_lower for needle in (' and ', ' with ', ' made with ')):
+                continue
+            matched_specific = {
+                token for token in matched_tokens
+                if token not in self._GENERIC_WORDS
+            }
+            matched_specific_order = [
+                token for token in re.sub(r'[^a-z0-9 ]', ' ', matched_lower).split()
+                if token not in self._GENERIC_WORDS
+            ]
+            if matched_specific_order:
+                lead_token = matched_specific_order[0]
+                if not (
+                    lead_token == query_token
+                    or lead_token.startswith(query_token)
+                    or query_token.startswith(lead_token)
+                ):
+                    continue
+
+            score = 0.0
+            if normalized_matched == normalized:
+                score += 120.0
+            if any(token == query_token or token.startswith(query_token) or query_token.startswith(token) for token in matched_specific):
+                score += 45.0
+            if normalized in normalized_matched:
+                score += 25.0
+
+            score += self._compatibility_adjustment(normalized, matched_lower, field=field)
+
+            if query_profile["vegetable"] and ('raw' in matched_tokens or 'fresh' in matched_tokens):
+                score += 28.0
+
+            if query_profile["vegetable"]:
+                if 'raw' not in matched_tokens and 'fresh' not in matched_tokens:
+                    continue
+                processed_mismatch = (matched_tokens & self._PROCESSED_PRODUCE_TERMS) - set(query_tokens)
+                if processed_mismatch:
+                    continue
+                variety_mismatch = (matched_tokens & self._VARIETY_TERMS) - set(query_tokens)
+                if variety_mismatch:
+                    score -= 14.0 * len(variety_mismatch)
+                if not (set(query_tokens) & self._COOKED_TERMS) and (matched_tokens & self._COOKED_TERMS):
+                    score -= 18.0
+
+            candidates.append((
+                score,
+                -len(normalized_matched),
+                idx,
+                float(value),
+                matched,
+                entry,
+            ))
+
+        if not candidates:
+            return None, None, None, None
+
+        candidates.sort(reverse=True)
+        best_score, _neg_len, _idx, value, matched, entry = candidates[0]
+        if best_score < 35.0:
+            return None, None, None, None
+
+        src = entry.get('source', 'unified')
+        source = f"{src}_lexical"
+        if field == 'density_g_ml':
+            source += f",{entry.get('density_method', 'unknown')}"
+        logger.info(f"[{field}] '{food_name}' lexical pre-pass → '{matched}' ({source}, score={best_score:.2f}): {value}")
+        return value, matched, source, entry
+
+    def _lookup_plain_raw_produce(
+        self,
+        food_name: str,
+        field: str,
+    ):
+        if not self._use_unified or not self._unified_foods or not self._unified_names:
+            return None, None, None, None
+
+        normalized = self._normalize_food_name(food_name)
+        all_query_tokens = [
+            token for token in self._tokenize_words(normalized, keep_generic=True)
+            if token
+        ]
+        query_tokens = [
+            token for token in self._tokenize_words(normalized, keep_generic=True)
+            if token not in self._GENERIC_WORDS
+        ]
+        if len(all_query_tokens) != 1 or len(query_tokens) != 1:
+            return None, None, None, None
+
+        query_token = query_tokens[0]
+        query_profile = self._classify_tokens(normalized)
+        if not query_profile["vegetable"]:
+            return None, None, None, None
+
+        query_variants = self._PRODUCE_TOKEN_ALIASES.get(query_token, {query_token})
+        candidates = []
+
+        for idx, (entry, matched) in enumerate(zip(self._unified_foods, self._unified_names)):
+            value = entry.get(field)
+            if value is None:
+                continue
+            if field == 'density_g_ml' and not self._is_reliable_density_entry(entry):
+                continue
+
+            matched_lower = matched.lower()
+            if self._is_mixed_dish_candidate_for_condiment_query(normalized, matched_lower):
+                continue
+            if any(needle in matched_lower for needle in (' and ', ' with ', ' made with ')):
+                continue
+
+            matched_tokens = self._tokenize_words(matched_lower, keep_generic=True)
+            if not (matched_tokens & query_variants):
+                continue
+            if 'raw' not in matched_tokens and 'fresh' not in matched_tokens:
+                continue
+
+            matched_profile = self._classify_tokens(matched_lower)
+            if matched_profile["sauce"] or matched_profile["whole_dish"] or matched_profile["dip_or_spread"]:
+                continue
+
+            processed_tokens = (matched_tokens & self._PROCESSED_PRODUCE_TERMS) - query_variants
+            if processed_tokens:
+                continue
+
+            variety_tokens = (matched_tokens & self._VARIETY_TERMS) - query_variants
+            if query_token in {'tomato', 'tomatoes'}:
+                variety_tokens -= {'red'}
+            if query_token in {'onion', 'onions'}:
+                variety_tokens -= {'white'}
+
+            normalized_matched = self._normalize_food_name(matched)
+            matched_specific = {
+                token for token in matched_tokens
+                if token not in self._GENERIC_WORDS
+            }
+            extra_descriptors = matched_specific - query_variants - self._CANONICAL_PRODUCE_MODIFIERS - {'raw', 'fresh'}
+
+            score = 140.0
+            if normalized == normalized_matched:
+                score += 50.0
+            if normalized in normalized_matched:
+                score += 30.0
+            if 'raw' in matched_tokens:
+                score += 20.0
+            if 'fresh' in matched_tokens:
+                score += 12.0
+
+            score += self._compatibility_adjustment(normalized, matched_lower, field=field)
+            score -= 10.0 * len(variety_tokens)
+            score -= 4.0 * len(extra_descriptors)
+            score -= 0.02 * len(matched_lower)
+
+            candidates.append((
+                score,
+                idx,
+                float(value),
+                matched,
+                entry,
+            ))
+
+        if not candidates:
+            return None, None, None, None
+
+        candidates.sort(reverse=True)
+        best_score, _idx, value, matched, entry = candidates[0]
+        src = entry.get('source', 'unified')
+        source = f"{src}_produce_lexical"
+        if field == 'density_g_ml':
+            source += f",{entry.get('density_method', 'unknown')}"
+        logger.info(f"[{field}] '{food_name}' produce lexical → '{matched}' ({source}, score={best_score:.2f}): {value}")
+        return value, matched, source, entry
 
     def _lookup_unified(
         self,
@@ -956,10 +1642,23 @@ class NutritionRAG:
         field: 'density_g_ml' or 'calories_per_100g'
         Returns (value, matched_name, source, entry) or (None, None, None, None).
         """
+        served_value, served_matched, served_source, served_entry = self._lookup_served_dish_lexical(food_name, field)
+        if served_value is not None:
+            return served_value, served_matched, served_source, served_entry
+
+        produce_value, produce_matched, produce_source, produce_entry = self._lookup_plain_raw_produce(food_name, field)
+        if produce_value is not None:
+            return produce_value, produce_matched, produce_source, produce_entry
+
+        lexical_value, lexical_matched, lexical_source, lexical_entry = self._lookup_single_ingredient_lexical(food_name, field)
+        if lexical_value is not None:
+            return lexical_value, lexical_matched, lexical_source, lexical_entry
+
         normalized = self._normalize_food_name(food_name)
+        dish_query_tokens = self._dish_query_tokens(normalized)
         retrieved_candidates = self._apply_lexical_override(
             normalized,
-            self._retrieve_candidates(food_name, crop_image=crop_image, top_k=top_k),
+            self._retrieve_candidates(food_name, crop_image=crop_image, top_k=max(top_k, 50)),
         )
 
         candidates = []
@@ -973,6 +1672,7 @@ class NutritionRAG:
             if value is None:
                 continue
             matched = candidate["matched"]
+            matched_tokens_all = set(re.sub(r'[^a-z0-9 ]', ' ', matched.lower()).split())
 
             # Apply per-source minimum similarity thresholds
             src = entry.get('source', 'usda')
@@ -988,10 +1688,17 @@ class NutritionRAG:
             if field == 'density_g_ml':
                 if not self._is_reliable_density_entry(entry):
                     continue
+                if len(dish_query_tokens) >= 2:
+                    overlap = len(dish_query_tokens & matched_tokens_all)
+                    if overlap < len(dish_query_tokens):
+                        continue
 
             # Word-overlap guard against phonetic false positives
             if not self._words_overlap(normalized, matched.lower()):
                 logger.info(f"Skip (no word overlap): '{food_name}' vs '{matched}'")
+                continue
+            if self._is_mixed_dish_candidate_for_condiment_query(normalized, matched.lower()):
+                logger.info(f"Skip (mixed dish for condiment query): '{food_name}' vs '{matched}'")
                 continue
             # Form-conflict check:
             # Always applied for density (wrong-form density = wrong mass calculation).
@@ -1135,22 +1842,27 @@ class NutritionRAG:
         if not self._gemini_api_key:
             return None
         cache_key = f"{food_name}::{field}"
-        if cache_key in self._gemini_cache:
-            return self._gemini_cache[cache_key]
+        cached_value = self._get_cached_gemini_value(food_name, field)
+        if cached_value is not None:
+            logger.info("Gemini cache hit [%s] '%s': %s", field, food_name, cached_value)
+            return cached_value
         try:
             if field == 'density_g_ml':
                 prompt = (
-                    f"What is the density of '{food_name}' in grams per milliliter (g/ml) "
-                    f"as a typical cooked or served food portion? "
-                    f"Most foods are between 0.5 and 1.5 g/ml. "
-                    f"Reply with ONLY a single decimal number like 0.85 — no units, no explanation, no other text."
+                    f"What is the average density of '{food_name}' in grams per milliliter (g/ml)? "
+                    f"First prefer authoritative food-composition sources such as USDA FoodData Central, "
+                    f"CoFID, and FAO/INFOODS if they contain the item or an equivalent prepared form. "
+                    f"If those do not contain the item, use grounded web search to estimate a typical cooked "
+                    f"or served density. Most foods are between 0.5 and 1.5 g/ml. "
+                    f"Reply with ONLY a single decimal number like 0.85 and no other text."
                 )
                 lo, hi = 0.05, 3.0
             else:  # calories_per_100g
                 prompt = (
                     f"How many kilocalories (kcal) are in 100 grams of '{food_name}'? "
-                    f"Use standard nutritional data (e.g. USDA). "
-                    f"Reply with ONLY a single integer or decimal number — no units, no explanation, no other text."
+                    f"First prefer authoritative food-composition sources such as USDA FoodData Central, "
+                    f"CoFID, and FAO/INFOODS if they contain the item or an equivalent prepared form. "
+                    f"Reply with ONLY a single integer or decimal number and no other text."
                 )
                 lo, hi = 1.0, 900.0
 
@@ -1209,6 +1921,12 @@ class NutritionRAG:
             if match:
                 val = float(match.group(1))
                 if lo <= val <= hi:
+                    if not self._is_reasonable_gemini_value(food_name, field, val, grounding_metadata):
+                        logger.warning(
+                            "Gemini grounding [%s] '%s': rejected implausible value %s",
+                            field, food_name, val,
+                        )
+                        return None
                     logger.info(f"Gemini grounding [{field}] '{food_name}': {val}")
                     self._gemini_cache[cache_key] = val
                     if grounding_metadata and grounding_metadata.get("grounded"):
@@ -1219,6 +1937,12 @@ class NutritionRAG:
                             "model": self._gemini_model,
                         })
                         self._gemini_grounding_metadata[cache_key] = grounding_metadata
+                    self._persist_gemini_cache_entry(
+                        food_name=food_name,
+                        field=field,
+                        value=val,
+                        grounding_metadata=self._gemini_grounding_metadata.get(cache_key),
+                    )
                     return val
                 else:
                     logger.warning(
@@ -1231,6 +1955,49 @@ class NutritionRAG:
         except Exception as e:
             logger.warning(f"Gemini grounding [{field}] failed for '{food_name}': {e}")
         return None
+
+    def _is_reasonable_gemini_value(
+        self,
+        food_name: str,
+        field: str,
+        value: float,
+        grounding_metadata: Optional[dict],
+    ) -> bool:
+        if field != 'density_g_ml':
+            return True
+
+        normalized = self._normalize_food_name(food_name)
+        profile = self._classify_tokens(normalized)
+
+        if (profile["starch"] or profile["protein"] or profile["whole_dish"]) and not profile["vegetable"]:
+            if value < 0.35:
+                return False
+
+        if profile["sauce"] or profile["dip_or_spread"]:
+            if not (0.4 <= value <= 1.6):
+                return False
+
+        if grounding_metadata and grounding_metadata.get("sources"):
+            preferred_domains = {
+                "fdc.nal.usda.gov",
+                "food.gov.uk",
+                "fao.org",
+                "europa.eu",
+                "ifis.org",
+            }
+            source_domains = {
+                (source.get("domain") or "").lower()
+                for source in grounding_metadata.get("sources", [])
+                if isinstance(source, dict)
+            }
+            if source_domains and not any(
+                any(preferred in domain for preferred in preferred_domains)
+                for domain in source_domains
+            ):
+                if (profile["starch"] or profile["protein"] or profile["whole_dish"]) and value < 0.45:
+                    return False
+
+        return True
 
     @staticmethod
     def _extract_grounding_metadata(response: Any) -> Optional[dict]:
@@ -1405,14 +2172,28 @@ class NutritionRAG:
 
     def _get_density_with_match(self, food_name: str, top_k: int = 10, crop_image: Optional[Image.Image] = None):
         """Return (density_g_ml, matched_name, source, entry|None)."""
+        food_key = food_name.strip().lower()
+        hardcoded_density = self._DENSITY_HARDCODED.get(food_key)
+        if hardcoded_density is not None:
+            return float(hardcoded_density), food_name, "hardcoded_override", None
+
         if self._use_unified:
             density, matched, source, entry = self._lookup_unified(food_name, 'density_g_ml', top_k, crop_image=crop_image)
+            if density is None and self._fao_index is not None:
+                density, matched, source = self._lookup_legacy_density(food_name)
+                entry = None
         else:
             density, matched, source = self._lookup_legacy_density(food_name)
             entry = None
 
         if density is not None:
             return float(density), matched, source, entry
+
+        branded_density, branded_matched, branded_source, branded_entry = self._lookup_branded_fallback(
+            food_name, 'density_g_ml'
+        )
+        if branded_density is not None:
+            return float(branded_density), branded_matched, branded_source, branded_entry
 
         density = self._gemini_lookup(food_name, 'density_g_ml')
         if density is not None:
@@ -1433,6 +2214,12 @@ class NutritionRAG:
 
         if kcal is not None:
             return float(kcal), matched, source
+
+        branded_kcal, branded_matched, branded_source, _ = self._lookup_branded_fallback(
+            food_name, 'calories_per_100g'
+        )
+        if branded_kcal is not None:
+            return float(branded_kcal), branded_matched, branded_source
 
         kcal = self._gemini_lookup(food_name, 'calories_per_100g')
         if kcal is not None:

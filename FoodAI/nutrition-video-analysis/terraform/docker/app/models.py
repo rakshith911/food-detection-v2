@@ -307,11 +307,17 @@ def load_nutrition_rag(
     unified_faiss_path: Path,
     unified_foods_path: Path,
     unified_food_names_path: Path,
+    fao_faiss_path: Path,
+    fao_foods_path: Path,
+    fao_food_names_path: Path,
+    branded_foods_path: Path = None,
+    gemini_density_cache_path: Path = None,
     gemini_api_key: str = None,
     gemini_model: str = "gemini-flash-latest",
 ):
     """
-    Load and initialize Nutrition RAG system using unified FAISS index (FAO+USDA+CoFID).
+    Load and initialize Nutrition RAG system using a unified USDA+CoFID index
+    plus a separate FAO density fallback.
 
     Returns:
         Initialized NutritionRAG instance
@@ -332,6 +338,11 @@ def load_nutrition_rag(
         unified_faiss_path=unified_faiss_path,
         unified_foods_path=unified_foods_path,
         unified_food_names_path=unified_food_names_path,
+        fao_faiss_path=fao_faiss_path,
+        fao_density_path=fao_foods_path,
+        fao_names_path=fao_food_names_path,
+        branded_foods_path=branded_foods_path,
+        gemini_density_cache_path=gemini_density_cache_path,
         gemini_api_key=gemini_api_key,
         gemini_model=gemini_model,
     )
@@ -448,6 +459,11 @@ class ModelManager:
                 unified_faiss_path=self.config.UNIFIED_FAISS_PATH,
                 unified_foods_path=self.config.UNIFIED_FOODS_PATH,
                 unified_food_names_path=self.config.UNIFIED_FOOD_NAMES_PATH,
+                fao_faiss_path=self.config.FAO_FAISS_PATH,
+                fao_foods_path=self.config.FAO_FOODS_PATH,
+                fao_food_names_path=self.config.FAO_FOOD_NAMES_PATH,
+                branded_foods_path=self.config.BRANDED_FOODS_PATH,
+                gemini_density_cache_path=self.config.GEMINI_DENSITY_CACHE_PATH,
                 gemini_api_key=self.config.GEMINI_API_KEY,
                 gemini_model=self.config.GEMINI_FLASH_MODEL,
             )

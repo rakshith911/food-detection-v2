@@ -91,10 +91,16 @@ class Settings(BaseSettings):
     REFERENCE_BOWL_DIAMETER_CM: float = 20.0  # Typical bowl diameter (can vary)
     REFERENCE_OBJECTS: list = ['plate', 'bowl', 'platter', 'dish']  # Objects that can be used for calibration
     CALORIE_SIMILARITY_THRESHOLD: float = 0.5
-    # Unified FAISS index (FAO + USDA + CoFID combined)
+    # Unified FAISS index for generic nutrition retrieval (USDA + CoFID)
     UNIFIED_FAISS_PATH: Path = Path("/app/data/rag/unified_faiss.index")
     UNIFIED_FOODS_PATH: Path = Path("/app/data/rag/unified_foods.json")
     UNIFIED_FOOD_NAMES_PATH: Path = Path("/app/data/rag/unified_food_names.json")
+    # Separate FAO density fallback
+    FAO_FAISS_PATH: Path = Path("/app/data/rag/fao_faiss.index")
+    FAO_FOODS_PATH: Path = Path("/app/data/rag/fao_foods.json")
+    FAO_FOOD_NAMES_PATH: Path = Path("/app/data/rag/fao_food_names.json")
+    BRANDED_FOODS_PATH: Path = Path("/app/data/rag/branded_foods.json")
+    GEMINI_DENSITY_CACHE_PATH: Path = Path("/app/data/rag/gemini_density_cache.json")
     # Number of frames to run Depth Anything V2 on for video (averaged)
     DEPTH_NUM_FRAMES: int = 3
 
@@ -152,9 +158,16 @@ class Settings(BaseSettings):
             self.MODEL_CACHE_DIR = root / "models"
             self.PRODUCTION_ROOT = _LOCAL_PRODUCTION_ROOT
             unified_data = root.parent.parent.parent.parent / "unified_data"
+            fao_data = root.parent.parent.parent.parent / "fao_data"
+            branded_data = root.parent.parent.parent.parent / "branded_data"
             self.UNIFIED_FAISS_PATH = unified_data / "unified_faiss.index"
             self.UNIFIED_FOODS_PATH = unified_data / "unified_foods.json"
             self.UNIFIED_FOOD_NAMES_PATH = unified_data / "unified_food_names.json"
+            self.FAO_FAISS_PATH = fao_data / "fao_faiss.index"
+            self.FAO_FOODS_PATH = fao_data / "fao_foods.json"
+            self.FAO_FOOD_NAMES_PATH = fao_data / "fao_food_names.json"
+            self.BRANDED_FOODS_PATH = branded_data / "usda_branded_foods.json"
+            self.GEMINI_DENSITY_CACHE_PATH = unified_data / "gemini_density_cache.json"
         else:
             self.PRODUCTION_ROOT = _DOCKER_PRODUCTION_ROOT
         self.SAM3_MODEL_DIR = self.PRODUCTION_ROOT / "model_assets" / "sam3_foodseg_final"
@@ -210,6 +223,9 @@ def init_directories():
         settings.OUTPUT_DIR,
         settings.MODEL_CACHE_DIR,
         settings.UNIFIED_FAISS_PATH.parent,
+        settings.FAO_FAISS_PATH.parent,
+        settings.BRANDED_FOODS_PATH.parent,
+        settings.GEMINI_DENSITY_CACHE_PATH.parent,
     ]
     for dir_path in dirs:
         dir_path.mkdir(parents=True, exist_ok=True)

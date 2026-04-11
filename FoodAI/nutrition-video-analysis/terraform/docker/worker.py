@@ -647,10 +647,14 @@ def download_models_from_s3():
         ('checkpoints/sam2.1_hiera_tiny.pt', '/app/checkpoints/sam2.1_hiera_tiny.pt'),
         ('gdino_checkpoints/groundingdino_swint_ogc.pth', '/app/gdino_checkpoints/groundingdino_swint_ogc.pth'),
         ('gdino_checkpoints/groundingdino_swinb_cogcoor.pth', '/app/gdino_checkpoints/groundingdino_swinb_cogcoor.pth'),
-        # Unified RAG index (FAO + USDA + CoFID combined)
+        # Unified RAG index (USDA + CoFID) plus separate FAO density fallback
         ('rag/unified_faiss.index', '/app/data/rag/unified_faiss.index'),
         ('rag/unified_foods.json', '/app/data/rag/unified_foods.json'),
         ('rag/unified_food_names.json', '/app/data/rag/unified_food_names.json'),
+        ('rag/fao_faiss.index', '/app/data/rag/fao_faiss.index'),
+        ('rag/fao_foods.json', '/app/data/rag/fao_foods.json'),
+        ('rag/fao_food_names.json', '/app/data/rag/fao_food_names.json'),
+        ('rag/branded_foods.json', '/app/data/rag/branded_foods.json'),
     ]
     
     print(f"Downloading models from s3://{S3_MODELS_BUCKET}...")
