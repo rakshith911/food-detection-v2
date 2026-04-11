@@ -529,12 +529,12 @@ class NutritionRAG:
             ('milliliter', 1.0, 'ml'),
             ('millilitre', 1.0, 'ml'),
             (' ml', 1.0, 'ml'),
-            ('cup', 236.588, 'cup'),
-            ('tablespoon', 15.0, 'tbsp'),
-            ('tbsp', 15.0, 'tbsp'),
-            ('teaspoon', 5.0, 'tsp'),
-            ('tsp', 5.0, 'tsp'),
-            ('fluid ounce', 29.5735, 'fl_oz'),
+            ('cup', 236.588, 'cup'),           # USDA: 1 cup = 236.588 mL exactly
+            ('tablespoon', 14.78675, 'tbsp'),   # USDA: 1 cup / 16 = 14.78675 mL
+            ('tbsp', 14.78675, 'tbsp'),
+            ('teaspoon', 4.92892, 'tsp'),        # USDA: 1 cup / 48 = 4.92892 mL
+            ('tsp', 4.92892, 'tsp'),
+            ('fluid ounce', 29.5735, 'fl_oz'),  # USDA: 1 cup / 8 = 29.5735 mL
             ('fl oz', 29.5735, 'fl_oz'),
             ('liter', 1000.0, 'liter'),
             ('litre', 1000.0, 'liter'),

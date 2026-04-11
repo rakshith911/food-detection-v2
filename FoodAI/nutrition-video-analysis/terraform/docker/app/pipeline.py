@@ -3389,18 +3389,18 @@ class NutritionVideoPipeline:
                 m = _re.match(r'(\d+(?:\.\d+)?)\s*ml$', qty)
                 if m:
                     return float(m.group(1))
-                # tablespoon / tbsp
+                # tablespoon / tbsp  (USDA: 1 cup/16 = 14.78675 mL)
                 m = _re.match(r'(\d+(?:\.\d+)?)\s*(?:tablespoons?|tbsp)', qty)
                 if m:
-                    return float(m.group(1)) * 14.0
-                # teaspoon / tsp
+                    return float(m.group(1)) * 14.78675
+                # teaspoon / tsp  (USDA: 1 cup/48 = 4.92892 mL)
                 m = _re.match(r'(\d+(?:\.\d+)?)\s*(?:teaspoons?|tsp)', qty)
                 if m:
-                    return float(m.group(1)) * 5.0
-                # cup
+                    return float(m.group(1)) * 4.92892
+                # cup  (USDA: 236.588 mL)
                 m = _re.match(r'(\d+(?:\.\d+)?)\s*cups?', qty)
                 if m:
-                    return float(m.group(1)) * 240.0
+                    return float(m.group(1)) * 236.588
                 # ounce / oz
                 m = _re.match(r'(\d+(?:\.\d+)?)\s*(?:ounces?|oz)', qty)
                 if m:
