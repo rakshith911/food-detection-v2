@@ -27,6 +27,7 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 from app.models import load_nutrition_rag  # noqa: E402
+from nutrition_rag_system import NutritionLookupError  # noqa: E402
 
 
 DEFAULT_INGREDIENTS = [
@@ -117,6 +118,7 @@ def main() -> int:
     )
     print("-" * 130)
 
+    failures = 0
     for ingredient in ingredients:
         kcal_value, calorie_matched, calorie_source, kcal_entry = rag._lookup_unified(  # type: ignore[attr-defined]
             ingredient, "calories_per_100g", top_k=10, crop_image=None
@@ -125,7 +127,20 @@ def main() -> int:
             ingredient, top_k=10, crop_image=None
         )
 
-        final_result = rag.get_nutrition_for_food(ingredient, volume_ml=args.volume_ml)
+        try:
+            final_result = rag.get_nutrition_for_food(ingredient, volume_ml=args.volume_ml)
+        except NutritionLookupError as exc:
+            failures += 1
+            print(
+                f"{ingredient:<18} {'UNRESOLVED':<34} {'UNRESOLVED':<34} "
+                f"{'N/A':>10} {'N/A':>8} {'N/A':>8} {'N/A':>8}"
+            )
+            print(f"  lookup_error:   {exc}")
+            print(f"  calorie_source: {calorie_source or 'N/A'}")
+            print(f"  density_source: {density_source or 'N/A'}")
+            print()
+            continue
+
         mass_g = final_result.get("mass_g")
         total_kcal = final_result.get("total_calories")
 
@@ -156,6 +171,10 @@ def main() -> int:
             print("  db_macros/100g: N/A")
         print(f"  estimated_macros: protein={protein_total} carbs={carbs_total} fat={fat_total}")
         print()
+
+    if failures:
+        print(f"FAILED: {failures} ingredient lookup(s) unresolved.")
+        return 1
 
     return 0
 

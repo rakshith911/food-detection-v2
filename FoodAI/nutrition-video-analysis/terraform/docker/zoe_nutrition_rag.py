@@ -372,13 +372,18 @@ class NutritionRAG:
             self._grounding_metadata[f"{food_name}::density_g_ml"] = result["_grounding_metadata"]
             self._grounding_metadata[f"{food_name}::calories_per_100g"] = result["_grounding_metadata"]
 
-        density = float(result.get("density_g_ml", 1.0))
-        calories_per_100g = float(result.get("calories_per_100g", 100.0))
+        if result.get("density_g_ml") is None:
+            raise LookupError(f"Could not resolve density_g_ml for '{food_name}'")
+        if result.get("calories_per_100g") is None:
+            raise LookupError(f"Could not resolve calories_per_100g for '{food_name}'")
+
+        density = float(result["density_g_ml"])
+        calories_per_100g = float(result["calories_per_100g"])
         if mass_g is None or mass_g <= 0:
             mass_g = volume_ml * density
         total_calories = (float(mass_g) / 100.0) * calories_per_100g
 
-        lookup_method = result.get("lookup_method", "default_fallback")
+        lookup_method = result.get("lookup_method")
         if lookup_method == "clip_rag":
             calorie_source = "usda_clip_rag"
         elif lookup_method == "lexical_usda":
@@ -388,7 +393,7 @@ class NutritionRAG:
         elif lookup_method == "clip_rag_low_conf":
             calorie_source = "usda_clip_rag_low_conf"
         else:
-            calorie_source = "fallback_default"
+            raise LookupError(f"Could not resolve calorie source for '{food_name}'")
 
         density_match = result.get("density_match")
         gemini_density_used = density_match is not None and density_match == result.get("source")
@@ -399,7 +404,7 @@ class NutritionRAG:
         elif density_match:
             density_source = "density_faiss"
         else:
-            density_source = "fallback_default"
+            raise LookupError(f"Could not resolve density source for '{food_name}'")
 
         return {
             "food_name": food_name,

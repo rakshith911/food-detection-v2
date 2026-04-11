@@ -25,6 +25,7 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 from app.models import load_nutrition_rag  # noqa: E402
+from nutrition_rag_system import NutritionLookupError  # noqa: E402
 
 
 DEFAULT_CASES: list[dict] = [
@@ -109,7 +110,12 @@ def _check_case(case: dict, rag, volume_ml: float) -> tuple[bool, list[str], dic
     density_value, density_matched, density_source, _density_entry = rag._get_density_with_match(  # type: ignore[attr-defined]
         ingredient, top_k=10, crop_image=None
     )
-    final_result = rag.get_nutrition_for_food(ingredient, volume_ml=volume_ml)
+    failures: list[str] = []
+    try:
+        final_result = rag.get_nutrition_for_food(ingredient, volume_ml=volume_ml)
+    except NutritionLookupError as exc:
+        final_result = {}
+        failures.append(str(exc))
 
     summary = {
         "ingredient": ingredient,
@@ -123,8 +129,6 @@ def _check_case(case: dict, rag, volume_ml: float) -> tuple[bool, list[str], dic
         "raw_lookup_kcal": kcal_value,
         "raw_lookup_density": density_value,
     }
-
-    failures: list[str] = []
 
     if case.get("expect_cal_contains"):
         if not _contains_all(summary["calorie_matched"], case["expect_cal_contains"]):

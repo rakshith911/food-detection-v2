@@ -24,6 +24,7 @@ if str(APP_DIR) not in sys.path:
 
 from app.config import settings  # noqa: E402
 from app.models import load_nutrition_rag  # noqa: E402
+from nutrition_rag_system import NutritionLookupError  # noqa: E402
 
 
 DEFAULT_INGREDIENTS = [
@@ -62,8 +63,16 @@ def main() -> int:
     print(f"{'Ingredient':<18} {'USDA Match':<38} {'Method':<18} {'Rerank':>8}  {'Density':>10}")
     print("-" * 100)
 
+    failures = 0
     for ingredient in ingredients:
-        result = rag.get_nutrition_for_food(ingredient, volume_ml=100.0)
+        try:
+            result = rag.get_nutrition_for_food(ingredient, volume_ml=100.0)
+        except NutritionLookupError as exc:
+            failures += 1
+            print(f"{ingredient:<18} {'UNRESOLVED':<38} {'lookup_error':<18} {'N/A':>8}  {'N/A':>10}")
+            print(f"  error:          {exc}")
+            print()
+            continue
 
         match = (result.get("calorie_matched") or "N/A")[:38]
         method = result.get("lookup_method") or "?"
@@ -97,7 +106,7 @@ def main() -> int:
                 )
         print()
 
-    return 0
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
