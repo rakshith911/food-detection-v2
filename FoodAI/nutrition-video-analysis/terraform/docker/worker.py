@@ -518,6 +518,15 @@ def process_message(message: dict, pipeline=None):
             # Upload results
             results_key = upload_results(job_id, results)
 
+            # Clean up local output directory to free disk space (all assets already in S3)
+            import shutil
+            for output_dir_candidate in [
+                f"/app/data/outputs/production_{job_id}",
+                f"/app/data/outputs/{job_id}",
+            ]:
+                if os.path.exists(output_dir_candidate):
+                    shutil.rmtree(output_dir_candidate, ignore_errors=True)
+
             # Extract food names from detected items
             food_items = [
                 {
