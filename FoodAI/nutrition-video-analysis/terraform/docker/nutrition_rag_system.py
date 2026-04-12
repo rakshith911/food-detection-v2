@@ -1777,6 +1777,57 @@ class NutritionRAG:
         logger.info(f"[{field}] '{food_name}' produce lexical → '{matched}' ({source}, score={best_score:.2f}): {value}")
         return value, matched, source, entry
 
+    def _pick_best_result(
+        self,
+        food_name: str,
+        result_a: tuple,
+        result_b: tuple,
+    ) -> tuple:
+        """
+        Compare two lookup results (value, matched, source, entry) and return
+        the one whose matched description scores higher against food_name via
+        CrossEncoder.  This treats unified-FAISS and branded results equally —
+        the better semantic match wins regardless of source.
+
+        If only one result has a value it is returned immediately without
+        running CrossEncoder.  On CrossEncoder failure, result_a is returned.
+        """
+        val_a = result_a[0]
+        val_b = result_b[0]
+
+        if val_a is None and val_b is None:
+            return result_a
+        if val_a is None:
+            return result_b
+        if val_b is None:
+            return result_a
+
+        # Both have values — use CrossEncoder as the arbiter
+        matched_a = result_a[1] or ""
+        matched_b = result_b[1] or ""
+
+        try:
+            scores = self._cross_encoder.predict(
+                [(food_name, matched_a), (food_name, matched_b)]
+            )
+            score_a, score_b = float(scores[0]), float(scores[1])
+            if score_b > score_a:
+                logger.info(
+                    "[conflict] '%s': branded '%s' (ce=%.2f) beats unified '%s' (ce=%.2f)",
+                    food_name, matched_b, score_b, matched_a, score_a,
+                )
+                return result_b
+            logger.info(
+                "[conflict] '%s': unified '%s' (ce=%.2f) beats branded '%s' (ce=%.2f)",
+                food_name, matched_a, score_a, matched_b, score_b,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[conflict] CrossEncoder scoring failed for '%s' (%s) — keeping unified result",
+                food_name, exc,
+            )
+        return result_a
+
     def _lookup_unified(
         self,
         food_name: str,
@@ -2433,8 +2484,7 @@ class NutritionRAG:
 
     def _get_density_with_match(self, food_name: str, top_k: int = 10, crop_image: Optional[Image.Image] = None, meal_context: Optional[str] = None):
         """Return (density_g_ml, matched_name, source, entry|None)."""
-        # Run unified FAISS and branded lookup in parallel to avoid sequential latency.
-        # Branded result is only used when unified FAISS misses, preserving priority order.
+        # Run unified FAISS and branded lookup in parallel; pick best via CrossEncoder.
         with ThreadPoolExecutor(max_workers=2) as _ex:
             if self._use_unified:
                 _unified_fut = _ex.submit(self._lookup_unified, food_name, 'density_g_ml', top_k, crop_image)
@@ -2443,21 +2493,23 @@ class NutritionRAG:
             _branded_fut = _ex.submit(self._lookup_branded_fallback, food_name, 'density_g_ml')
 
         if self._use_unified:
-            density, matched, source, entry = _unified_fut.result()
-            if density is None and self._fao_index is not None:
-                density, matched, source = self._lookup_legacy_density(food_name)
-                entry = None
+            unified_result = _unified_fut.result()
+            # FAO legacy fallback when unified FAISS has no density entry
+            if unified_result[0] is None and self._fao_index is not None:
+                fao_d, fao_m, fao_s = self._lookup_legacy_density(food_name)
+                if fao_d is not None:
+                    unified_result = (fao_d, fao_m, fao_s, None)
+            branded_result = _branded_fut.result()
+            density, matched, source, entry = self._pick_best_result(food_name, unified_result, branded_result)
         else:
             _r = _unified_fut.result()
             density, matched, source = _r[0], _r[1], _r[2]
             entry = None
+            if density is None:
+                density, matched, source, entry = _branded_fut.result()
 
         if density is not None:
             return float(density), matched, source, entry
-
-        branded_density, branded_matched, branded_source, branded_entry = _branded_fut.result()
-        if branded_density is not None:
-            return float(branded_density), branded_matched, branded_source, branded_entry
 
         density = self._gemini_lookup(food_name, 'density_g_ml', meal_context=meal_context)
         if density is not None:
@@ -2471,7 +2523,7 @@ class NutritionRAG:
 
     def _get_calories_with_match(self, food_name: str, top_k: int = 10, crop_image: Optional[Image.Image] = None, meal_context: Optional[str] = None):
         """Return (kcal_per_100g, matched_name, source). Entry not needed here."""
-        # Run unified FAISS and branded lookup in parallel to avoid sequential latency.
+        # Run unified FAISS and branded lookup in parallel; pick best via CrossEncoder.
         with ThreadPoolExecutor(max_workers=2) as _ex:
             if self._use_unified:
                 _unified_fut = _ex.submit(self._lookup_unified, food_name, 'calories_per_100g', top_k, crop_image)
@@ -2480,17 +2532,17 @@ class NutritionRAG:
             _branded_fut = _ex.submit(self._lookup_branded_fallback, food_name, 'calories_per_100g')
 
         if self._use_unified:
-            kcal, matched, source, _ = _unified_fut.result()
+            kcal, matched, source, _ = self._pick_best_result(
+                food_name, _unified_fut.result(), _branded_fut.result()
+            )
         else:
-            result = _unified_fut.result()
-            kcal, matched, source = result[0], result[1], result[2]
+            _r = _unified_fut.result()
+            kcal, matched, source = _r[0], _r[1], _r[2]
+            if kcal is None:
+                kcal, matched, source, _ = _branded_fut.result()
 
         if kcal is not None:
             return float(kcal), matched, source
-
-        branded_kcal, branded_matched, branded_source, _ = _branded_fut.result()
-        if branded_kcal is not None:
-            return float(branded_kcal), branded_matched, branded_source
 
         kcal = self._gemini_lookup(food_name, 'calories_per_100g', meal_context=meal_context)
         if kcal is not None:
@@ -2543,7 +2595,7 @@ class NutritionRAG:
 
         Returns (density, kcal_per_100g, density_matched, density_source, calorie_matched, calorie_source).
         """
-        # ── Step 1: kcal via CLIP-FAISS + cross-encoder (parallel with branded) ────
+        # ── Step 1: kcal — unified FAISS and branded run in parallel, best wins ────
         kcal_entry: Optional[dict] = None
         with ThreadPoolExecutor(max_workers=2) as _ex:
             if self._use_unified:
@@ -2553,26 +2605,25 @@ class NutritionRAG:
             _kcal_branded_fut = _ex.submit(self._lookup_branded_fallback, food_name, 'calories_per_100g')
 
         if self._use_unified:
-            kcal_per_100g, calorie_matched, calorie_source, kcal_entry = _kcal_unified_fut.result()
+            kcal_per_100g, calorie_matched, calorie_source, kcal_entry = self._pick_best_result(
+                food_name, _kcal_unified_fut.result(), _kcal_branded_fut.result()
+            )
         else:
             _r = _kcal_unified_fut.result()
             kcal_per_100g, calorie_matched, calorie_source = _r[0], _r[1], _r[2]
+            if kcal_per_100g is None:
+                branded_kcal, branded_matched, branded_source, _ = _kcal_branded_fut.result()
+                if branded_kcal is not None:
+                    kcal_per_100g, calorie_matched, calorie_source = float(branded_kcal), branded_matched, branded_source
 
         if kcal_per_100g is None:
-            # Use pre-fetched branded result (already computed in parallel)
-            branded_kcal, branded_matched, branded_source, _ = _kcal_branded_fut.result()
-            if branded_kcal is not None:
-                kcal_per_100g   = float(branded_kcal)
-                calorie_matched = branded_matched
-                calorie_source  = branded_source
+            kcal_per_100g_gem = self._gemini_lookup(food_name, 'calories_per_100g', meal_context=meal_context)
+            if kcal_per_100g_gem is not None:
+                kcal_per_100g   = kcal_per_100g_gem
+                calorie_matched = food_name
+                calorie_source  = "gemini_grounding"
             else:
-                kcal_per_100g_gem = self._gemini_lookup(food_name, 'calories_per_100g', meal_context=meal_context)
-                if kcal_per_100g_gem is not None:
-                    kcal_per_100g   = kcal_per_100g_gem
-                    calorie_matched = food_name
-                    calorie_source  = "gemini_grounding"
-                else:
-                    raise NutritionLookupError(food_name, ["calories_per_100g"])
+                raise NutritionLookupError(food_name, ["calories_per_100g"])
 
         if kcal_entry is not None:
             kcal_entry = self._derive_usda_density_entry(kcal_entry)
