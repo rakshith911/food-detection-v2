@@ -1387,8 +1387,8 @@ class NutritionRAG:
 
         return None
 
-    @staticmethod
-    def _score_verifier_description(query: str, description: str) -> float:
+    @classmethod
+    def _score_verifier_description(cls, query: str, description: str) -> float:
         query_text = (query or "").strip().lower()
         desc_text = (description or "").strip().lower()
         if not query_text or not desc_text:
@@ -1404,8 +1404,18 @@ class NutritionRAG:
         for word in query_words:
             if word in desc_words:
                 score += 2.5
-        if "powder" in desc_text:
-            score -= 8.0
+
+        # Strongly reward cooked/prepared forms — verifier candidates are for plated food
+        _COOKED_BONUS = {'cooked', 'prepared', 'boiled', 'steamed', 'baked',
+                         'roasted', 'fried', 'grilled', 'restaurant', 'homemade'}
+        _DRY_PENALTY  = {'unprepared', 'uncooked', 'dry', 'dried', 'dehydrated',
+                         'powder', 'powdered', 'mix', 'packet', 'instant',
+                         'concentrate', 'seasoning', 'raw'}
+        if desc_words & _COOKED_BONUS:
+            score += 6.0
+        if desc_words & _DRY_PENALTY:
+            score -= 15.0
+
         if "sauce" in desc_text and "sauce" not in query_text:
             score -= 4.0
         if "frozen" in desc_text and "frozen" not in query_text:
