@@ -77,6 +77,73 @@ PORTION_UNIT_ALIASES = {
 
 XLSX_NS = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 
+# Cross-regional / cross-dialect synonym map used to enrich retrieval_text.
+# Both directions must be listed explicitly so queries in either dialect match.
+FOOD_SYNONYMS: dict[str, list[str]] = {
+    # Baked goods
+    "popover":           ["yorkshire pudding"],
+    "yorkshire pudding": ["popover"],
+    # Vegetables (UK ↔ US)
+    "aubergine":   ["eggplant"],
+    "eggplant":    ["aubergine"],
+    "courgette":   ["zucchini", "summer squash"],
+    "zucchini":    ["courgette"],
+    "rocket":      ["arugula"],
+    "arugula":     ["rocket"],
+    "spring onion": ["scallion", "green onion"],
+    "scallion":    ["spring onion", "green onion"],
+    "green onion": ["spring onion", "scallion"],
+    "beetroot":    ["beet"],
+    "beet":        ["beetroot"],
+    "mangetout":   ["snow pea", "snap pea"],
+    "mange tout":  ["snow pea", "snap pea"],
+    "snow pea":    ["mangetout", "mange tout"],
+    "pak choi":    ["bok choy", "chinese cabbage"],
+    "bok choy":    ["pak choi", "chinese cabbage"],
+    "swede":       ["rutabaga"],
+    "rutabaga":    ["swede"],
+    "capsicum":    ["bell pepper", "sweet pepper"],
+    "bell pepper": ["capsicum", "sweet pepper"],
+    "sweet pepper":["capsicum", "bell pepper"],
+    "coriander":   ["cilantro"],
+    "cilantro":    ["coriander"],
+    # Legumes
+    "chickpea":    ["garbanzo", "garbanzo bean"],
+    "garbanzo":    ["chickpea"],
+    "falafel":     ["chickpea patty"],
+    # Meat / seafood
+    "mince":       ["ground beef", "minced meat"],
+    "ground beef": ["mince", "minced beef"],
+    "minced beef": ["ground beef", "mince"],
+    "prawn":       ["shrimp"],
+    "shrimp":      ["prawn"],
+    # Dairy
+    "double cream":   ["heavy cream", "whipping cream"],
+    "heavy cream":    ["double cream", "whipping cream"],
+    "whipping cream": ["double cream", "heavy cream"],
+    "single cream":   ["half and half", "light cream"],
+    "half and half":  ["single cream", "light cream"],
+    # Snacks / sides
+    "crisps":       ["potato chips"],
+    "potato chips": ["crisps"],
+    "french fries": ["chips", "fries"],
+    "fries":        ["french fries", "chips"],
+    # Pantry / other
+    "sultana":            ["golden raisin"],
+    "golden raisin":      ["sultana"],
+    "treacle":            ["molasses"],
+    "molasses":           ["treacle"],
+    "desiccated coconut": ["shredded coconut"],
+    "shredded coconut":   ["desiccated coconut"],
+    # Indian cuisine
+    "paneer":       ["cottage cheese", "indian cheese", "fresh cheese"],
+    "palak paneer": ["saag paneer", "spinach paneer", "spinach with cheese"],
+    "saag paneer":  ["palak paneer", "spinach paneer"],
+    "naan":         ["flatbread", "indian bread"],
+    "chapati":      ["roti", "flatbread", "indian bread"],
+    "roti":         ["chapati", "flatbread"],
+}
+
 
 def safe_float(value: object) -> Optional[float]:
     if value is None:
@@ -522,6 +589,15 @@ def build_fao_dataset(density_path: Path, names_path: Path) -> list[dict]:
 
 def build_slim_rag_rows(unified_full_rows: list[dict]) -> list[dict]:
     def build_retrieval_text(row: dict) -> str:
+        desc = (row.get("description") or "").strip()
+        desc_lower = desc.lower()
+
+        # Collect cross-dialect synonym aliases
+        aliases: set[str] = set()
+        for keyword, alts in FOOD_SYNONYMS.items():
+            if keyword in desc_lower:
+                aliases.update(alts)
+
         parts: list[str] = []
 
         def add_part(value: object) -> None:
@@ -530,13 +606,14 @@ def build_slim_rag_rows(unified_full_rows: list[dict]) -> list[dict]:
             text = str(value).strip()
             if not text:
                 return
-            lowered = text.lower()
-            if lowered not in {part.lower() for part in parts}:
+            if text.lower() not in {p.lower() for p in parts}:
                 parts.append(text)
 
-        add_part(row.get("description"))
+        add_part(desc)
         add_part(row.get("household_serving_fulltext"))
         add_part(row.get("ingredients_text"))
+        if aliases:
+            parts.append("also known as: " + ", ".join(sorted(aliases)))
         return " | ".join(parts)
 
     slim_rows: list[dict] = []
