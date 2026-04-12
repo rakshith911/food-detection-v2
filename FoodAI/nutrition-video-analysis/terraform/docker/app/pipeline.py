@@ -1841,7 +1841,7 @@ class NutritionVideoPipeline:
         visible_items: list[dict],
         volume_map: dict,
         image_pil,
-        raw_depth_image,
+        calibrated_depth_image,
         job_id: str,
         user_context: Optional[dict] = None,
     ) -> list[dict]:
@@ -1867,7 +1867,7 @@ class NutritionVideoPipeline:
         ]
         prompt = (
             "You are a food nutrition analysis expert reviewing an image-only dish analysis.\n"
-            "Image 1 is the original RGB photo. Image 2 is the aligned depth visualization "
+            "Image 1 is the original RGB photo. Image 2 is the calibrated depth map "
             "(red/bright = closer to camera = taller/thicker, blue/dark = farther = flatter).\n"
             "Use BOTH images together to identify hidden content and genuinely high-calorie extras.\n\n"
             "Return ONLY valid JSON as an array. Each entry must be:\n"
@@ -1943,7 +1943,7 @@ class NutritionVideoPipeline:
         model = genai.GenerativeModel(model_name, generation_config=self._GEMINI_GEN_CONFIG)
         try:
             response = model.generate_content(
-                [prompt, image_pil, raw_depth_image],
+                [prompt, image_pil, calibrated_depth_image],
                 request_options={"timeout": 45},
             )
         except Exception as exc:
@@ -2302,7 +2302,7 @@ class NutritionVideoPipeline:
             visible_items=visible_items,
             volume_map=volume_map,
             image_pil=pil_image,
-            raw_depth_image=raw_depth_image,
+            calibrated_depth_image=calibrated_depth_image,
             job_id=job_id,
             user_context=user_context,
         )
