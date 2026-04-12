@@ -626,9 +626,12 @@ class NutritionVideoPipeline:
         )
 
         try:
+            import concurrent.futures as _cf
             model_name = self._flash_model_name()
             model = genai.GenerativeModel(model_name, generation_config=self._GEMINI_GEN_CONFIG)
-            response = model.generate_content([prompt, crop_image])
+            with _cf.ThreadPoolExecutor(max_workers=1) as _tex:
+                _fut = _tex.submit(model.generate_content, [prompt, crop_image])
+            response = _fut.result(timeout=30)
             response_text = (response.text or "").strip()
             if "```" in response_text:
                 response_text = response_text.split("```")[1]
@@ -649,8 +652,8 @@ class NutritionVideoPipeline:
                 },
             )
         except Exception as e:
-            logger.error(f"[{job_id}] Gemini RAG verifier failed for '{label}': {e}", exc_info=True)
-            raise
+            logger.warning(f"[{job_id}] Gemini RAG verifier timed out or failed for '{label}': {e} — skipping verification")
+            return nutrition
 
         selected_description = (parsed.get("your_pick") or "").strip()
         confidence = float(parsed.get("match_confidence") or 0.0)
