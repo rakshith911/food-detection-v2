@@ -860,21 +860,6 @@ class NutritionRAG:
         'rice', 'potato', 'potatoes', 'fries', 'bread', 'pita', 'pasta', 'noodle',
         'noodles', 'yorkshire', 'pudding', 'stuffing',
     }
-    # Foods that are virtually always served cooked when plated as a meal component.
-    # For these, dry/unprepared DB entries are physically wrong (wrong water content,
-    # wrong kcal/100g) even if the phrase appears verbatim in the description.
-    # "yellow rice" as a plated dish ≈ 130 kcal/100g cooked, NOT 343 kcal/100g dry packet.
-    _ALWAYS_COOKED_IN_MEALS = {
-        'rice', 'pasta', 'noodle', 'noodles', 'spaghetti', 'penne', 'fettuccine',
-        'linguine', 'macaroni', 'orzo', 'couscous', 'quinoa', 'bulgur', 'barley',
-        'farro', 'polenta', 'grits', 'oat', 'oats', 'oatmeal',
-        'lentil', 'lentils', 'bean', 'beans', 'chickpea', 'chickpeas',
-        'kidney', 'black bean', 'pinto', 'navy bean',
-    }
-    # Calorie ceiling (kcal/100g) for always-cooked starchy foods when served plated.
-    # Dry/uncooked forms exceed these by ~2-3×; hitting this cap means the candidate
-    # is almost certainly a dry-weight entry.
-    _COOKED_STARCH_KCAL_CAP = 220.0
     _VEGETABLE_TERMS = {
         'lettuce', 'cucumber', 'carrot', 'carrots', 'tomato', 'tomatoes',
         'pepper', 'peppers', 'onion', 'onions', 'cabbage', 'broccoli',
@@ -1182,19 +1167,6 @@ class NutritionRAG:
         return not bool(query_tokens & cls._RAW_QUERY_TERMS)
 
     @classmethod
-    def _query_implies_always_cooked(cls, query_lower: str) -> bool:
-        """True when the query names a food that is always served cooked as a meal component.
-
-        Used to block dry/unprepared DB entries even when the query phrase appears
-        verbatim in the description (e.g. "yellow rice" in "Yellow rice … dry packet mix").
-        Disabled if the query itself contains an explicit raw/dry indicator.
-        """
-        if cls._tokenize_words(query_lower, keep_generic=True) & cls._RAW_QUERY_TERMS:
-            return False
-        query_tokens = cls._tokenize_words(query_lower, keep_generic=True)
-        return bool(query_tokens & cls._ALWAYS_COOKED_IN_MEALS)
-
-    @classmethod
     def _dish_query_tokens(cls, text: str) -> set[str]:
         return {
             token
@@ -1243,12 +1215,18 @@ class NutritionRAG:
         has_prepared_marker = bool(matched_all_tokens & cls._PREPARED_TERMS)
 
         if query_served:
+            # Any plated-dish query should prefer prepared/cooked entries and avoid dry ones.
+            # This applies universally — not just to specific food categories.
             if has_prepared_marker:
                 score += 8.0
             if has_unprepared_marker:
-                score -= 18.0
+                score -= 25.0
             if len(query_tokens) >= 2 and overlap_count >= 2:
                 score -= 12.0 * len(matched_all_tokens & cls._UNPREPARED_TERMS)
+            # Extra reward for explicitly cooked/boiled/steamed forms — physically correct
+            # for any plated food (right water content, right kcal/100g).
+            if matched_all_tokens & cls._COOKED_TERMS:
+                score += 8.0
 
         # Strongly discourage falling back to a generic single-food label like "Rice"
         # when the query is more specific, e.g. "yellow rice".
@@ -1264,18 +1242,6 @@ class NutritionRAG:
             if {'yellow', 'rice'} <= matched_all_tokens:
                 score += 18.0
             if 'no' in matched_all_tokens and 'fat' in matched_all_tokens:
-                score += 10.0
-
-        # Generalized always-cooked starch penalty:
-        # Any food that is always served cooked (rice, pasta, lentils, etc.) should
-        # never be matched against a dry/unprepared DB entry — wrong water content means
-        # kcal/100g is ~2-3× too high.  Apply a heavy penalty regardless of phrase match.
-        if cls._query_implies_always_cooked(query_lower):
-            if matched_all_tokens & cls._UNPREPARED_TERMS:
-                score -= 40.0
-            if 'cooked' in matched_all_tokens or 'prepared' in matched_all_tokens:
-                score += 14.0
-            if 'boiled' in matched_all_tokens or 'steamed' in matched_all_tokens:
                 score += 10.0
 
         score += cls._compatibility_adjustment(query_lower, matched_lower, field='calories_per_100g')
@@ -1934,34 +1900,28 @@ class NutritionRAG:
             if self._is_mixed_dish_candidate_for_condiment_query(normalized, matched.lower()):
                 logger.info(f"Skip (mixed dish for condiment query): '{food_name}' vs '{matched}'")
                 continue
-            # Form-conflict check:
-            # Always applied for density (wrong-form density = wrong mass calculation).
-            # For kcal: applied as normal EXCEPT when the food name is a multi-word
-            # specific dish phrase that appears verbatim in the matched description —
-            # BUT only when the food is NOT an always-cooked starch.  Dry-packet entries
-            # for rice/pasta/lentils etc. have physically wrong water content; their
-            # kcal/100g is 2-3× too high for plated food regardless of phrase match.
-            #   "yellow rice" → "Yellow rice … dry packet mix, unprepared"  ✗ BLOCKED
-            #   "rice pilaf"  → "Rice pilaf, cooked"                        ✓ allowed
-            # Still permits phrase bypass for non-starch named dishes and still blocks:
-            #   "tomato"      → "Tomato products, canned, sauce"  ✗
-            #   "diced onions"→ "Onions, frozen, chopped, unprepared" ✗
+            # Form-conflict check — applied identically for both density and kcal.
+            # Rule: if the query doesn't mention a dry/raw/unprepared form, don't match
+            # a dry/raw/unprepared DB entry.  This is a universal property of plated food:
+            # a query for "yellow rice", "chicken breast", "pasta", or any other served
+            # dish never wants dry-packet/uncooked calorie values regardless of whether
+            # the phrase appears verbatim in the description.
+            #
+            # The old "phrase_in_desc" bypass has been removed — it was the root cause of
+            # matches like "yellow rice" → "Yellow rice, dry packet mix, unprepared" (343
+            # kcal/100g instead of ~130 for cooked).  _has_conflicting_form already
+            # correctly exempts fresh produce (lettuce, cucumber, carrots, etc.) that
+            # is genuinely served raw, so those still resolve to "raw" DB entries.
+            #
+            # Examples:
+            #   "yellow rice"    → "Yellow rice … dry packet, unprepared"  ✗ blocked
+            #   "chicken breast" → "Chicken, raw"                          ✗ blocked
+            #   "pasta"          → "Pasta, dry, unenriched"               ✗ blocked
+            #   "shredded carrots"→ "Carrots, raw"                         ✓ allowed (fresh produce)
+            #   "yellow rice mix"→ "Yellow rice … dry packet"              ✓ allowed (query has 'mix')
             if self._has_conflicting_form(normalized, matched.lower()):
-                if field == 'density_g_ml':
-                    logger.info(f"Skip (conflicting form for density): '{food_name}' vs '{matched}'")
-                    continue
-                # kcal: block always-cooked starches outright; for others allow phrase bypass
-                if self._query_implies_always_cooked(normalized):
-                    logger.info(f"Skip (always-cooked starch, dry form blocked): '{food_name}' vs '{matched}'")
-                    continue
-                food_phrase = food_name.strip().lower()
-                phrase_in_desc = (
-                    len(food_phrase.split()) >= 2
-                    and food_phrase in matched.lower()
-                )
-                if not phrase_in_desc:
-                    logger.info(f"Skip (conflicting form for kcal): '{food_name}' vs '{matched}'")
-                    continue
+                logger.info(f"Skip (conflicting form): '{food_name}' vs '{matched}'")
+                continue
 
             rank_score = candidate["rank_score"]
             compatibility_score = self._compatibility_adjustment(normalized, matched.lower(), field=field)
