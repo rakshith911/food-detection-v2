@@ -1941,7 +1941,14 @@ class NutritionVideoPipeline:
 
         model_name = self._flash_model_name()
         model = genai.GenerativeModel(model_name, generation_config=self._GEMINI_GEN_CONFIG)
-        response = model.generate_content([prompt, image_pil, raw_depth_image])
+        try:
+            response = model.generate_content(
+                [prompt, image_pil, raw_depth_image],
+                request_options={"timeout": 45},
+            )
+        except Exception as exc:
+            logger.warning("[%s] _infer_hidden_and_extra_items_with_gemini timed out or failed (%s) — skipping", job_id, exc)
+            return []
         response_text = (response.text or "").strip()
         if "```" in response_text:
             response_text = response_text.split("```")[1]
