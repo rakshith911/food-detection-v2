@@ -9,6 +9,8 @@ import json
 import logging
 import re
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from pathlib import Path
 from typing import Any, Optional
@@ -112,6 +114,8 @@ class NutritionRAG:
         self._fao_density = []
         self._fao_names   = []
         self._branded_foods: Optional[list[dict]] = None
+        self._branded_token_index: dict[str, list[int]] = {}  # token → entry indices
+        self._branded_load_lock = threading.Lock()
         self._usda_index  = None
         self._usda_foods  = []
         self._usda_names  = []
@@ -184,16 +188,45 @@ class NutritionRAG:
     def _ensure_branded_foods_loaded(self) -> None:
         if self._branded_foods is not None:
             return
-        self._branded_foods = []
-        if not self._branded_foods_path or not self._branded_foods_path.exists():
-            return
-        try:
-            with open(self._branded_foods_path, encoding="utf-8") as f:
-                self._branded_foods = json.load(f)
-            logger.info("  Branded fallback: %s entries", len(self._branded_foods))
-        except Exception as exc:
-            logger.warning("Failed to load branded fallback dataset: %s", exc)
+        with self._branded_load_lock:
+            if self._branded_foods is not None:  # double-check after acquiring lock
+                return
             self._branded_foods = []
+            if not self._branded_foods_path or not self._branded_foods_path.exists():
+                return
+            try:
+                with open(self._branded_foods_path, encoding="utf-8") as f:
+                    self._branded_foods = json.load(f)
+                logger.info("  Branded fallback: %s entries", len(self._branded_foods))
+                self._build_branded_token_index()
+            except Exception as exc:
+                logger.warning("Failed to load branded fallback dataset: %s", exc)
+                self._branded_foods = []
+
+    def _build_branded_token_index(self) -> None:
+        """
+        Build an inverted token index over branded food descriptions.
+        Maps each meaningful token → list of entry indices, enabling O(candidates)
+        lookup instead of O(1.99M) linear scan.  Includes both exact tokens and
+        singular/plural variants so near-token-match (apple↔apples) is preserved.
+        """
+        idx: dict[str, list[int]] = {}
+        signal_words = self._SIGNAL_WORDS
+        generic_words = self._GENERIC_WORDS
+        for i, entry in enumerate(self._branded_foods):
+            desc = (entry.get("description") or "").lower()
+            tokens = set(re.sub(r'[^\w ]', ' ', desc).split())
+            for tok in tokens:
+                if not (len(tok) >= 4 or tok in signal_words):
+                    continue
+                if tok in generic_words:
+                    continue
+                idx.setdefault(tok, []).append(i)
+                # Also index singular (strip trailing 's') so "apple" finds "apples" entries
+                if tok.endswith('s') and len(tok) >= 5:
+                    idx.setdefault(tok[:-1], []).append(i)
+        self._branded_token_index = idx
+        logger.info("  Branded token index: %d unique tokens", len(idx))
 
     def _lookup_branded_fallback(
         self,
@@ -206,9 +239,34 @@ class NutritionRAG:
 
         normalized = self._normalize_food_name(food_name)
         query_tokens = self._tokenize_words(normalized, keep_generic=True)
+
+        # Resolve candidate indices via inverted token index (O(k) instead of O(1.99M)).
+        # Use the same token-quality criteria as _words_overlap so no candidates are missed.
+        index_query_tokens: set[str] = set()
+        for tok in query_tokens:
+            if not (len(tok) >= 4 or tok in self._SIGNAL_WORDS):
+                continue
+            if tok in self._GENERIC_WORDS:
+                continue
+            index_query_tokens.add(tok)
+            # Also look up plural form so "apple" retrieves "apples" entries
+            if tok.endswith('s') and len(tok) >= 5:
+                index_query_tokens.add(tok[:-1])
+            else:
+                index_query_tokens.add(tok + 's')
+
+        if self._branded_token_index and index_query_tokens:
+            candidate_indices: set[int] = set()
+            for tok in index_query_tokens:
+                candidate_indices.update(self._branded_token_index.get(tok, []))
+        else:
+            # Index not built (e.g. file absent) — fall back to full scan
+            candidate_indices = set(range(len(self._branded_foods)))
+
         candidates = []
 
-        for entry in self._branded_foods:
+        for i in candidate_indices:
+            entry = self._branded_foods[i]
             value = entry.get(field)
             if value is None:
                 continue
@@ -2375,21 +2433,29 @@ class NutritionRAG:
 
     def _get_density_with_match(self, food_name: str, top_k: int = 10, crop_image: Optional[Image.Image] = None, meal_context: Optional[str] = None):
         """Return (density_g_ml, matched_name, source, entry|None)."""
+        # Run unified FAISS and branded lookup in parallel to avoid sequential latency.
+        # Branded result is only used when unified FAISS misses, preserving priority order.
+        with ThreadPoolExecutor(max_workers=2) as _ex:
+            if self._use_unified:
+                _unified_fut = _ex.submit(self._lookup_unified, food_name, 'density_g_ml', top_k, crop_image)
+            else:
+                _unified_fut = _ex.submit(self._lookup_legacy_density, food_name)
+            _branded_fut = _ex.submit(self._lookup_branded_fallback, food_name, 'density_g_ml')
+
         if self._use_unified:
-            density, matched, source, entry = self._lookup_unified(food_name, 'density_g_ml', top_k, crop_image=crop_image)
+            density, matched, source, entry = _unified_fut.result()
             if density is None and self._fao_index is not None:
                 density, matched, source = self._lookup_legacy_density(food_name)
                 entry = None
         else:
-            density, matched, source = self._lookup_legacy_density(food_name)
+            _r = _unified_fut.result()
+            density, matched, source = _r[0], _r[1], _r[2]
             entry = None
 
         if density is not None:
             return float(density), matched, source, entry
 
-        branded_density, branded_matched, branded_source, branded_entry = self._lookup_branded_fallback(
-            food_name, 'density_g_ml'
-        )
+        branded_density, branded_matched, branded_source, branded_entry = _branded_fut.result()
         if branded_density is not None:
             return float(branded_density), branded_matched, branded_source, branded_entry
 
@@ -2405,17 +2471,24 @@ class NutritionRAG:
 
     def _get_calories_with_match(self, food_name: str, top_k: int = 10, crop_image: Optional[Image.Image] = None, meal_context: Optional[str] = None):
         """Return (kcal_per_100g, matched_name, source). Entry not needed here."""
+        # Run unified FAISS and branded lookup in parallel to avoid sequential latency.
+        with ThreadPoolExecutor(max_workers=2) as _ex:
+            if self._use_unified:
+                _unified_fut = _ex.submit(self._lookup_unified, food_name, 'calories_per_100g', top_k, crop_image)
+            else:
+                _unified_fut = _ex.submit(self._lookup_legacy_calories, food_name)
+            _branded_fut = _ex.submit(self._lookup_branded_fallback, food_name, 'calories_per_100g')
+
         if self._use_unified:
-            kcal, matched, source, _ = self._lookup_unified(food_name, 'calories_per_100g', top_k, crop_image=crop_image)
+            kcal, matched, source, _ = _unified_fut.result()
         else:
-            kcal, matched, source = self._lookup_legacy_calories(food_name)
+            result = _unified_fut.result()
+            kcal, matched, source = result[0], result[1], result[2]
 
         if kcal is not None:
             return float(kcal), matched, source
 
-        branded_kcal, branded_matched, branded_source, _ = self._lookup_branded_fallback(
-            food_name, 'calories_per_100g'
-        )
+        branded_kcal, branded_matched, branded_source, _ = _branded_fut.result()
         if branded_kcal is not None:
             return float(branded_kcal), branded_matched, branded_source
 
@@ -2470,20 +2543,24 @@ class NutritionRAG:
 
         Returns (density, kcal_per_100g, density_matched, density_source, calorie_matched, calorie_source).
         """
-        # ── Step 1: kcal via CLIP-FAISS + cross-encoder ──────────────────────────
+        # ── Step 1: kcal via CLIP-FAISS + cross-encoder (parallel with branded) ────
         kcal_entry: Optional[dict] = None
+        with ThreadPoolExecutor(max_workers=2) as _ex:
+            if self._use_unified:
+                _kcal_unified_fut = _ex.submit(self._lookup_unified, food_name, 'calories_per_100g', 10, crop_image)
+            else:
+                _kcal_unified_fut = _ex.submit(self._lookup_legacy_calories, food_name)
+            _kcal_branded_fut = _ex.submit(self._lookup_branded_fallback, food_name, 'calories_per_100g')
+
         if self._use_unified:
-            kcal_per_100g, calorie_matched, calorie_source, kcal_entry = self._lookup_unified(
-                food_name, 'calories_per_100g', crop_image=crop_image
-            )
+            kcal_per_100g, calorie_matched, calorie_source, kcal_entry = _kcal_unified_fut.result()
         else:
-            kcal_per_100g, calorie_matched, calorie_source = self._lookup_legacy_calories(food_name)
+            _r = _kcal_unified_fut.result()
+            kcal_per_100g, calorie_matched, calorie_source = _r[0], _r[1], _r[2]
 
         if kcal_per_100g is None:
-            # Try branded foods before Gemini
-            branded_kcal, branded_matched, branded_source, _ = self._lookup_branded_fallback(
-                food_name, 'calories_per_100g'
-            )
+            # Use pre-fetched branded result (already computed in parallel)
+            branded_kcal, branded_matched, branded_source, _ = _kcal_branded_fut.result()
             if branded_kcal is not None:
                 kcal_per_100g   = float(branded_kcal)
                 calorie_matched = branded_matched
