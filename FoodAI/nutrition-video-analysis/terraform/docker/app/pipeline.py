@@ -673,6 +673,22 @@ class NutritionVideoPipeline:
             "threshold": verification_threshold,
         }
 
+        # Hard-reject any Gemini pick that is a conflicting form for this food query
+        # (dry/unprepared/raw entries give physically wrong kcal/100g for plated food).
+        # This is a safety net — get_verifier_candidates already filters these out,
+        # but this guard ensures a hallucinated or stale candidate can never be applied.
+        rag = self.models.rag
+        if selected_description and rag._has_conflicting_form(
+            rag._normalize_food_name(label), selected_description.lower()
+        ):
+            logger.warning(
+                f"[{job_id}] Gemini verifier picked conflicting-form entry for '{label}': "
+                f"'{selected_description}' — rejecting, keeping original"
+            )
+            verified["rag_verification"]["decision"] = "keep"
+            verified["rag_verification"]["selected_description"] = chosen_description
+            return verified
+
         if (
             confidence < verification_threshold
             or not selected_description

@@ -1419,11 +1419,24 @@ class NutritionRAG:
         rag_candidates: Optional[list[dict]],
         limit: int = 8,
     ) -> list[dict]:
+        normalized_query = self._normalize_food_name(food_name)
+
+        def _is_valid_for_query(desc: Optional[str]) -> bool:
+            """Return False if the description is a conflicting form for this food query.
+
+            This ensures the Gemini verifier never sees dry/raw/unprepared candidates
+            for a query that doesn't explicitly ask for that form — the same rule applied
+            in _lookup_unified for FAISS retrieval.
+            """
+            if not desc:
+                return False
+            return not self._has_conflicting_form(normalized_query, desc.lower())
+
         descriptions: list[str] = []
 
         def add_description(text: Optional[str]) -> None:
             normalized = (text or "").strip()
-            if normalized and normalized not in descriptions:
+            if normalized and normalized not in descriptions and _is_valid_for_query(normalized):
                 descriptions.append(normalized)
 
         add_description(chosen_description)
