@@ -1942,10 +1942,10 @@ class NutritionVideoPipeline:
         model_name = self._flash_model_name()
         model = genai.GenerativeModel(model_name, generation_config=self._GEMINI_GEN_CONFIG)
         try:
-            response = model.generate_content(
-                [prompt, image_pil, calibrated_depth_image],
-                request_options={"timeout": 45},
-            )
+            import concurrent.futures as _cf
+            with _cf.ThreadPoolExecutor(max_workers=1) as _tex:
+                _fut = _tex.submit(model.generate_content, [prompt, image_pil, calibrated_depth_image])
+            response = _fut.result(timeout=45)
         except Exception as exc:
             logger.warning("[%s] _infer_hidden_and_extra_items_with_gemini timed out or failed (%s) — skipping", job_id, exc)
             return []
