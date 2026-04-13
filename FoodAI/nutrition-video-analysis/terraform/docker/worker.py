@@ -527,13 +527,21 @@ def process_message(message: dict, pipeline=None):
                 if os.path.exists(output_dir_candidate):
                     shutil.rmtree(output_dir_candidate, ignore_errors=True)
 
-            # Extract food names from detected items
+            # Extract food items — video pipeline stores them under full_results.nutrition.items;
+            # fall back to detected_items for the legacy image pipeline.
+            raw_items = (
+                results.get('full_results', {}).get('nutrition', {}).get('items')
+                or results.get('detected_items')
+                or []
+            )
             food_items = [
                 {
-                    'name': item.get('name'),
-                    'calories': item.get('calories')
+                    'name': item.get('food_name') or item.get('name'),
+                    'calories': item.get('total_calories') or item.get('calories'),
+                    'mass_g': item.get('mass_g'),
                 }
-                for item in results.get('detected_items', [])
+                for item in raw_items
+                if item.get('food_name') or item.get('name')
             ]
 
             # Update job as completed
