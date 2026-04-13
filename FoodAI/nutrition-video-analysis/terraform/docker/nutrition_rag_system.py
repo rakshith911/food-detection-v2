@@ -2140,7 +2140,7 @@ class NutritionRAG:
             from google import genai as genai_new
             from google.genai import types
             client = genai_new.Client(api_key=self._gemini_api_key)
-            config_kwargs: dict = {"temperature": 0.0}
+            config_kwargs: dict = {"temperature": 0.0, "top_p": 1, "top_k": 1, "seed": 42}
             if hasattr(types, "Tool"):
                 if hasattr(types, "GoogleSearch"):
                     config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
@@ -2162,7 +2162,7 @@ class NutritionRAG:
             resp = client.models.generate_content(
                 model=self._gemini_model,
                 contents=prompt,
-                config=types.GenerateContentConfig(temperature=0.0),
+                config=types.GenerateContentConfig(temperature=0.0, top_p=1, top_k=1, seed=42),
             )
             return resp
 

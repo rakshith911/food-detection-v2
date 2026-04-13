@@ -273,6 +273,7 @@ def call_gemini(local_path: str, mime: str, prompt: str) -> dict:
                 response = client.models.generate_content(
                     model=model_name,
                     contents=types.Content(parts=parts),
+                    config=types.GenerateContentConfig(top_p=1, top_k=1, seed=42),
                 )
             else:
                 # Upload via File API for larger files
@@ -281,6 +282,7 @@ def call_gemini(local_path: str, mime: str, prompt: str) -> dict:
                 response = client.models.generate_content(
                     model=model_name,
                     contents=[myfile, prompt],
+                    config=types.GenerateContentConfig(top_p=1, top_k=1, seed=42),
                 )
 
             text = (response.text or '').strip()

@@ -8,7 +8,7 @@ import numpy as np
 from pathlib import Path
 from PIL import Image
 import PIL.PngImagePlugin  # Ensure Pillow registers PNG plugin classes for Gemini image uploads
-from typing import Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 import io
 import logging
 import json
@@ -35,8 +35,18 @@ class NutritionVideoPipeline:
     Complete pipeline for video-based nutrition analysis
     """
 
-    # Shared Gemini generation config — temperature=0 for deterministic/reproducible outputs
-    _GEMINI_GEN_CONFIG = {"temperature": 0.0}
+    # Shared Gemini generation config for the legacy google.generativeai SDK.
+    # This SDK version does not accept `seed`, so we keep deterministic controls
+    # to the fields it supports.
+    _GEMINI_GEN_CONFIG = {
+        "temperature": 0.0,
+        "top_p": 1,
+        "top_k": 1,
+    }
+    _GEMINI_FIRST_PASS_GEN_CONFIG = {
+        **_GEMINI_GEN_CONFIG,
+        "max_output_tokens": 2048,
+    }
 
     @staticmethod
     def _get_s3_client():
@@ -248,7 +258,10 @@ class NutritionVideoPipeline:
                 "- Be conservative. When uncertain, lower the confidence rather than rejecting outright.\n"
                 "- Only use verdict=reject for items that are clearly implausible for this dish type."
             )
-            model = genai.GenerativeModel("gemini-2.0-flash")
+            model = genai.GenerativeModel(
+                "gemini-2.0-flash",
+                generation_config=self._GEMINI_GEN_CONFIG,
+            )
             response = model.generate_content(prompt)
             response_text = (response.text or '').strip()
             if "```" in response_text:
@@ -751,7 +764,10 @@ class NutritionVideoPipeline:
         prompt += self._build_user_context_suffix(user_context)
 
         model_name = self._flash_model_name()
-        gm = genai.GenerativeModel(model_name, generation_config=self._GEMINI_GEN_CONFIG)
+        gm = genai.GenerativeModel(
+            model_name,
+            generation_config=self._GEMINI_FIRST_PASS_GEN_CONFIG,
+        )
         response = gm.generate_content([prompt, image_pil])
         response_text = response.text or ""
 
@@ -768,7 +784,24 @@ class NutritionVideoPipeline:
             e_idx = response_text.rfind("}") + 1
             json_str = response_text[s:e_idx]
 
-        data = json.loads(json_str)
+        def _repair_json(candidate: str) -> str:
+            repaired = candidate.replace("\r", " ").strip()
+            repaired = repaired.replace("“", '"').replace("”", '"').replace("’", "'")
+            # Gemini occasionally emits simple fractions like 1/2 for numeric fields.
+            repaired = re.sub(
+                r'(?<=:\s)(\d+)\s*/\s*(\d+)(?=\s*[,}\]])',
+                lambda m: str(float(m.group(1)) / float(m.group(2))),
+                repaired,
+            )
+            repaired = re.sub(r'(\]|\}|\")\s*(\")', r'\1, \2', repaired)
+            repaired = re.sub(r'(\]|\})\s*([A-Za-z0-9_"])', r'\1, \2', repaired)
+            repaired = re.sub(r',\s*([}\]])', r'\1', repaired)
+            return repaired
+
+        try:
+            data = json.loads(json_str)
+        except json.JSONDecodeError:
+            data = json.loads(_repair_json(json_str))
         self._record_gemini_output(
             stage="production_image_first_pass",
             job_id=job_id,
@@ -2147,7 +2180,10 @@ class NutritionVideoPipeline:
                 "[{\"name\":\"olive oil\",\"grams\":14,\"grams_confidence\":0.9,\"kcal\":119,\"kcal_confidence\":0.88,\"confidence\":0.89}, ...]. "
                 "Every confidence must be between 0 and 1."
             )
-            response = genai.GenerativeModel("gemini-2.0-flash").generate_content(prompt)
+            response = genai.GenerativeModel(
+                "gemini-2.0-flash",
+                generation_config=self._GEMINI_GEN_CONFIG,
+            ).generate_content(prompt)
             text = (response.text or "").strip()
             if "```" in text:
                 text = text.split("```")[1]
@@ -3907,6 +3943,7 @@ class NutritionVideoPipeline:
                     response = client.models.generate_content(
                         model=model_name,
                         contents=types.Content(parts=parts),
+                        config=types.GenerateContentConfig(**self._GEMINI_GEN_CONFIG),
                     )
                     response_text = (response.text or "").strip()
                     if response_text:
@@ -4055,6 +4092,7 @@ class NutritionVideoPipeline:
                             response = client.models.generate_content(
                                 model=model_name,
                                 contents=types.Content(parts=parts),
+                                config=types.GenerateContentConfig(**self._GEMINI_GEN_CONFIG),
                             )
                             response_text = response.text or ""
                             if response_text:
@@ -4071,6 +4109,7 @@ class NutritionVideoPipeline:
                             response = client.models.generate_content(
                                 model=model_name,
                                 contents=[myfile, prompt],
+                                config=types.GenerateContentConfig(**self._GEMINI_GEN_CONFIG),
                             )
                             response_text = response.text or ""
                             if response_text:
@@ -4400,7 +4439,10 @@ class NutritionVideoPipeline:
                             import time
                             time.sleep(0.2)  # Rate limiting
                             genai.configure(api_key=self.config.GEMINI_API_KEY)
-                            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
+                            gemini_model = genai.GenerativeModel(
+                                'gemini-2.0-flash',
+                                generation_config=self._GEMINI_GEN_CONFIG,
+                            )
                             
                             prompt = (
                                 f"Extract only the food item names from this text and list them separated by commas. "
@@ -6073,7 +6115,10 @@ class NutritionVideoPipeline:
             # Add small delay to avoid rate limiting
             time.sleep(0.2)
             genai.configure(api_key=self.config.GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
+            gemini_model = genai.GenerativeModel(
+                'gemini-2.0-flash',
+                generation_config=self._GEMINI_GEN_CONFIG,
+            )
             
             prompt = f"""You are a food portion estimation expert. Analyze this volume calculation:
 
@@ -6182,7 +6227,10 @@ Examples:
             import json
             time.sleep(0.2)  # Rate limiting
             genai.configure(api_key=self.config.GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
+            gemini_model = genai.GenerativeModel(
+                'gemini-2.0-flash',
+                generation_config=self._GEMINI_GEN_CONFIG,
+            )
             
             # Build prompt with both validation and estimation items
             validation_list = []
@@ -6337,7 +6385,10 @@ Example:
             import json
             time.sleep(0.2)  # Rate limiting
             genai.configure(api_key=self.config.GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
+            gemini_model = genai.GenerativeModel(
+                'gemini-2.0-flash',
+                generation_config=self._GEMINI_GEN_CONFIG,
+            )
             
             # Build prompt with all items
             items_list = []
@@ -6442,7 +6493,10 @@ Example:
             import json
             time.sleep(0.2)  # Rate limiting
             genai.configure(api_key=self.config.GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
+            gemini_model = genai.GenerativeModel(
+                'gemini-2.0-flash',
+                generation_config=self._GEMINI_GEN_CONFIG,
+            )
             
             prompt = f"""You are a food portion estimation expert. Estimate the typical serving volume for this food item.
 
@@ -6526,7 +6580,10 @@ Example:
             import json
             time.sleep(0.2)  # Rate limiting
             genai.configure(api_key=self.config.GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
+            gemini_model = genai.GenerativeModel(
+                'gemini-2.0-flash',
+                generation_config=self._GEMINI_GEN_CONFIG,
+            )
             
             # Create list of detected items
             items_list = ", ".join([f'"{label}"' for label in labels])
@@ -6610,7 +6667,10 @@ Example:
         try:
             import google.generativeai as genai
             genai.configure(api_key=self.config.GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
+            gemini_model = genai.GenerativeModel(
+                'gemini-2.0-flash',
+                generation_config=self._GEMINI_GEN_CONFIG,
+            )
             
             # Skip non-food items
             skip_keywords = [
@@ -6772,7 +6832,10 @@ If no duplicates, respond: {{"merge_groups": [], "keep_separate": [{{"id": "ID1"
             import json
             time.sleep(0.2)  # Rate limiting
             genai.configure(api_key=self.config.GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
+            gemini_model = genai.GenerativeModel(
+                'gemini-2.0-flash',
+                generation_config=self._GEMINI_GEN_CONFIG,
+            )
             
             # Build list of all detected objects
             skip_keywords = [
@@ -6953,7 +7016,10 @@ If no duplicates/combinations, respond: {{"merge_groups": [], "combine": [], "ke
             import time
             time.sleep(0.2)  # Rate limiting
             genai.configure(api_key=self.config.GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-2.0-flash')
+            gemini_model = genai.GenerativeModel(
+                'gemini-2.0-flash',
+                generation_config=self._GEMINI_GEN_CONFIG,
+            )
             
             # Build list of items with their counts
             item_groups = {}

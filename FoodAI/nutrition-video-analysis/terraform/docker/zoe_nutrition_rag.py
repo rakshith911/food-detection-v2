@@ -169,7 +169,13 @@ class NutritionRAG:
                     response = client.models.generate_content(
                         model=model_name,
                         contents=prompt,
-                        config=types.GenerateContentConfig(temperature=0.0, tools=tools),
+                        config=types.GenerateContentConfig(
+                            temperature=0.0,
+                            top_p=1,
+                            top_k=1,
+                            seed=42,
+                            tools=tools,
+                        ),
                     )
                     raw = gemini._strip_json(response.text or "")
                     result = json.loads(raw)
