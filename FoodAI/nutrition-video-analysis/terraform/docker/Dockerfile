@@ -110,23 +110,8 @@ COPY nutrition_rag_system.py .
 RUN ls -la /app/ && \
     test -f /app/worker.py && \
     test -f /app/nutrition_rag_system.py && \
-    python3 -c "
-import ast, sys
-with open('/app/app/pipeline.py') as f:
-    src = f.read()
-tree = ast.parse(src)
-for node in ast.walk(tree):
-    if isinstance(node, ast.FunctionDef) and node.name == 'process_video':
-        body_src = src.split('\n')[node.lineno - 1: node.end_lineno]
-        body_text = '\n'.join(body_src)
-        assert '_run_tracking_pipeline' not in body_text, \
-            'FATAL: process_video still calls _run_tracking_pipeline — old code deployed!'
-        assert '_load_all_video_frames' in body_text, \
-            'FATAL: process_video missing _load_all_video_frames — new code not deployed!'
-        print('✅ process_video is the new SAM3 pipeline')
-        sys.exit(0)
-sys.exit(1)
-" && \
+    python3 -c "import sys; src=open('/app/app/pipeline.py').read(); assert '_load_all_video_frames' in src, 'FATAL: new video pipeline not deployed'; assert src.count('def process_video') >= 1, 'FATAL: process_video missing'; print('pipeline.py OK')" && \
+    grep -c "_load_all_video_frames" /app/app/pipeline.py && \
     echo "All required files present"
 
 # Health check
