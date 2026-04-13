@@ -785,21 +785,21 @@ class NutritionVideoPipeline:
             json_str = response_text[s:e_idx]
 
         def _repair_json(candidate: str) -> str:
-            repaired = candidate.replace(“\r”, “ “).strip()
-            repaired = repaired.replace(“\u201c”, ‘”’).replace(“\u201d”, ‘”’).replace(“\u2019”, “’”)
+            repaired = candidate.replace("\r", " ").strip()
+            repaired = repaired.replace("\u201c", '"').replace("\u201d", '"').replace("\u2019", "'")
             # Gemini occasionally emits simple fractions like 1/2 for numeric fields.
             repaired = re.sub(
-                r’(?<=:\s)(\d+)\s*/\s*(\d+)(?=\s*[,}\]])’,
+                r'(?<=:\s)(\d+)\s*/\s*(\d+)(?=\s*[,}\]])',
                 lambda m: str(float(m.group(1)) / float(m.group(2))),
                 repaired,
             )
-            repaired = re.sub(r’(\]|\}|\”)\s*(\”)’, r’\1, \2’, repaired)
-            repaired = re.sub(r’(\]|\})\s*([A-Za-z0-9_”])’, r’\1, \2’, repaired)
-            repaired = re.sub(r’,\s*([}\]])’, r’\1’, repaired)
+            repaired = re.sub(r'(\]|\}|\")\s*(\")', r'\1, \2', repaired)
+            repaired = re.sub(r'(\]|\})\s*([A-Za-z0-9_"])', r'\1, \2', repaired)
+            repaired = re.sub(r',\s*([}\]])', r'\1', repaired)
             return repaired
 
         def _truncate_to_valid_json(candidate: str) -> str:
-            “””Handle truncated Gemini output by closing open structures.”””
+            """Handle truncated Gemini output by closing open structures."""
             s = candidate.strip()
             # Count open braces/brackets to close them
             depth_brace = 0
@@ -811,29 +811,29 @@ class NutritionVideoPipeline:
                 if escape_next:
                     escape_next = False
                     continue
-                if ch == ‘\\’ and in_string:
+                if ch == '\\' and in_string:
                     escape_next = True
                     continue
-                if ch == ‘”’:
+                if ch == '"':
                     in_string = not in_string
                 if in_string:
                     continue
-                if ch == ‘{‘:
+                if ch == '{':
                     depth_brace += 1
-                elif ch == ‘}’:
+                elif ch == '}':
                     depth_brace -= 1
                     if depth_brace == 0:
                         last_good = i + 1
-                elif ch == ‘[‘:
+                elif ch == '[':
                     depth_bracket += 1
-                elif ch == ‘]’:
+                elif ch == ']':
                     depth_bracket -= 1
             # If truncated mid-string, close the string first
             if in_string:
-                s += ‘”’
+                s += '"'
             # Close open arrays then objects
-            s += ‘]’ * max(0, depth_bracket)
-            s += ‘}’ * max(0, depth_brace)
+            s += ']' * max(0, depth_bracket)
+            s += '}' * max(0, depth_brace)
             return s
 
         try:
