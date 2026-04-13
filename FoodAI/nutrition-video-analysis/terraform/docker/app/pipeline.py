@@ -310,18 +310,25 @@ class NutritionVideoPipeline:
 
     def process_video(self, video_path: Path, job_id: str, user_context: dict = None) -> Dict:
         """
-        Main entry point - process entire video
+        Process a video using the same production pipeline as images.
 
-        Args:
-            video_path: Path to input video
-            job_id: Unique job identifier
-
-        Returns:
-            Complete results dictionary with tracking, volumes, and nutrition
+        Flow:
+          1. Load ALL frames from the video (up to VIDEO_MAX_DURATION_SECONDS).
+          2. Pick the sharpest frame from the middle-third as the representative frame.
+          3. Save it as a temp JPEG and run _run_production_image_pipeline on it —
+             the image pipeline is completely untouched.
+          4. Extract detected food names from the result and run SAM3 on ~15 evenly-spaced
+             keyframes across the video.
+          5. Propagate keyframe masks to every frame (nearest-keyframe assignment — the
+             meal is static so this is accurate).
+          6. Render the full SAM3-segmented overlay video and upload to S3.
+          7. Return the image-pipeline result structure with media_type="video".
         """
-        logger.info(f"[{job_id}] Starting video processing: {video_path.name}")
+        import tempfile
 
-        # Reset per-job state so detections from previous jobs don't leak in
+        logger.info(f"[{job_id}] Starting video processing (SAM3 pipeline): {video_path.name}")
+
+        # Reset per-job state
         self.florence_detections = []
         self.last_questionnaire_verification = []
         self.gemini_outputs = []
@@ -332,55 +339,381 @@ class NutritionVideoPipeline:
         }
 
         try:
-            # Step 1: Load and prepare frames
-            frames = self._load_frames(video_path)
-            if not frames:
+            # ── Step 1: Load all frames ────────────────────────────────────────
+            all_frames, fps, video_rotation = self._load_all_video_frames(video_path, job_id)
+            if not all_frames:
                 raise ValueError("No frames loaded from video")
+            logger.info(f"[{job_id}] Loaded {len(all_frames)} frames at {fps:.1f} fps")
 
-            logger.info(f"[{job_id}] Loaded {len(frames)} frames")
+            # ── Step 2: Pick representative frame (sharpest in middle-third) ──
+            rep_idx = self._pick_representative_frame(all_frames)
+            rep_frame_rgb = all_frames[rep_idx]
+            logger.info(f"[{job_id}] Representative frame: index {rep_idx}/{len(all_frames)-1}")
 
-            # Step 2: Run tracking pipeline with depth (pass video_path for one-shot Gemini video)
-            tracking_results = self._run_tracking_pipeline(frames, job_id, video_path=video_path, user_context=user_context)
-
-            # Step 3: Analyze nutrition
-            nutrition_results = self._analyze_nutrition(tracking_results, job_id)
-
-            # Step 4: Compile complete results (same structure as image)
-            final_results = {
-                'job_id': job_id,
-                'media_name': video_path.name,
-                'media_type': 'video',
-                'timestamp': datetime.utcnow().isoformat(),
-                'num_frames_processed': len(frames),
-                'calibration': self.calibration,
-                'florence_detections': self.florence_detections,
-                'tracking': tracking_results,
-                'nutrition': nutrition_results,
-                'questionnaire_verification': self.last_questionnaire_verification,
-                'gemini_outputs': self.gemini_outputs,
-                'pipeline_runtime': {
-                    'media_pipeline': 'video_legacy',
-                    'sam2_checkpoint': str(self.config.SAM2_CHECKPOINT),
-                    'device': self.device,
-                },
-                'status': 'completed'
-            }
-
-            # Step 5: Generate segmented overlay video (same directory as segmented images)
-            # Use >= 1 instead of == num_frames_for_video so short videos (fewer frames than requested)
-            # still get a segmented overlay generated.
-            if len(frames) >= 1 and tracking_results.get('objects'):
+            # ── Step 3: Run full image pipeline on representative frame ────────
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+                tmp_path = Path(tmp.name)
+            try:
+                import cv2 as _cv2
+                _cv2.imwrite(str(tmp_path), _cv2.cvtColor(rep_frame_rgb, _cv2.COLOR_RGB2BGR))
+                logger.info(f"[{job_id}] Saved representative frame to {tmp_path}")
+                image_result = self._run_production_image_pipeline(tmp_path, job_id, user_context=user_context)
+            finally:
                 try:
-                    self._generate_segmented_video(video_path, job_id, tracking_results)
-                except Exception as e:
-                    logger.warning(f"[{job_id}] Segmented video generation failed (non-fatal): {e}", exc_info=True)
+                    tmp_path.unlink()
+                except Exception:
+                    pass
 
-            logger.info(f"[{job_id}] ✓ Processing completed successfully")
-            return final_results
+            # ── Step 4: Run SAM3 on keyframes for segmented video ─────────────
+            # Extract food labels from the image pipeline result
+            visible_items = (
+                image_result.get("production_debug", {}).get("visible_items") or []
+            )
+            food_labels = [item["name"] for item in visible_items if item.get("name")]
+            vessel = image_result.get("production_debug", {}).get("gemini_pass_1", {}).get("plate_or_bowl")
+            segmentation_prompts = list(dict.fromkeys(
+                food_labels
+                + ([vessel["name"]] if vessel and vessel.get("name") else [])
+            ))
+
+            sam3_per_keyframe: Dict[int, Dict[str, Any]] = {}
+            if segmentation_prompts:
+                n_total = len(all_frames)
+                # ~15 keyframes evenly spaced; always include the representative frame
+                n_keyframes = min(15, n_total)
+                step = max(1, n_total // n_keyframes)
+                keyframe_indices = list(range(0, n_total, step))
+                if rep_idx not in keyframe_indices:
+                    keyframe_indices.append(rep_idx)
+                keyframe_indices = sorted(set(keyframe_indices))
+
+                sam3_model, sam3_processor = self.models.sam3
+                from app.production_models import run_sam3_image
+                for kf_idx in keyframe_indices:
+                    kf_pil = Image.fromarray(all_frames[kf_idx])
+                    masks = run_sam3_image(
+                        sam3_model, sam3_processor,
+                        kf_pil, segmentation_prompts,
+                        device=self.device,
+                    )
+                    sam3_per_keyframe[kf_idx] = masks
+                    logger.info(
+                        f"[{job_id}] SAM3 keyframe {kf_idx}: "
+                        + ", ".join(f"{p}={'ok' if (masks.get(p) or {}).get('mask') is not None else 'no-mask'}"
+                                    for p in segmentation_prompts)
+                    )
+            else:
+                logger.warning(f"[{job_id}] No segmentation prompts — skipping SAM3 keyframes")
+
+            # ── Step 5: Generate segmented overlay video ───────────────────────
+            try:
+                self._generate_segmented_video_from_sam3(
+                    video_path=video_path,
+                    all_frames=all_frames,
+                    sam3_per_keyframe=sam3_per_keyframe,
+                    segmentation_prompts=segmentation_prompts,
+                    fps=fps,
+                    video_rotation=video_rotation,
+                    job_id=job_id,
+                )
+            except Exception as e:
+                logger.warning(f"[{job_id}] Segmented video generation failed (non-fatal): {e}", exc_info=True)
+
+            # ── Step 6: Return result (image pipeline structure + video metadata) ─
+            image_result["media_type"] = "video"
+            image_result["media_name"] = video_path.name
+            image_result["num_frames_processed"] = len(all_frames)
+            image_result["pipeline_runtime"]["video_pipeline"] = "sam3_production"
+            image_result["pipeline_runtime"]["representative_frame_idx"] = rep_idx
+            image_result["pipeline_runtime"]["num_keyframes_segmented"] = len(sam3_per_keyframe)
+
+            logger.info(f"[{job_id}] ✓ Video processing completed successfully")
+            return image_result
 
         except Exception as e:
-            logger.error(f"[{job_id}] Pipeline failed: {e}", exc_info=True)
+            logger.error(f"[{job_id}] Video pipeline failed: {e}", exc_info=True)
             raise
+
+    # ── Video helpers (SAM3 pipeline) ─────────────────────────────────────────
+
+    def _load_all_video_frames(
+        self, video_path: Path, job_id: str
+    ) -> tuple[List[np.ndarray], float, int]:
+        """
+        Load every frame from the video up to VIDEO_MAX_DURATION_SECONDS.
+        Returns (frames_rgb, fps, video_rotation_degrees).
+        Frames are resized to RESIZE_WIDTH (preserving aspect ratio), converted to RGB.
+        """
+        import cv2 as _cv2
+
+        cap = _cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            raise ValueError(f"Could not open video: {video_path}")
+
+        fps = cap.get(_cv2.CAP_PROP_FPS) or 30.0
+        total_frames = int(cap.get(_cv2.CAP_PROP_FRAME_COUNT))
+        duration_sec = total_frames / fps if fps > 0 else 0.0
+        max_dur = getattr(self.config, "VIDEO_MAX_DURATION_SECONDS", 5.0)
+        max_frame_idx = int(min(duration_sec, max_dur) * fps)
+
+        if duration_sec > max_dur + 0.5:
+            logger.warning(
+                f"[{job_id}] Video is {duration_sec:.1f}s — capping at {max_dur}s "
+                f"({max_frame_idx} frames)"
+            )
+
+        frames: List[np.ndarray] = []
+        frame_num = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret or frame_num > max_frame_idx:
+                break
+            aspect = frame.shape[0] / frame.shape[1]
+            new_h = int(self.config.RESIZE_WIDTH * aspect)
+            frame_r = _cv2.resize(frame, (self.config.RESIZE_WIDTH, new_h))
+            frames.append(_cv2.cvtColor(frame_r, _cv2.COLOR_BGR2RGB))
+            frame_num += 1
+        cap.release()
+
+        # Detect rotation from MP4 tkhd matrix (same logic as _generate_segmented_video)
+        video_rotation = 0
+        try:
+            import struct as _struct
+
+            def _iter_boxes(data):
+                i = 0
+                while i + 8 <= len(data):
+                    sz = int.from_bytes(data[i:i + 4], 'big')
+                    bt = data[i + 4:i + 8]
+                    if sz < 8 or i + sz > len(data):
+                        break
+                    yield bt, data[i + 8:i + sz]
+                    i += sz
+
+            def _tkhd_rot(tkhd):
+                if not tkhd:
+                    return 0
+                ver = tkhd[0]
+                mbase = 40 if ver == 0 else 52
+                if mbase + 36 > len(tkhd):
+                    return 0
+                ma = _struct.unpack_from('>i', tkhd, mbase)[0]
+                mb = _struct.unpack_from('>i', tkhd, mbase + 4)[0]
+                mc = _struct.unpack_from('>i', tkhd, mbase + 12)[0]
+                md = _struct.unpack_from('>i', tkhd, mbase + 16)[0]
+                if ma == 0 and mb > 0 and mc < 0 and md == 0:
+                    return 90
+                if ma == 0 and mb < 0 and mc > 0 and md == 0:
+                    return 270
+                if ma < 0 and md < 0:
+                    return 180
+                return 0
+
+            raw = video_path.read_bytes()
+            for bt0, c0 in _iter_boxes(raw):
+                if bt0 == b'moov':
+                    for bt1, c1 in _iter_boxes(c0):
+                        if bt1 == b'trak':
+                            for bt2, c2 in _iter_boxes(c1):
+                                if bt2 == b'tkhd':
+                                    r = _tkhd_rot(c2)
+                                    if r:
+                                        video_rotation = r
+                                        break
+                    break
+        except Exception:
+            pass
+
+        # ffmpeg fallback
+        if not video_rotation:
+            try:
+                fi = subprocess.run(['ffmpeg', '-i', str(video_path)], capture_output=True)
+                for line in fi.stderr.decode('utf-8', errors='replace').splitlines():
+                    ll = line.lower().strip()
+                    if ll.startswith('rotate') and ':' in ll:
+                        try:
+                            video_rotation = int(ll.split(':')[1].strip())
+                        except ValueError:
+                            pass
+                    elif 'displaymatrix' in ll and 'rotation of' in ll:
+                        try:
+                            video_rotation = int(round(-float(ll.split('rotation of')[1].split('degrees')[0].strip())))
+                        except (ValueError, IndexError):
+                            pass
+            except Exception:
+                pass
+
+        logger.info(f"[{job_id}] Loaded {len(frames)} frames, fps={fps:.1f}, rotation={video_rotation}°")
+        return frames, fps, video_rotation
+
+    def _pick_representative_frame(self, frames: List[np.ndarray]) -> int:
+        """
+        Return the index of the sharpest frame in the middle-third of the video.
+        Sharpness = variance of the Laplacian — higher means more in-focus detail.
+        Falls back to the true middle frame if cv2 is unavailable.
+        """
+        import cv2 as _cv2
+        n = len(frames)
+        lo = n // 3
+        hi = 2 * n // 3
+        candidates = range(max(lo, 0), min(hi + 1, n)) if hi > lo else range(n)
+        best_idx = n // 2
+        best_score = -1.0
+        for i in candidates:
+            gray = _cv2.cvtColor(frames[i], _cv2.COLOR_RGB2GRAY)
+            score = float(_cv2.Laplacian(gray, _cv2.CV_64F).var())
+            if score > best_score:
+                best_score = score
+                best_idx = i
+        return best_idx
+
+    def _generate_segmented_video_from_sam3(
+        self,
+        video_path: Path,
+        all_frames: List[np.ndarray],
+        sam3_per_keyframe: Dict[int, Dict[str, Any]],
+        segmentation_prompts: List[str],
+        fps: float,
+        video_rotation: int,
+        job_id: str,
+    ) -> None:
+        """
+        Render a segmented overlay video using pre-computed SAM3 masks.
+
+        For each frame in all_frames the mask from the nearest keyframe is used
+        (nearest-keyframe propagation).  The meal is static so this is accurate
+        and fast.  Output is H.264 MP4, physically rotated via ffmpeg to match
+        the original video orientation, and uploaded to S3.
+        """
+        import cv2 as _cv2
+
+        if not sam3_per_keyframe or not all_frames:
+            logger.info(f"[{job_id}] No SAM3 keyframe data — skipping segmented video")
+            return
+
+        keyframe_indices = sorted(sam3_per_keyframe.keys())
+
+        _PALETTE_BGR = [
+            (0, 200, 255),   # yellow
+            (0, 255, 100),   # green
+            (255,  80,  80), # blue
+            ( 80,  80, 255), # red
+            (255,   0, 200), # magenta
+            (  0, 220, 180), # lime
+            (200,   0, 255), # purple
+            (  0, 180, 255), # orange
+        ]
+        label_colors: Dict[str, tuple] = {
+            prompt: _PALETTE_BGR[i % len(_PALETTE_BGR)]
+            for i, prompt in enumerate(segmentation_prompts)
+        }
+
+        h, w = all_frames[0].shape[:2]
+        overlay_dir = self.config.OUTPUT_DIR / job_id / "masks_overlay"
+        overlay_dir.mkdir(parents=True, exist_ok=True)
+        out_video_path = overlay_dir / "segmented_overlay_video.mp4"
+
+        render_fps = min(fps, 30.0)
+        fourcc = _cv2.VideoWriter_fourcc(*'mp4v')
+        writer = _cv2.VideoWriter(str(out_video_path), fourcc, render_fps, (w, h))
+        if not writer.isOpened():
+            logger.warning(f"[{job_id}] Could not open VideoWriter: {out_video_path}")
+            return
+
+        font = _cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.55
+        font_thickness = 1
+
+        def _nearest_keyframe(frame_idx: int) -> int:
+            return min(keyframe_indices, key=lambda k: abs(k - frame_idx))
+
+        for frame_idx, frame_rgb in enumerate(all_frames):
+            frame_bgr = _cv2.cvtColor(frame_rgb, _cv2.COLOR_RGB2BGR)
+            overlay = frame_bgr.copy()
+
+            kf = _nearest_keyframe(frame_idx)
+            masks_for_frame = sam3_per_keyframe.get(kf, {})
+
+            for prompt in segmentation_prompts:
+                entry = masks_for_frame.get(prompt) or {}
+                mask = entry.get("mask")
+                if mask is None:
+                    continue
+                # Resize mask to frame dimensions if needed
+                if mask.shape != (h, w):
+                    mask = _cv2.resize(
+                        mask.astype(np.uint8), (w, h),
+                        interpolation=_cv2.INTER_NEAREST,
+                    ).astype(bool)
+
+                color = label_colors.get(prompt, (128, 128, 128))
+                color_layer = np.zeros_like(frame_bgr, dtype=np.uint8)
+                color_layer[:] = color
+                blended = _cv2.addWeighted(overlay, 0.25, color_layer, 0.75, 0)
+                overlay[mask] = blended[mask]
+
+                contours, _ = _cv2.findContours(
+                    mask.astype(np.uint8), _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE
+                )
+                _cv2.drawContours(overlay, contours, -1, color, 2)
+
+                ys, xs = np.where(mask)
+                if len(xs) > 0:
+                    cx, cy = int(np.mean(xs)), int(np.mean(ys))
+                    (tw, th), _ = _cv2.getTextSize(prompt, font, font_scale, font_thickness)
+                    pad = 4
+                    px1 = max(0, cx - tw // 2 - pad)
+                    py1 = max(0, cy - th // 2 - pad)
+                    px2 = min(w, cx + tw // 2 + pad)
+                    py2 = min(h, cy + th // 2 + pad)
+                    _cv2.rectangle(overlay, (px1, py1), (px2, py2), (255, 255, 255), -1)
+                    _cv2.putText(overlay, prompt, (px1 + pad, py2 - pad),
+                                 font, font_scale, (0, 0, 0), font_thickness, _cv2.LINE_AA)
+
+            writer.write(overlay)
+
+        writer.release()
+        logger.info(f"[{job_id}] Wrote SAM3 segmented overlay video ({len(all_frames)} frames): {out_video_path}")
+
+        # Re-encode to H.264 with physical rotation correction
+        _tmp = out_video_path.with_suffix('.raw.mp4')
+        try:
+            out_video_path.rename(_tmp)
+            _vf = []
+            if video_rotation == 90:
+                _vf = ['-vf', 'transpose=2']
+            elif video_rotation in (270, -90):
+                _vf = ['-vf', 'transpose=1']
+            elif video_rotation == 180:
+                _vf = ['-vf', 'transpose=2,transpose=2']
+            subprocess.run(
+                ['ffmpeg', '-y', '-i', str(_tmp),
+                 *_vf,
+                 '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
+                 str(out_video_path)],
+                check=True, capture_output=True,
+            )
+            _tmp.unlink()
+            logger.info(f"[{job_id}] Re-encoded overlay video to H.264 (rotation={video_rotation}°)")
+        except Exception as enc_err:
+            logger.warning(f"[{job_id}] FFmpeg H.264 re-encode failed: {enc_err} — using mp4v")
+            if _tmp.exists():
+                _tmp.rename(out_video_path)
+
+        # Upload to S3
+        if S3_RESULTS_BUCKET and UPLOAD_SEGMENTED_IMAGES and out_video_path.exists():
+            try:
+                global s3_client
+                if s3_client is None:
+                    s3_client = boto3.client('s3')
+                s3_key = f"segmented_images/{job_id}/segmented_overlay_video.mp4"
+                s3_client.upload_file(
+                    str(out_video_path), S3_RESULTS_BUCKET, s3_key,
+                    ExtraArgs={'ContentType': 'video/mp4'},
+                )
+                logger.info(f"[{job_id}] Uploaded SAM3 segmented video → s3://{S3_RESULTS_BUCKET}/{s3_key}")
+            except Exception as e:
+                logger.warning(f"[{job_id}] Failed to upload segmented video: {e}")
 
     def _gemini_first_pass_image(self, image_pil, job_id: str, user_context: dict = None) -> dict:
         try:
