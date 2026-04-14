@@ -125,9 +125,13 @@ export default function MealDetailScreen() {
   const [refreshingOverlay, setRefreshingOverlay] = useState(false);
   const [mediaLoading, setMediaLoading] = useState(true);
   const [videoOverlayError, setVideoOverlayError] = useState(false);
-  // Resolved image/video URI — always fetched fresh from S3 (presigned URL)
-  const [resolvedImageUri, setResolvedImageUri] = useState<string | undefined>(undefined);
-  const [resolvedVideoUri, setResolvedVideoUri] = useState<string | undefined>(undefined);
+  // Resolved image/video URI — always fetched fresh from S3 (presigned URL).
+  // Initialised to the locally-stored URI so something renders immediately while
+  // the presigned URL fetch is in-flight; S3 URL overrides once resolved.
+  const [resolvedImageUri, setResolvedImageUri] = useState<string | undefined>(item?.imageUri);
+  const [resolvedVideoUri, setResolvedVideoUri] = useState<string | undefined>(item?.videoUri);
+  // True while we are waiting for the presigned URL — used to show a loading overlay
+  const [resolvingVideoUri, setResolvingVideoUri] = useState<boolean>(!!item?.job_id && !!item?.videoUri);
 
   useEffect(() => {
     // Always fetch from S3 when job_id is available — presigned URLs are always fresh
@@ -141,13 +145,22 @@ export default function MealDetailScreen() {
   }, [item?.id, item?.job_id]);
 
   useEffect(() => {
-    // Always fetch from S3 when job_id is available — works on any device after reinstall
+    // Always fetch from S3 when job_id is available — works on any device after reinstall.
+    // Local videoUri is used as the initial value so the player is never blank while fetching.
     if (item?.job_id) {
+      setResolvingVideoUri(true);
       getImagePresignedUrl(item.job_id)
-        .then(url => { setResolvedVideoUri(url || item?.videoUri); })
-        .catch(() => setResolvedVideoUri(item?.videoUri));
+        .then(url => {
+          setResolvedVideoUri(url || item?.videoUri);
+          setResolvingVideoUri(false);
+        })
+        .catch(() => {
+          setResolvedVideoUri(item?.videoUri);
+          setResolvingVideoUri(false);
+        });
     } else {
       setResolvedVideoUri(item?.videoUri);
+      setResolvingVideoUri(false);
     }
   }, [item?.id, item?.job_id]);
   
@@ -161,6 +174,9 @@ export default function MealDetailScreen() {
     setRefreshedSegmentedImages(null);
     setMediaLoading(true);
     setVideoOverlayError(false);
+    // Re-seed resolved URIs from the new item immediately so there's no blank frame
+    setResolvedImageUri(item?.imageUri);
+    setResolvedVideoUri(item?.videoUri);
   }, [item?.id]);
 
   // Show loader again when overlay URL changes (e.g. after refetch)
@@ -779,12 +795,13 @@ export default function MealDetailScreen() {
               : null;
             const displayUri = overlayUri || resolvedImageUri || null;
             const showImageLoader = !isVideo && !!displayUri;
-            // Use S3 URL only — never fall back to stale local file:// path on reinstall / new device
-            const originalVideoUri = resolvedVideoUri ?? (item?.job_id ? null : item?.videoUri ?? null);
+            // Use resolvedVideoUri directly — it is pre-initialised to item?.videoUri so
+            // the player always has a URI while the presigned URL fetch is in-flight.
+            const originalVideoUri = resolvedVideoUri ?? null;
             const videoSource = isVideo ? (isVideoPlaying ? (videoOverlayUrl || originalVideoUri) : originalVideoUri) : null;
             return (
           <>
-          {isVideo && videoSource ? (
+          {isVideo && (videoSource || resolvingVideoUri) ? (
             <>
               {/* Mount both videos simultaneously so the segmented one buffers in background.
                   Visibility toggled via opacity to avoid brown-screen loading flash on play. */}
@@ -810,23 +827,43 @@ export default function MealDetailScreen() {
                   }}
                 />
               )}
-              <Video
-                ref={originalVideoRef}
-                key={originalVideoUri ?? 'original'}
-                source={{ uri: originalVideoUri ?? '' }}
-                style={[styles.media, { opacity: (isVideoPlaying && videoOverlayUrl && !videoOverlayError) ? 0 : 1 }]}
-                resizeMode={ResizeMode.COVER}
-                isLooping={false}
-                isMuted={true}
-                shouldPlay={isVideoPlaying && (!videoOverlayUrl || videoOverlayError)}
-                useNativeControls={false}
-                onPlaybackStatusUpdate={(status) => {
-                  if (status.isLoaded && status.didJustFinish) {
-                    setIsVideoPlaying(false);
-                    originalVideoRef.current?.setStatusAsync({ positionMillis: 0, shouldPlay: false });
-                  }
-                }}
-              />
+              {originalVideoUri ? (
+                <Video
+                  ref={originalVideoRef}
+                  key={originalVideoUri}
+                  source={{ uri: originalVideoUri }}
+                  style={[styles.media, { opacity: (isVideoPlaying && videoOverlayUrl && !videoOverlayError) ? 0 : 1 }]}
+                  resizeMode={ResizeMode.COVER}
+                  isLooping={false}
+                  isMuted={true}
+                  shouldPlay={isVideoPlaying && (!videoOverlayUrl || videoOverlayError)}
+                  useNativeControls={false}
+                  onPlaybackStatusUpdate={(status) => {
+                    if (status.isLoaded && status.didJustFinish) {
+                      setIsVideoPlaying(false);
+                      originalVideoRef.current?.setStatusAsync({ positionMillis: 0, shouldPlay: false });
+                    }
+                    if (!status.isLoaded && (status as any).error) {
+                      // Video URI failed to load — clear so thumbnail is shown instead
+                      setResolvedVideoUri(undefined);
+                    }
+                  }}
+                />
+              ) : (
+                // No URI yet (presigned fetch still in progress) — show placeholder
+                <View style={[styles.media, styles.placeholder]} />
+              )}
+              {/* Thumbnail overlay: shown when not playing to mask the Video component's
+                  black initialization frame. Fades out once the user presses play. */}
+              {!isVideoPlaying && resolvedImageUri && (
+                <OptimizedImage
+                  source={{ uri: resolvedImageUri }}
+                  style={[styles.media, StyleSheet.absoluteFillObject]}
+                  resizeMode="cover"
+                  cachePolicy="memory-disk"
+                  priority="normal"
+                />
+              )}
               {!isVideoPlaying && (
                 <TouchableOpacity
                   style={styles.playButtonOverlay}
@@ -834,7 +871,7 @@ export default function MealDetailScreen() {
                   activeOpacity={0.7}
                 >
                   <View style={styles.playButton}>
-                    <Ionicons name="play" size={28} color="#FFFFFF" />
+                    <Ionicons name={resolvingVideoUri ? 'hourglass-outline' : 'play'} size={28} color="#FFFFFF" />
                   </View>
                 </TouchableOpacity>
               )}
