@@ -19,14 +19,17 @@ export interface NutritionItem {
   base_component?: {
     mass_g?: number;
     total_calories?: number;
+    matched_food?: string;
   };
   extra_component?: {
     mass_g?: number;
     total_calories?: number;
+    matched_food?: string;
   };
   hidden_component?: {
     mass_g?: number;
     total_calories?: number;
+    matched_food?: string;
   };
 }
 

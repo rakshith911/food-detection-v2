@@ -132,10 +132,16 @@ export const buildDishTablesFromItems = (
       }
 
       if (item.extra_component) {
+        // Use the backend's matched_food name for the extra component so the high
+        // calorie row is clearly labelled (e.g. "Extra white sauce") rather than
+        // repeating the same name as the base row ("White sauce").
+        const extraName =
+          item.extra_component.matched_food ||
+          `Extra ${foodName}`;
         pushRow(
           'highCalorie',
           createRow(
-            foodName,
+            extraName,
             item.extra_component.mass_g,
             item.extra_component.total_calories,
             derivedIndex++,
@@ -145,10 +151,13 @@ export const buildDishTablesFromItems = (
       }
 
       if (item.hidden_component) {
+        const hiddenName =
+          item.hidden_component.matched_food ||
+          foodName;
         pushRow(
           'hiddenContent',
           createRow(
-            foodName,
+            hiddenName,
             item.hidden_component.mass_g,
             item.hidden_component.total_calories,
             derivedIndex++,
