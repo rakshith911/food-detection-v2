@@ -17,6 +17,7 @@ import { getImagePresignedUrl } from '../services/S3UserDataService';
 import AppHeader from '../components/AppHeader';
 import BottomButtonContainer from '../components/BottomButtonContainer';
 import TutorialScreen from './TutorialScreen';
+import { toSentenceCase } from '../utils/textCase';
 
 // Image component that falls back to S3 presigned URL when the local file is unavailable (e.g. after reinstall)
 function HistoryCardImage({
@@ -396,9 +397,10 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
     // Only treat as "unidentified" when there is truly no data — no meal name and no calories.
     // A user-cleared entry (calories=0 but mealName set) should stay tappable and show "-".
     const hasZeroCalories = isCompletedOrFailed && totalCalories === 0 && !hasMealName;
-    const isNoFoodDetected = item.mealName === 'No food detected';
+    const normalizedMealName = toSentenceCase(item.mealName || '');
+    const isNoFoodDetected = normalizedMealName === 'No food detected';
     const isNonTappable = isPendingOrAnalyzing || hasZeroCalories || isNoFoodDetected;
-    const titleText = isPendingOrAnalyzing ? '' : (hasZeroCalories ? 'Unidentified Food' : (item.mealName || ''));
+    const titleText = isPendingOrAnalyzing ? '' : (hasZeroCalories ? 'Unidentified Food' : normalizedMealName);
     const subtitleText = isPendingOrAnalyzing
       ? 'Analyzing...'
       : totalCalories === 0
@@ -858,5 +860,4 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 });
-
 

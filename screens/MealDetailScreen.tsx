@@ -41,6 +41,7 @@ import {
   getTableTotals,
   hydrateDishTables,
 } from '../utils/mealTables';
+import { toSentenceCase } from '../utils/textCase';
 
 
 export default function MealDetailScreen() {
@@ -98,6 +99,18 @@ export default function MealDetailScreen() {
   }
 
   const isVideo = !!item.videoUri;
+
+  const normalizeDishTablesForSave = useCallback(
+    (tables: DishTableSection[]) =>
+      tables.map((table) => ({
+        ...table,
+        rows: table.rows.map((row) => ({
+          ...row,
+          name: toSentenceCase(row.name),
+        })),
+      })),
+    []
+  );
 
   const [editingRowId, setEditingRowId] = useState<string | null>(null);
   const [editingMealName, setEditingMealName] = useState(false);
@@ -220,9 +233,9 @@ export default function MealDetailScreen() {
   }, [item?.id, item?.job_id, user?.email, dispatch]);
   
   const [dishTables, setDishTables] = useState<DishTableSection[]>(
-    hydrateDishTables(item?.dishTables, item?.dishContents)
+    normalizeDishTablesForSave(hydrateDishTables(item?.dishTables, item?.dishContents))
   );
-  const [mealName, setMealName] = useState(item?.mealName || 'Burger');
+  const [mealName, setMealName] = useState(toSentenceCase(item?.mealName || 'Burger'));
   const dishContents = useMemo(() => getBaseDishContents(dishTables), [dishTables]);
   const totalCalories = useMemo(() => getOverallCaloriesFromTables(dishTables), [dishTables]);
 
@@ -353,12 +366,14 @@ export default function MealDetailScreen() {
 
     try {
       setIsSaving(true);
+      const normalizedDishTables = normalizeDishTablesForSave(dishTables);
+      const normalizedMealName = toSentenceCase(mealName);
       // Include full item data in updates to ensure entry can be recreated if missing
       const updates = {
         ...item, // Include all existing item data
-        mealName,
-        dishTables,
-        dishContents,
+        mealName: normalizedMealName,
+        dishTables: normalizedDishTables,
+        dishContents: getBaseDishContents(normalizedDishTables),
         nutritionalInfo: {
           ...item.nutritionalInfo,
           calories: totalCalories,
@@ -382,7 +397,7 @@ export default function MealDetailScreen() {
     } finally {
       setIsSaving(false);
     }
-  }, [item, user?.email, mealName, dishTables, dishContents, totalCalories, dispatch]);
+  }, [item, user?.email, mealName, dishTables, totalCalories, dispatch, normalizeDishTablesForSave]);
 
   // Always keep the ref pointing at the latest saveChanges closure
   const saveChangesRef = useRef(saveChanges);
@@ -467,20 +482,21 @@ export default function MealDetailScreen() {
     updateTableRows(tableKey, (rows) =>
       rows.map((row) => {
         if (row.id !== rowId) return row;
+        const nextValue = field === 'name' ? toSentenceCase(value) : value;
         if (field === 'weight') {
-          const updated = { ...row, weight: value };
+          const updated = { ...row, weight: nextValue };
           const oldWeight = Number(row.weight);
           const oldCal = Number(row.calories);
           // Recalculate calories proportionally when weight changes (e.g. 100g @ 200 kcal → 200g → 400 kcal)
           if (Number.isFinite(oldWeight) && oldWeight > 0 && Number.isFinite(oldCal)) {
-            const newWeight = Number(value);
+            const newWeight = Number(nextValue);
             if (Number.isFinite(newWeight)) {
               updated.calories = String(Math.round((newWeight / oldWeight) * oldCal));
             }
           }
           return updated;
         }
-        return { ...row, [field]: value };
+        return { ...row, [field]: nextValue };
       })
     );
   };
@@ -509,6 +525,12 @@ export default function MealDetailScreen() {
 
   const renderDishTable = (table: DishTableSection) => {
     const totals = getTableTotals(table.rows);
+    const firstColumnHeader =
+      table.key === 'highCalorie'
+        ? 'High Calorie Content'
+        : table.key === 'hiddenContent'
+          ? 'Hidden Calorie Content'
+          : 'Dish Contents';
 
     return (
       <Pressable
@@ -522,9 +544,8 @@ export default function MealDetailScreen() {
           }
         }}
       >
-        <Text style={styles.tableTitle}>{table.title}</Text>
         <View style={styles.tableHeader}>
-          <Text style={[styles.tableHeaderText, { flex: 2 }]}>Dish Contents</Text>
+          <Text style={[styles.tableHeaderText, { flex: 2 }]}>{firstColumnHeader}</Text>
           <Text style={[styles.tableHeaderText, { flex: 1 }]}>Weight</Text>
           <Text style={[styles.tableHeaderText, { flex: 1 }]}>Kcal</Text>
           <Text style={[styles.tableHeaderText, { width: 50 }]}>Action</Text>
@@ -567,7 +588,7 @@ export default function MealDetailScreen() {
                     }}
                   />
                 ) : (
-                  <Text style={styles.tableCellText}>{row.name || '—'}</Text>
+                  <Text style={styles.tableCellText}>{toSentenceCase(row.name) || '—'}</Text>
                 )}
               </View>
               <View style={[styles.tableCell, { flex: 1 }]} pointerEvents="box-none">
@@ -656,22 +677,22 @@ export default function MealDetailScreen() {
           );
         })}
 
-        <View style={[styles.tableRow, styles.tableTotalRow]}>
-          <View style={[styles.tableCell, { flex: 2 }]}>
-            <Text style={styles.tableTotalText}>Total</Text>
+        {table.rows.length > 0 ? (
+          <View style={[styles.tableRow, styles.tableTotalRow]}>
+            <View style={[styles.tableCell, { flex: 2 }]}>
+              <Text style={styles.tableTotalText}>Total</Text>
+            </View>
+            <View style={[styles.tableCell, { flex: 1 }]}>
+              <Text style={styles.tableTotalText}>
+                {totals.totalWeight > 0 ? `${Math.round(totals.totalWeight)} g` : '—'}
+              </Text>
+            </View>
+            <View style={[styles.tableCell, { flex: 1 }]}>
+              <Text style={styles.tableTotalText}>{Math.round(totals.totalCalories)}</Text>
+            </View>
+            <View style={[styles.tableCell, { width: 50 }]} />
           </View>
-          <View style={[styles.tableCell, { flex: 1 }]}>
-            <Text style={styles.tableTotalText}>{totals.totalWeight > 0 ? `${Math.round(totals.totalWeight)} g` : '—'}</Text>
-          </View>
-          <View style={[styles.tableCell, { flex: 1 }]}>
-            <Text style={styles.tableTotalText}>{Math.round(totals.totalCalories)}</Text>
-          </View>
-          <View style={[styles.tableCell, { width: 50 }]} />
-        </View>
-
-        <Text style={styles.tableSummary}>
-          Total weight: {Math.round(totals.totalWeight)} g | Total kcal: {Math.round(totals.totalCalories)}
-        </Text>
+        ) : null}
       </Pressable>
     );
   };
@@ -946,7 +967,7 @@ export default function MealDetailScreen() {
               <TextInput
                 style={[styles.mealNameInput, styles.inputFocused]}
                 value={mealName}
-                onChangeText={setMealName}
+                onChangeText={(value) => setMealName(toSentenceCase(value))}
                 onBlur={() => setEditingMealName(false)}
                 onFocus={() => scrollToInput()}
                 placeholder="Meal name"
@@ -955,7 +976,7 @@ export default function MealDetailScreen() {
               />
             ) : (
               <TouchableOpacity onPress={() => setEditingMealName(true)}>
-                <Text style={styles.mealName}>{mealName}</Text>
+                <Text style={styles.mealName}>{toSentenceCase(mealName)}</Text>
               </TouchableOpacity>
             )}
             <Text style={styles.mealCalories}>
@@ -985,7 +1006,9 @@ export default function MealDetailScreen() {
         </View>
       </View>
 
-        {dishTables.map((table) => renderDishTable(table))}
+        {dishTables
+          .filter((table) => table.key === 'base' || table.rows.length > 0)
+          .map((table) => renderDishTable(table))}
             </ScrollView>
           </View>
         </TouchableWithoutFeedback>

@@ -36,6 +36,7 @@ import {
   getMealNameFromTables,
   getOverallCaloriesFromTables,
 } from '../utils/mealTables';
+import { toSentenceCase } from '../utils/textCase';
 
 async function scheduleAnalysisCompleteNotification() {
   try {
@@ -202,13 +203,14 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
     field: 'name' | 'quantity',
     value: string
   ) => {
+    const nextValue = field === 'name' ? toSentenceCase(value) : value;
     if (type === 'hidden') {
       setHiddenIngredients((prev) =>
-        prev.map((r) => (r.id === id ? { ...r, [field]: value } : r))
+        prev.map((r) => (r.id === id ? { ...r, [field]: nextValue } : r))
       );
     } else {
       setExtras((prev) =>
-        prev.map((r) => (r.id === id ? { ...r, [field]: value } : r))
+        prev.map((r) => (r.id === id ? { ...r, [field]: nextValue } : r))
       );
     }
   };
@@ -366,18 +368,18 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
             console.log('[PreviewScreen] dishTables built');
             dishContents = getBaseDishContents(dishTables);
             console.log('[PreviewScreen] dishContents:', dishContents.length, 'rows');
-            mealName = apiResult.meal_name || getMealNameFromTables(dishTables, 'Analyzed Meal');
+            mealName = toSentenceCase(apiResult.meal_name || getMealNameFromTables(dishTables, 'Analyzed Meal'));
             console.log('[PreviewScreen] mealName resolved:', mealName);
           } else if (apiResult.detailed_results?.items && apiResult.detailed_results.items.length > 0) {
             console.log('[PreviewScreen] Using detailed_results.items');
             dishTables = buildDishTablesFromItems(apiResult.detailed_results.items, userContext);
             dishContents = getBaseDishContents(dishTables);
-            mealName = apiResult.meal_name || getMealNameFromTables(dishTables, 'Analyzed Meal');
+            mealName = toSentenceCase(apiResult.meal_name || getMealNameFromTables(dishTables, 'Analyzed Meal'));
           } else {
             console.log('[PreviewScreen] No food items found in response');
             dishTables = buildDishTablesFromItems([], userContext);
-            dishContents = [{ id: `${Date.now()}_0`, name: 'No food detected', weight: '', calories: '0' }];
-            mealName = 'No food detected';
+            dishContents = [{ id: `${Date.now()}_0`, name: toSentenceCase('No food detected'), weight: '', calories: '0' }];
+            mealName = toSentenceCase('No food detected');
           }
 
           console.log('[PreviewScreen] Computing totals...');

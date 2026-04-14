@@ -27,6 +27,7 @@ import OptimizedImage from '../components/OptimizedImage';
 import VectorBackButtonCircle from '../components/VectorBackButtonCircle';
 import AppHeader from '../components/AppHeader';
 import BottomButtonContainer from '../components/BottomButtonContainer';
+import { toSentenceCase } from '../utils/textCase';
 
 interface StarRatingProps {
   rating: number;
@@ -433,7 +434,7 @@ export default function FeedbackScreen() {
         <View style={styles.mealInfo}>
           <View style={styles.mealHeader}>
             <View style={{ flex: 1 }}>
-              <Text style={styles.mealName}>{item.mealName || 'Burger'}</Text>
+              <Text style={styles.mealName}>{toSentenceCase(item.mealName || 'Burger')}</Text>
               <Text style={styles.mealCalories}>{item.nutritionalInfo.calories} Kcal</Text>
             </View>
 
@@ -644,7 +645,7 @@ export default function FeedbackScreen() {
             <View style={styles.mealInfo}>
               <View style={styles.mealHeader}>
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.mealName}>{item.mealName || 'Burger'}</Text>
+                  <Text style={styles.mealName}>{toSentenceCase(item.mealName || 'Burger')}</Text>
                   <Text style={styles.mealCalories}>{item.nutritionalInfo.calories} Kcal</Text>
                 </View>
                 <View style={styles.mealActions}>
@@ -985,4 +986,3 @@ const styles = StyleSheet.create({
     flex: 1,
   },
 });
-
