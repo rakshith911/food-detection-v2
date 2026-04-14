@@ -37,7 +37,6 @@ import {
   getOverallCaloriesFromTables,
 } from '../utils/mealTables';
 import { toSentenceCase } from '../utils/textCase';
-import * as VideoThumbnails from 'expo-video-thumbnails';
 
 async function scheduleAnalysisCompleteNotification() {
   try {
@@ -260,6 +259,10 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
       let videoThumbnailUri: string | undefined;
       if (videoUri) {
         try {
+          // Dynamic require so the app doesn't crash when the native module
+          // isn't available (e.g. running in Expo Go without a dev client build)
+          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          const VideoThumbnails = require('expo-video-thumbnails');
           const { uri } = await VideoThumbnails.getThumbnailAsync(videoUri, { time: 0 });
           videoThumbnailUri = uri;
         } catch {
