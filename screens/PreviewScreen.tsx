@@ -37,6 +37,7 @@ import {
   getOverallCaloriesFromTables,
 } from '../utils/mealTables';
 import { toSentenceCase } from '../utils/textCase';
+import * as VideoThumbnails from 'expo-video-thumbnails';
 
 async function scheduleAnalysisCompleteNotification() {
   try {
@@ -254,10 +255,22 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
         userContext.recipe_description = textInput.trim();
       }
 
+      // Generate a thumbnail from the first frame of the video so the history
+      // card and MealDetailScreen have an image to show while the video loads.
+      let videoThumbnailUri: string | undefined;
+      if (videoUri) {
+        try {
+          const { uri } = await VideoThumbnails.getThumbnailAsync(videoUri, { time: 0 });
+          videoThumbnailUri = uri;
+        } catch {
+          // Non-fatal — thumbnail is a nice-to-have, not required
+        }
+      }
+
       if (user?.email) {
         const tempAnalysis = {
           type: analysisType,
-          imageUri: imageUri || undefined,
+          imageUri: imageUri || videoThumbnailUri || undefined,
           videoUri: videoUri || undefined,
           textDescription: textInput.trim() || undefined,
           analysisResult: JSON.stringify({ summary: 'Analysis in progress...' }),
