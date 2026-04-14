@@ -2079,6 +2079,9 @@ class NutritionVideoPipeline:
                 "reference_height_cm": known_height_cm,
                 "bbox": bbox,
                 "confidence": float(candidate["confidence"]),
+                # pixels_per_cm derived from reference object size in pixels vs cm
+                # Used by pass 2 to pre-compute ingredient areas before sending to Gemini
+                "pixels_per_cm": pixel_width / float(candidate["known_size_cm"]),
             }
             break
 
@@ -2087,84 +2090,136 @@ class NutritionVideoPipeline:
     def _estimate_volume_from_raw_depth_with_gemini(
         self,
         image_rgb: np.ndarray,
-        raw_depth_image: Image.Image,
         visible_items: list[dict],
         first_pass: dict,
         job_id: str,
         user_context: dict = None,
         calibrated_depth_image: Image.Image = None,
+        calibrated_depth_np: np.ndarray = None,
+        sam3_results: dict = None,
+        calibration: dict = None,
+        # Legacy params kept for call-site compatibility — no longer used
+        raw_depth_image: Image.Image = None,
         masked_depth_image: Image.Image = None,
     ) -> dict:
+        """Estimate per-ingredient volumes using RGB + calibrated depth.
+
+        Area is pre-computed from SAM3 pixel counts + plate calibration so that
+        Gemini only needs to estimate height/thickness from the calibrated depth
+        image. This cuts the free-variable count from 2 (area + height) to 1
+        (height only), targeting <10 % run-to-run volume variance on the same dish.
+        """
         try:
             import google.generativeai as genai
             genai.configure(api_key=self.config.GEMINI_API_KEY)
         except Exception as e:
-            logger.warning(f"[{job_id}] Gemini raw-depth volume pass init failed: {e}")
+            logger.warning(f"[{job_id}] Gemini volume pass init failed: {e}")
             return {}
 
         labels = [item["name"] for item in visible_items]
         if not labels:
             return {}
 
+        # ── Pre-compute ingredient areas from SAM3 masks + calibration scale ──
+        # pixels_per_cm is set by _calibrate_zoe_depth_from_reference when a
+        # reference object (plate/bowl) was detected. If unavailable we skip the
+        # area anchors and fall back to Gemini estimating area itself.
+        pixels_per_cm = float((calibration or {}).get("pixels_per_cm") or 0.0)
+        item_anchors = []
+        for item in visible_items:
+            name = item["name"]
+            anchor: dict = {"name": name}
+            if pixels_per_cm > 0 and sam3_results and calibrated_depth_np is not None:
+                mask = (sam3_results.get(name) or {}).get("mask")
+                if mask is not None:
+                    mask_resized = self._resize_mask_to_shape(mask, calibrated_depth_np.shape)
+                    mask_bool = mask_resized.astype(bool)
+                    area_px = int(mask_bool.sum())
+                    if area_px > 0:
+                        area_cm2 = round(area_px / (pixels_per_cm ** 2), 1)
+                        anchor["area_cm2"] = area_cm2
+                        # Mean calibrated depth (metres) within mask — converted to cm
+                        depth_vals = calibrated_depth_np[mask_bool]
+                        depth_vals = depth_vals[np.isfinite(depth_vals) & (depth_vals > 0)]
+                        if depth_vals.size > 0:
+                            anchor["mean_depth_m"] = round(float(np.median(depth_vals)), 4)
+            item_anchors.append(anchor)
+
+        # ── Build scale context line ──
         vessel = first_pass.get("plate_or_bowl") or {}
-        scale_note = (
-            f"A {vessel.get('vessel_type') or 'dish'} is present with estimated diameter {float(vessel.get('diameter_cm') or 0):.1f} cm."
-            if vessel.get("diameter_cm") else
-            "No reliable vessel dimension was detected; use the depth maps and image together for scale."
-        )
-
-        has_all_depth = calibrated_depth_image is not None and masked_depth_image is not None
-
-        if has_all_depth:
-            prompt = (
-                "You are given FOUR aligned inputs of the same dish:\n"
-                "  Image 1: the original RGB photo.\n"
-                "  Image 2: the raw ZoeDepth depth map (unscaled) — brighter = closer to camera.\n"
-                "  Image 3: the calibrated depth map (metric, scaled to real-world cm) — use this "
-                "for accurate distance and height measurements.\n"
-                "  Image 4: the masked depth map — the calibrated depth map with each food item "
-                "segmented into its own region. Use this to understand the 3D shape and height "
-                "of each individual ingredient.\n\n"
-                f"{scale_note}\n"
-                f"Visible ingredients: {json.dumps(labels)}.\n\n"
-                "Using all four images together:\n"
-                "- Use Image 4 (masked depth) to measure the surface area and depth profile of each food item.\n"
-                "- Use Image 3 (calibrated depth) to get accurate real-world heights in cm.\n"
-                "- Use Image 1 (RGB) to understand the food type, density, and plating.\n"
-                "- Use Image 2 (raw depth) as a sanity check for relative distances.\n\n"
-                "Return ONLY valid JSON as an array like:\n"
-                "[{\"name\": \"rice\", \"volume_ml\": 180, \"confidence\": 0.82}, ...]\n\n"
-                "Rules:\n"
-                "- Include every visible ingredient exactly once.\n"
-                "- Confidence must be between 0 and 1.\n"
-                "- Estimate realistic food volume in ml for the visible portion only.\n"
-                "- Do not invent hidden or questionnaire-only ingredients here.\n"
+        if vessel.get("diameter_cm") and pixels_per_cm > 0:
+            scale_note = (
+                f"Scale reference: {vessel.get('vessel_type') or 'plate'} diameter = "
+                f"{float(vessel['diameter_cm']):.1f} cm = {pixels_per_cm:.1f} px/cm (calibrated)."
+            )
+        elif vessel.get("diameter_cm"):
+            scale_note = (
+                f"A {vessel.get('vessel_type') or 'dish'} is present with estimated diameter "
+                f"{float(vessel['diameter_cm']):.1f} cm."
             )
         else:
-            prompt = (
-                "You are given two aligned inputs of the same dish.\n"
-                "Image 1 is the raw RGB photo.\n"
-                "Image 2 is the raw ZoeDepth depth visualization of the same scene.\n"
-                "Use them together to estimate ingredient volumes.\n\n"
-                f"{scale_note}\n"
-                f"Visible ingredients: {json.dumps(labels)}.\n\n"
-                "Return ONLY valid JSON as an array like:\n"
-                "[{\"name\": \"rice\", \"volume_ml\": 180, \"confidence\": 0.82}, ...]\n\n"
-                "Rules:\n"
-                "- Include every visible ingredient exactly once.\n"
-                "- Confidence must be between 0 and 1.\n"
-                "- Estimate realistic food volume in ml for the visible portion only.\n"
-                "- Do not invent hidden or questionnaire-only ingredients here.\n"
+            scale_note = "No reliable vessel dimension detected; infer scale from the calibrated depth map."
+
+        # ── Build per-ingredient anchor block ──
+        has_area_anchors = any("area_cm2" in a for a in item_anchors)
+        if has_area_anchors:
+            anchor_lines = []
+            for a in item_anchors:
+                if "area_cm2" in a:
+                    anchor_lines.append(
+                        f"  {json.dumps(a['name'])}: projected_area={a['area_cm2']} cm²"
+                        + (f", median_depth={a['mean_depth_m']} m" if "mean_depth_m" in a else "")
+                    )
+                else:
+                    anchor_lines.append(f"  {json.dumps(a['name'])}: area unavailable — estimate freely")
+            anchor_block = (
+                "Pre-computed ingredient areas (from depth-calibrated SAM3 segmentation — treat as ground truth):\n"
+                + "\n".join(anchor_lines) + "\n\n"
+                "Your task: use the calibrated depth map (Image 2) to estimate the average "
+                "height/thickness of each ingredient above the plate surface, then compute:\n"
+                "  volume_ml = projected_area_cm2 × height_cm × shape_factor × 10\n"
+                "where shape_factor accounts for packing and surface curvature:\n"
+                "  - Loose/piled foods (rice, salad, shredded veg): 0.55 – 0.70\n"
+                "  - Compact solids (falafel, meat chunks, potato cubes): 0.65 – 0.80\n"
+                "  - Flat sauces / drizzles (tahini, ketchup, thin sauce layer): 0.85 – 0.95\n"
+                "  - Thick sauces / dips (hummus, tzatziki, guacamole): 0.75 – 0.90\n"
+                "  - Whole items (boiled egg, whole fruit, bread roll): 0.70 – 0.85\n"
+                "Do NOT change the pre-computed areas. Only vary height_cm and shape_factor.\n"
             )
+        else:
+            # No area anchors — Gemini estimates volume freely from the two images
+            anchor_block = (
+                f"Visible ingredients: {json.dumps(labels)}.\n\n"
+                "Estimate the volume in ml for each ingredient using the RGB photo and the "
+                "calibrated depth map together.\n"
+            )
+
+        prompt = (
+            "You are a food volume estimation system.\n"
+            "You are given TWO aligned images of the same dish:\n"
+            "  Image 1: the original RGB photo.\n"
+            "  Image 2: the calibrated depth map (brighter/warmer = closer to camera = taller food).\n\n"
+            f"{scale_note}\n\n"
+            + anchor_block +
+            "\nReturn ONLY valid JSON — an array where every visible ingredient appears exactly once:\n"
+            "[{\"name\": \"rice\", \"volume_ml\": 180, \"height_cm\": 2.1, \"shape_factor\": 0.60, \"confidence\": 0.85}, ...]\n\n"
+            "Rules:\n"
+            "- Every ingredient in the pre-computed list must appear in the output.\n"
+            "- volume_ml must be > 0.\n"
+            "- confidence between 0 and 1.\n"
+            "- Estimate only the visible portion — do not add hidden or extra items here.\n"
+        )
         prompt += self._build_user_context_suffix(user_context)
 
         model_name = self._flash_model_name()
         gm = genai.GenerativeModel(model_name, generation_config=self._GEMINI_GEN_CONFIG)
         original_pil = Image.fromarray(image_rgb)
 
-        content = [prompt, original_pil, raw_depth_image]
-        if has_all_depth:
-            content += [calibrated_depth_image, masked_depth_image]
+        # Send RGB + calibrated depth only — dropping raw depth and masked depth
+        # removes SAM3-segmentation variance from the input images
+        content = [prompt, original_pil]
+        if calibrated_depth_image is not None:
+            content.append(calibrated_depth_image)
 
         response = gm.generate_content(content)
         response_text = response.text or ""
@@ -2184,24 +2239,53 @@ class NutritionVideoPipeline:
 
         data = json.loads(json_str)
         self._record_gemini_output(
-            stage="production_image_volume_from_raw_depth",
+            stage="production_image_volume_estimation",
             job_id=job_id,
             model_name=model_name,
             prompt=prompt,
             response_text=response_text,
             parsed_output=data,
-            metadata={"visible_ingredients": labels},
+            metadata={"visible_ingredients": labels, "item_anchors": item_anchors},
         )
+
+        # If area anchors were provided, override Gemini's volume with the
+        # deterministic formula: area_cm2 × height_cm × shape_factor × 10
+        # This caps variance to height + shape_factor estimation only.
+        anchor_map = {a["name"].lower(): a for a in item_anchors if "area_cm2" in a}
+
         volume_map = {}
-        for item in data:
-            name = (item.get("name") or "").strip().lower()
+        for entry in data:
+            name = (entry.get("name") or "").strip().lower()
             if not name:
                 continue
+            gemini_volume = float(entry.get("volume_ml") or 0.0)
+            anchor = anchor_map.get(name)
+            if anchor:
+                height_cm = float(entry.get("height_cm") or 0.0)
+                shape_factor = float(entry.get("shape_factor") or 0.0)
+                if height_cm > 0 and shape_factor > 0:
+                    computed_volume = anchor["area_cm2"] * height_cm * shape_factor * 10.0
+                    # Sanity-clamp: don't let Gemini drift more than 40% from its own
+                    # free estimate (catches height/shape_factor hallucinations)
+                    if gemini_volume > 0:
+                        ratio = computed_volume / gemini_volume
+                        if ratio > 1.4:
+                            computed_volume = gemini_volume * 1.4
+                        elif ratio < 0.6:
+                            computed_volume = gemini_volume * 0.6
+                    volume_ml = round(computed_volume, 1)
+                else:
+                    # height/shape_factor missing — use Gemini's volume directly
+                    volume_ml = gemini_volume
+            else:
+                volume_ml = gemini_volume
+
             volume_map[name] = {
-                "volume_ml": float(item.get("volume_ml") or 0.0),
-                "confidence": float(item.get("confidence") or 0.0),
+                "volume_ml": volume_ml,
+                "confidence": float(entry.get("confidence") or 0.0),
             }
-        logger.info(f"[{job_id}] Gemini raw depth volume estimates: {volume_map}")
+
+        logger.info(f"[{job_id}] Volume estimates (anchored={has_area_anchors}): { {k: v['volume_ml'] for k, v in volume_map.items()} }")
         return volume_map
 
     def _estimate_questionnaire_item_nutrition(self, verified_items: list[dict], job_id: str) -> list[dict]:
@@ -2704,9 +2788,10 @@ class NutritionVideoPipeline:
         masked_depth_image = self._render_depth_image(calibrated_depth, mask=dish_mask)
         volume_map = self._estimate_volume_from_raw_depth_with_gemini(
             image_rgb=img_rgb,
-            raw_depth_image=raw_depth_image,
             calibrated_depth_image=calibrated_depth_image,
-            masked_depth_image=masked_depth_image,
+            calibrated_depth_np=calibrated_depth,
+            sam3_results=sam3_results,
+            calibration=calibration,
             visible_items=visible_items,
             first_pass=first_pass,
             job_id=job_id,
