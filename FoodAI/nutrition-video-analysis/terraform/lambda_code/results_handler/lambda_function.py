@@ -142,6 +142,54 @@ def lambda_handler(event, context):
                 )
                 detailed_results = json.loads(s3_response['Body'].read().decode('utf-8'))
                 result['detailed_results'] = strip_private_response_fields(detailed_results)
+
+                # Generate fresh presigned URLs for segmentation assets.
+                # The pipeline uploads:
+                #   results/{job_id}/sam3_segmentation.png  (+ rgb.png, zoedepth_colored.png)
+                #   segmented_images/{job_id}/segmented_overlay_video.mp4
+                # Worker stores asset_keys in results["segmented_images"]; we read them here
+                # and generate presigned URLs so the frontend never touches stale ECS credentials.
+                presigned_expires = 3600  # 1 hour — same as download_url
+                overlay_urls = []
+
+                # Static image overlays — read asset_keys stored by the ECS worker
+                asset_keys = (
+                    detailed_results.get('segmented_images', {}).get('asset_keys') or []
+                )
+                for asset in asset_keys:
+                    s3_key = asset.get('s3_key')
+                    name = asset.get('name', '')
+                    if not s3_key:
+                        continue
+                    try:
+                        url = s3.generate_presigned_url(
+                            'get_object',
+                            Params={'Bucket': S3_RESULTS_BUCKET, 'Key': s3_key},
+                            ExpiresIn=presigned_expires,
+                        )
+                        overlay_urls.append({'name': name, 'url': url})
+                    except Exception:
+                        pass
+
+                # Video overlay — predictable key written by pipeline._generate_segmented_video_from_sam3
+                video_overlay_url = None
+                video_s3_key = f'segmented_images/{job_id}/segmented_overlay_video.mp4'
+                try:
+                    s3.head_object(Bucket=S3_RESULTS_BUCKET, Key=video_s3_key)
+                    video_overlay_url = s3.generate_presigned_url(
+                        'get_object',
+                        Params={'Bucket': S3_RESULTS_BUCKET, 'Key': video_s3_key},
+                        ExpiresIn=presigned_expires,
+                    )
+                except Exception:
+                    pass  # video overlay not present (image jobs) or not yet uploaded
+
+                if overlay_urls or video_overlay_url:
+                    result['segmented_images'] = {
+                        'overlay_urls': overlay_urls,
+                        'video_overlay_url': video_overlay_url,
+                    }
+
             except s3.exceptions.NoSuchKey:
                 result['detailed_results'] = None
                 result['warning'] = 'Detailed results not found in S3'
