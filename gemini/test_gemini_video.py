@@ -129,6 +129,7 @@ def analyze_video_inline(
     response = client.models.generate_content(
         model=model,
         contents=types.Content(parts=parts),
+        config=types.GenerateContentConfig(top_p=1, top_k=1, seed=42),
     )
     return response.text
 
@@ -153,6 +154,7 @@ def analyze_video_upload(
     response = client.models.generate_content(
         model=model,
         contents=[myfile, prompt],
+        config=types.GenerateContentConfig(top_p=1, top_k=1, seed=42),
     )
     return response.text
 
@@ -192,6 +194,7 @@ def analyze_video_youtube(
     response = client.models.generate_content(
         model=model,
         contents=types.Content(parts=parts),
+        config=types.GenerateContentConfig(top_p=1, top_k=1, seed=42),
     )
     return response.text
 

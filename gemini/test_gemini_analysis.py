@@ -140,7 +140,10 @@ def setup_gemini(api_key: Optional[str] = None):
     
     for name in model_names_to_try:
         try:
-            model = genai.GenerativeModel(name)
+            model = genai.GenerativeModel(
+                name,
+                generation_config={"top_p": 1, "top_k": 1, "seed": 42},
+            )
             model_name = name
             print(f"✓ Gemini API configured with {name} (key: {api_key[:10]}...)")
             break
@@ -357,6 +360,9 @@ def analyze_with_structured_boxes(
         Include all visible ingredients, garnishes, sides, and components.
         """,
         temperature=0.5,
+        top_p=1,
+        top_k=1,
+        seed=42,
         safety_settings=[
             SafetySetting(
                 category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,

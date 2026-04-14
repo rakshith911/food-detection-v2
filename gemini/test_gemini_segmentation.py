@@ -116,6 +116,9 @@ def extract_segmentation_masks(
         """
     
     config = types.GenerateContentConfig(
+        top_p=1,
+        top_k=1,
+        seed=42,
         thinking_config=types.ThinkingConfig(thinking_budget=0),  # Better for object detection
         # Add timeout settings
     )

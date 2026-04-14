@@ -72,6 +72,11 @@ def parse_args() -> argparse.Namespace:
         help="Directory where test outputs should be written. Defaults to docker/test/<timestamp>",
     )
     parser.add_argument("--limit", type=int, default=None, help="Only process the first N images when input_path is a directory")
+    parser.add_argument(
+        "--labels-only",
+        action="store_true",
+        help="Run only Gemini first-pass labels and Gemini segmentation labels, skipping depth/RAG/calories",
+    )
     return parser.parse_args()
 
 
@@ -500,13 +505,18 @@ class GeminiSegmentationProvider:
                 from google.genai import types
 
                 client = genai_new.Client(api_key=self.api_key)
+                config_kwargs = {
+                    "temperature": 0.0,
+                    "top_p": 1,
+                    "top_k": 1,
+                    "thinking_config": types.ThinkingConfig(thinking_budget=0),
+                }
+                if hasattr(types.GenerateContentConfig, "seed"):
+                    config_kwargs["seed"] = 42
                 response = client.models.generate_content(
                     model=self.model_name,
                     contents=[pil_image, prompt],
-                    config=types.GenerateContentConfig(
-                        temperature=0.0,
-                        thinking_config=types.ThinkingConfig(thinking_budget=0),
-                    ),
+                    config=types.GenerateContentConfig(**config_kwargs),
                 )
                 return response.text or ""
             except Exception as exc:
@@ -515,9 +525,10 @@ class GeminiSegmentationProvider:
                     import google.generativeai as genai
 
                     genai.configure(api_key=self.api_key)
+                    generation_config = {"temperature": 0.0, "top_p": 1, "top_k": 1}
                     model = genai.GenerativeModel(
                         self.model_name,
-                        generation_config={"temperature": 0.0},
+                        generation_config=generation_config,
                     )
                     response = model.generate_content([pil_image, prompt])
                     return response.text or ""
@@ -852,6 +863,132 @@ def summarize_result(image_path: Path, result: dict, provider: GeminiSegmentatio
     }
 
 
+def summarize_labels_only(
+    image_path: Path,
+    job_id: str,
+    first_pass: dict,
+    provider: GeminiSegmentationProvider,
+) -> dict:
+    visible_ingredients = first_pass.get("visible_ingredients") or []
+    first_pass_labels = [
+        str(item.get("name") or "").strip()
+        for item in visible_ingredients
+        if str(item.get("name") or "").strip()
+    ]
+    return {
+        "image": image_path.name,
+        "job_id": job_id,
+        "status": "labels_only_complete",
+        "meal_name": first_pass.get("meal_name"),
+        "cuisine_type": first_pass.get("cuisine_type"),
+        "cooking_method": first_pass.get("cooking_method"),
+        "first_pass_labels": first_pass_labels,
+        "segmentation_backend": "gemini",
+        "segmentation_model": provider.model_name,
+        "segmentation_items": provider.last_mask_summary,
+        "segmentation_labels": list((provider.last_mask_summary or {}).keys()),
+    }
+
+
+def run_labels_only_first_pass(
+    pipeline: Any,
+    pil_image: Image.Image,
+    job_id: str,
+    user_context: Optional[dict] = None,
+) -> dict:
+    import google.generativeai as genai
+
+    genai.configure(api_key=pipeline.config.GEMINI_API_KEY)
+    model_name = pipeline._flash_model_name()
+    model = genai.GenerativeModel(
+        model_name,
+        generation_config=pipeline._GEMINI_FIRST_PASS_GEN_CONFIG,
+    )
+    img_width, img_height = pil_image.size
+    prompt = (
+        "Identify every distinct visible food ingredient or component in this food image.\n\n"
+        "Return ONLY valid JSON with this exact structure:\n"
+        "{"
+        "\"meal_name\": str, "
+        "\"visible_ingredients\": [str, str, str], "
+        "\"notes\": str"
+        "}\n\n"
+        f"Image size: {img_width}x{img_height}.\n"
+        "Rules:\n"
+        "- Include only visually present food items/components.\n"
+        "- Do not include trays, bowls, plates, wrappers, or utensils.\n"
+        "- Use consistent food labels.\n"
+        "- Prefer specific ingredient names like 'diced onions' over generic names when visible.\n"
+        "- Return only the JSON object.\n"
+    )
+    prompt += pipeline._build_user_context_suffix(user_context)
+    response = model.generate_content([prompt, pil_image])
+    response_text = (response.text or "").strip()
+
+    if "```json" in response_text:
+        start = response_text.find("```json") + 7
+        end = response_text.find("```", start)
+        json_str = response_text[start:end].strip()
+    elif "```" in response_text:
+        start = response_text.find("```") + 3
+        end = response_text.find("```", start)
+        json_str = response_text[start:end].strip()
+    else:
+        start = response_text.find("{")
+        end = response_text.rfind("}") + 1
+        json_str = response_text[start:end].strip()
+
+    def _extract_visible_labels(candidate: str) -> list[str]:
+        match = re.search(
+            r'"visible_ingredients"\s*:\s*\[(.*?)\]',
+            candidate,
+            flags=re.DOTALL,
+        )
+        if not match:
+            return []
+        return [
+            label.strip()
+            for _, label in re.findall(r'(["\'])(.*?)\1', match.group(1))
+            if label.strip()
+        ]
+
+    meal_name = ""
+    notes = ""
+    try:
+        payload = json.loads(json_str)
+        raw_labels = payload.get("visible_ingredients") or []
+        labels = [str(x).strip() for x in raw_labels if str(x).strip()]
+        meal_name = str(payload.get("meal_name") or "").strip()
+        notes = str(payload.get("notes") or "").strip()
+    except Exception:
+        labels = _extract_visible_labels(json_str or response_text)
+        meal_match = re.search(r'"meal_name"\s*:\s*"([^"]*)"', json_str or response_text)
+        notes_match = re.search(r'"notes"\s*:\s*"([^"]*)"', json_str or response_text)
+        meal_name = meal_match.group(1).strip() if meal_match else ""
+        notes = notes_match.group(1).strip() if notes_match else ""
+
+    if not labels:
+        raise RuntimeError(f"Could not recover labels from Gemini response: {(response_text or '')[:300]}")
+
+    normalized = []
+    seen = set()
+    for label in labels:
+        key = label.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(label)
+
+    return {
+        "meal_name": meal_name or "Analyzed Meal",
+        "visible_ingredients": [{"name": label} for label in normalized],
+        "notes": notes,
+        "raw_response_text": response_text,
+        "job_id": job_id,
+        "model_name": model_name,
+    }
+
+
 def print_summary(summary: dict) -> None:
     print(f"\n[{summary['image']}]")
     print(f"  status: {summary['status']}")
@@ -862,6 +999,8 @@ def print_summary(summary: dict) -> None:
     print(f"  overall_confidence: {summary.get('overall_confidence')}")
     print(f"  segmentation_backend: {summary.get('segmentation_backend')}")
     print(f"  segmentation_model: {summary.get('segmentation_model')}")
+    if summary.get("first_pass_labels") is not None:
+        print(f"  first_pass_labels: {summary.get('first_pass_labels')}")
     print(f"  segmentation_labels: {list((summary.get('segmentation_items') or {}).keys())}")
 
 
@@ -922,26 +1061,57 @@ def main() -> int:
                 write_json(image_dir / "user_context.json", user_context)
 
             try:
-                # For this comparison harness, fail fast on the production image path.
-                # Falling back to the legacy image/video pipeline would pull in SAM2 and
-                # invalidate the Gemini-vs-SAM3 comparison we are trying to test.
-                print("  [Pipeline] starting production image pipeline with Gemini segmentation override")
-                t_pipeline = time.time()
-                result = pipeline._run_production_image_pipeline(
-                    image_path,
-                    job_id,
-                    user_context=user_context,
-                )
-                print(f"  [Pipeline] production image pipeline completed in {time.time() - t_pipeline:.1f}s")
-                write_json(image_dir / "result.json", result)
-                save_provider_artifacts(provider, image_dir, job_id)
-                save_notebook_style_overlay(image_path, provider, image_dir)
-                copy_debug_artifacts(run_output_dir, image_dir, job_id)
+                if args.labels_only:
+                    print("  [Labels only] running Gemini first pass")
+                    pil_image = Image.open(image_path).convert("RGB")
+                    t_first = time.time()
+                    first_pass = run_labels_only_first_pass(
+                        pipeline,
+                        pil_image,
+                        job_id,
+                        user_context=user_context,
+                    )
+                    print(f"  [Labels only] first pass completed in {time.time() - t_first:.1f}s")
+                    write_json(image_dir / "first_pass.json", first_pass)
 
-                summary = summarize_result(image_path, result, provider)
-                write_json(image_dir / "summary.json", summary)
-                run_summary.append(summary)
-                print_summary(summary)
+                    first_pass_labels = [
+                        str(item.get("name") or "").strip()
+                        for item in (first_pass.get("visible_ingredients") or [])
+                        if str(item.get("name") or "").strip()
+                    ]
+                    if not first_pass_labels:
+                        raise RuntimeError("Gemini first pass returned no visible ingredient labels")
+
+                    print(f"  [Labels only] first-pass labels: {first_pass_labels}")
+                    provider(None, None, pil_image, first_pass_labels, device=args.device)
+                    save_provider_artifacts(provider, image_dir, job_id)
+                    save_notebook_style_overlay(image_path, provider, image_dir)
+
+                    summary = summarize_labels_only(image_path, job_id, first_pass, provider)
+                    write_json(image_dir / "summary.json", summary)
+                    run_summary.append(summary)
+                    print_summary(summary)
+                else:
+                    # For this comparison harness, fail fast on the production image path.
+                    # Falling back to the legacy image/video pipeline would pull in SAM2 and
+                    # invalidate the Gemini-vs-SAM3 comparison we are trying to test.
+                    print("  [Pipeline] starting production image pipeline with Gemini segmentation override")
+                    t_pipeline = time.time()
+                    result = pipeline._run_production_image_pipeline(
+                        image_path,
+                        job_id,
+                        user_context=user_context,
+                    )
+                    print(f"  [Pipeline] production image pipeline completed in {time.time() - t_pipeline:.1f}s")
+                    write_json(image_dir / "result.json", result)
+                    save_provider_artifacts(provider, image_dir, job_id)
+                    save_notebook_style_overlay(image_path, provider, image_dir)
+                    copy_debug_artifacts(run_output_dir, image_dir, job_id)
+
+                    summary = summarize_result(image_path, result, provider)
+                    write_json(image_dir / "summary.json", summary)
+                    run_summary.append(summary)
+                    print_summary(summary)
             except Exception as exc:
                 failure = {
                     "image": image_path.name,
