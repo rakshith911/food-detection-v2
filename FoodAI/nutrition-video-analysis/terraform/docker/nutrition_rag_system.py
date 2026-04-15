@@ -1278,6 +1278,7 @@ class NutritionRAG:
         food_name: str,
         crop_image: Optional[Image.Image],
         top_k: int = 10,
+        meal_context: Optional[str] = None,
     ) -> list[dict]:
         if not self._use_unified:
             return []
@@ -1288,6 +1289,15 @@ class NutritionRAG:
         st_hits: dict[int, float] = {}
         if self._unified_index is not None and self._embedder is not None:
             variants = list(dict.fromkeys([normalized, food_name.strip().lower()]))
+            # Add a contextual variant when meal_context is available (e.g. "falafel bowl").
+            # For generic labels like "red sauce", appending the meal name shifts the
+            # embedding toward the correct cuisine region — away from false positives
+            # like "Barbecue sauce" and toward "chili sauce" / "hot sauce".
+            if meal_context:
+                ctx_short = meal_context.strip().lower()[:40]
+                contextual = f"{normalized} {ctx_short}".strip()
+                if contextual not in variants:
+                    variants.append(contextual)
             for variant in variants:
                 if not variant.strip():
                     continue
@@ -2704,7 +2714,7 @@ class NutritionRAG:
             }
             for candidate in self._apply_lexical_override(
                 self._normalize_food_name(food_name),
-                self._retrieve_candidates(food_name, crop_image=crop_image, top_k=8),
+                self._retrieve_candidates(food_name, crop_image=crop_image, top_k=8, meal_context=meal_context),
             )[:5]
         ] if self._use_unified else []
         density, kcal_per_100g, density_matched, density_source, calorie_matched, calorie_source = self._resolve_nutrition(food_name, crop_image=crop_image, meal_context=meal_context)

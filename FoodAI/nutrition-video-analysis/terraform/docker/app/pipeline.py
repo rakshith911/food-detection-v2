@@ -2595,6 +2595,11 @@ class NutritionVideoPipeline:
     ) -> dict:
         item_components = {}
 
+        # Use the meal name from pass 1 as context for FAISS queries — helps generic
+        # labels like "red sauce" or "white sauce" retrieve cuisine-appropriate candidates
+        # instead of false positives (e.g. "Barbecue sauce" for a falafel bowl sauce).
+        meal_context = (first_pass.get("meal_name") or "").strip() or None
+
         for item in visible_items:
             label = item["name"]
             confidence = float(item.get("confidence") or 0.0)
@@ -2617,6 +2622,7 @@ class NutritionVideoPipeline:
                 origin="visible_base",
                 crop_image=crop_image,
                 job_id=job_id,
+                meal_context=meal_context,
             )
             logger.info(
                 f"[{job_id}] base '{label}': confidence={confidence:.2f} volume={volume_ml:.1f}ml "
@@ -2647,6 +2653,7 @@ class NutritionVideoPipeline:
                 is_incremental=bool(item.get("is_incremental")),
                 crop_image=None,
                 job_id=job_id,
+                meal_context=meal_context,
             )
             logger.info(
                 f"[{job_id}] inferred {role_tag} '{label}': confidence={confidence:.2f} volume={volume_ml:.1f}ml "
