@@ -3094,6 +3094,17 @@ class NutritionVideoPipeline:
         volume_history = {}
         video_segments = {}  # Store SAM2 masks for all frames
         sam2_to_obj_id = {}  # Map SAM2's internal IDs to our persistent obj_ids
+
+        # ByteTrack — replaces greedy IoU matching for cross-window re-identification
+        from .bytetrack import BYTETracker
+        byte_tracker = BYTETracker(
+            high_thresh=0.5,   # IoU threshold for confident matches (stage 1)
+            low_thresh=0.3,    # IoU threshold for recovering lost tracks (stage 2)
+            max_lost=5,        # frames a track survives without a match
+            min_hits=1,        # frames before a new track is confirmed
+        )
+        # Maps ByteTrack track_id → our pipeline obj_id (persistent across windows)
+        byte_id_to_obj_id: dict[int, int] = {}
         current_window_start = 0
         caption = None  # Store the caption from Florence-2
         # Frames collected for post-loop depth estimation: (frame_idx, frame_np, masks_dict)
@@ -3222,52 +3233,64 @@ class NutritionVideoPipeline:
                     self.florence_detections.append(detection_info)
                     
                     if len(boxes) > 0:
-                        # Match new detections to existing objects using spatial overlap (IoU)
-                        # High IoU = same object, Low IoU = new object
-                        # Use greedy 1-to-1 matching: each object matches to at most one detection
-                        matched_mapping = {}  # Maps existing_obj_id -> new_detection_idx
-                        matched_new_indices = set()  # Track which new detections are already matched
-                        unmatched_new = list(range(len(boxes)))  # Indices of new detections not matched
-                        
-                        if tracked_objects:
-                            # Calculate IoU matrix
-                            iou_matrix = []
-                            for obj_id, obj_data in tracked_objects.items():
-                                if 'box' in obj_data:
-                                    row = []
-                                    for new_box in boxes:
-                                        iou = self._calculate_iou(new_box, obj_data['box'])
-                                        row.append(iou)
-                                    iou_matrix.append((obj_id, row))
-                            
-                            # Greedy matching: match highest IoU pairs first
-                            while iou_matrix:
-                                # Find the highest IoU across all (object, detection) pairs
-                                best_iou = 0.0
-                                best_obj_id = None
-                                best_new_idx = None
-                                
-                                for obj_id, iou_row in iou_matrix:
-                                    for new_idx, iou in enumerate(iou_row):
-                                        if new_idx not in matched_new_indices and iou > best_iou:
-                                            best_iou = iou
-                                            best_obj_id = obj_id
-                                            best_new_idx = new_idx
-                                
-                                # If best IoU > 0.5, match them
-                                if best_iou > 0.5 and best_obj_id is not None:
-                                    matched_mapping[best_obj_id] = best_new_idx
-                                    matched_new_indices.add(best_new_idx)
-                                    if best_new_idx in unmatched_new:
-                                        unmatched_new.remove(best_new_idx)
-                                    logger.info(f"[{job_id}] Frame {frame_idx}: Matched '{labels[best_new_idx]}' to existing ID{best_obj_id} ('{tracked_objects[best_obj_id]['label']}') with IoU={best_iou:.2f}")
-                                    
-                                    # Remove matched object from matrix
-                                    iou_matrix = [(oid, row) for oid, row in iou_matrix if oid != best_obj_id]
-                                else:
-                                    break  # No more good matches
-                        
-                        logger.info(f"[{job_id}] Frame {frame_idx}: Matched {len(matched_mapping)} objects, {len(unmatched_new)} new objects")
+                        # ── ByteTrack matching ──────────────────────────────────────────
+                        # Two-stage Hungarian matching with Kalman-predicted positions.
+                        # Stage 1: high-IoU match for confident re-identifications.
+                        # Stage 2: low-IoU match recovers briefly-lost tracks.
+                        # Tracks that survive across detection windows keep the same
+                        # pipeline obj_id; newly spawned ByteTrack tracks get a fresh one.
+                        active_stracks = byte_tracker.update(
+                            boxes=boxes if len(boxes) > 0 else np.zeros((0, 4), dtype=np.float32),
+                            labels=labels,
+                            scores=[float(s) for s in (detection_grams_list or [])] if detection_grams_list else None,
+                        )
+
+                        # Build matched_mapping (obj_id → det_index) and unmatched_new
+                        # by reconciling ByteTrack track IDs with our pipeline obj IDs.
+                        matched_mapping = {}   # obj_id → detection index in `boxes`
+                        unmatched_new   = []   # detection indices that got a fresh track
+
+                        # Index active stracks by their Kalman-predicted box position
+                        # so we can reverse-map each to a detection index.
+                        det_boxes_list = boxes.tolist() if len(boxes) > 0 else []
+
+                        for strack in active_stracks:
+                            # Find the detection index closest to this track's box
+                            best_det_idx = None
+                            best_iou = 0.0
+                            for di, dbox in enumerate(det_boxes_list):
+                                iou = self._calculate_iou(np.array(dbox), strack.box)
+                                if iou > best_iou:
+                                    best_iou = iou
+                                    best_det_idx = di
+
+                            if best_det_idx is None:
+                                continue
+
+                            byte_id = strack.track_id
+                            if byte_id in byte_id_to_obj_id:
+                                # Existing pipeline object — re-matched
+                                obj_id = byte_id_to_obj_id[byte_id]
+                                matched_mapping[obj_id] = best_det_idx
+                                logger.info(
+                                    f"[{job_id}] Frame {frame_idx}: ByteTrack re-matched "
+                                    f"'{labels[best_det_idx]}' to existing ID{obj_id} (IoU≈{best_iou:.2f})"
+                                )
+                            else:
+                                # New ByteTrack track — will become a new pipeline object
+                                unmatched_new.append(best_det_idx)
+                                # byte_id_to_obj_id populated below when obj_id is assigned
+
+                        # Detections not claimed by any track are also new
+                        claimed = set(matched_mapping.values()) | set(unmatched_new)
+                        for di in range(len(det_boxes_list)):
+                            if di not in claimed:
+                                unmatched_new.append(di)
+
+                        logger.info(
+                            f"[{job_id}] Frame {frame_idx}: ByteTrack — "
+                            f"re-matched={len(matched_mapping)} new={len(unmatched_new)}"
+                        )
                         
                         # Reset SAM2 state
                         inference_state = video_predictor.init_state(video_path=str(frame_dir))
@@ -3300,11 +3323,19 @@ class NutritionVideoPipeline:
                             boxes_to_add.append(boxes[new_idx])
                             ids_to_add.append(old_id)
                         
-                        # New objects (no spatial overlap with existing - these are NEW food items)
+                        # New objects — register ByteTrack track_id → pipeline obj_id
                         for new_idx in unmatched_new:
                             obj_id = next_object_id
                             next_object_id += 1
-                            
+
+                            # Link the ByteTrack strack that owns this detection
+                            for strack in active_stracks:
+                                if strack.track_id not in byte_id_to_obj_id:
+                                    bt_iou = self._calculate_iou(strack.box, boxes[new_idx])
+                                    if bt_iou > 0.3:
+                                        byte_id_to_obj_id[strack.track_id] = obj_id
+                                        break
+
                             color = np.random.randint(0, 255, size=3, dtype=np.uint8)
                             colors[obj_id] = color
                             gemini_grams = None
