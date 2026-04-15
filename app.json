@@ -77,7 +77,6 @@
         }
       ],
       ["expo-video", {}],
-      ["expo-video-thumbnails", {}],
       ["expo-notifications", { "defaultChannel": "default" }]
     ],
     "owner": "leolorence12345"
