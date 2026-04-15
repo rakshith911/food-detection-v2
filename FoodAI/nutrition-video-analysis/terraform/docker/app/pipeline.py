@@ -779,61 +779,78 @@ class NutritionVideoPipeline:
         model_name = self._flash_model_name()
 
         # ── Function calling path (when RAG is loaded) ────────────────────────
+        # Uses google-genai (new SDK) which has stable function-calling support.
         if rag is not None and getattr(rag, "_unified_foods", None):
-            search_fn_decl = genai.protos.FunctionDeclaration(
+            from google import genai as genai_new
+            from google.genai import types as genai_types
+
+            search_fn_decl = genai_types.FunctionDeclaration(
                 name="search_food_database",
                 description=(
                     "Search the USDA/CoFID nutrition database. Returns up to 15 real "
                     "database entry names that match the query. Always call this for each "
                     "ingredient before assigning its name."
                 ),
-                parameters=genai.protos.Schema(
-                    type=genai.protos.Type.OBJECT,
-                    properties={
-                        "query": genai.protos.Schema(
-                            type=genai.protos.Type.STRING,
-                            description="Short food description, e.g. 'rice cooked white', 'tomato raw', 'chicken breast grilled'",
-                        )
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Short food description, e.g. 'rice cooked white', 'tomato raw', 'chicken breast grilled'",
+                        }
                     },
-                    required=["query"],
-                ),
+                    "required": ["query"],
+                },
             )
-            tool = genai.protos.Tool(function_declarations=[search_fn_decl])
-            gm = genai.GenerativeModel(
-                model_name,
-                generation_config=self._GEMINI_FIRST_PASS_GEN_CONFIG,
-                tools=[tool],
-            )
-            chat = gm.start_chat()
-            response = chat.send_message([prompt, image_pil])
+            tool = genai_types.Tool(function_declarations=[search_fn_decl])
+            client = genai_new.Client(api_key=self.config.GEMINI_API_KEY)
 
-            # Tool-call loop (max 10 rounds to prevent infinite loops)
+            import PIL.Image as PILImage
+            import io
+            buf = io.BytesIO()
+            image_pil.save(buf, format="JPEG")
+            image_bytes = buf.getvalue()
+            image_part = genai_types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
+
+            contents = [genai_types.Content(role="user", parts=[genai_types.Part.from_text(text=prompt), image_part])]
+
+            # Tool-call loop (max 10 rounds)
             for _round in range(10):
+                resp = client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=genai_types.GenerateContentConfig(
+                        temperature=0.0,
+                        tools=[tool],
+                    ),
+                )
+                # Append model response to history
+                contents.append(genai_types.Content(role="model", parts=resp.candidates[0].content.parts))
+
                 fn_calls = [
                     p.function_call
-                    for p in (response.candidates[0].content.parts or [])
+                    for p in (resp.candidates[0].content.parts or [])
                     if hasattr(p, "function_call") and p.function_call and p.function_call.name
                 ]
                 if not fn_calls:
                     break
+
                 tool_parts = []
                 for fc in fn_calls:
                     if fc.name == "search_food_database":
-                        query = (fc.args or {}).get("query", "")
+                        query = dict(fc.args or {}).get("query", "")
                         results = rag.search_food_names(query, top_k=15) if query else []
                         tool_parts.append(
-                            genai.protos.Part(
-                                function_response=genai.protos.FunctionResponse(
-                                    name=fc.name,
-                                    response={"result": results},
-                                )
+                            genai_types.Part.from_function_response(
+                                name=fc.name,
+                                response={"result": results},
                             )
                         )
                 if not tool_parts:
                     break
-                response = chat.send_message(tool_parts)
+                contents.append(genai_types.Content(role="user", parts=tool_parts))
 
-            response_text = response.text or ""
+            response_text = resp.text or ""
 
         # ── Fallback: plain generation (no RAG loaded yet) ────────────────────
         else:
