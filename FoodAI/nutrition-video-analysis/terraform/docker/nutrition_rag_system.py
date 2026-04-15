@@ -37,11 +37,13 @@ _MIN_SIM_BY_SOURCE = {'fao': 0.65, 'usda': 0.50, 'cofid': 0.60}
 class NutritionLookupError(LookupError):
     """Raised when nutrition lookup cannot resolve required data."""
 
-    def __init__(self, food_name: str, missing_fields: list[str]):
+    def __init__(self, food_name: str, missing_fields: list[str], reason: str = ""):
         self.food_name = food_name
         self.missing_fields = missing_fields
+        self.reason = reason
         joined = ", ".join(missing_fields)
-        super().__init__(f"Could not resolve {joined} for '{food_name}'")
+        suffix = f": {reason}" if reason else ""
+        super().__init__(f"Could not resolve {joined} for '{food_name}'{suffix}")
 
 class NutritionRAG:
     """
@@ -2242,12 +2244,27 @@ class NutritionRAG:
                     config_kwargs["tools"] = [
                         types.Tool(google_search_retrieval=types.GoogleSearchRetrieval())
                     ]
-            resp = client.models.generate_content(
-                model=self._gemini_model,
-                contents=prompt,
-                config=types.GenerateContentConfig(**config_kwargs),
-            )
-            return resp
+            try:
+                resp = client.models.generate_content(
+                    model=self._gemini_model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(**config_kwargs),
+                )
+                return resp
+            except Exception as e:
+                # Token limit or other context errors from grounding — treat as NOT_FOUND
+                # so the caller falls through to the next lookup step.
+                err_str = str(e).lower()
+                if "token" in err_str or "invalid_argument" in err_str or "context" in err_str:
+                    logger.warning(
+                        "Gemini grounding call failed for '%s' [%s], treating as NOT_FOUND: %s",
+                        food_name, field, e,
+                    )
+
+                    class _NotFoundResp:
+                        text = "NOT_FOUND"
+                    return _NotFoundResp()
+                raise
 
         def _call_context_only(prompt: str):
             from google import genai as genai_new
