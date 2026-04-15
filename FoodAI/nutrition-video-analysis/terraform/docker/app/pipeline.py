@@ -780,9 +780,13 @@ class NutritionVideoPipeline:
 
         # ── Function calling path (when RAG is loaded) ────────────────────────
         # Uses google-genai (new SDK) which has stable function-calling support.
+        # Wrapped in try/except so any failure falls through to plain generation.
+        _fn_calling_succeeded = False
         if rag is not None and getattr(rag, "_unified_foods", None):
+          try:
             from google import genai as genai_new
             from google.genai import types as genai_types
+            import io
 
             search_fn_decl = genai_types.FunctionDeclaration(
                 name="search_food_database",
@@ -805,26 +809,19 @@ class NutritionVideoPipeline:
             tool = genai_types.Tool(function_declarations=[search_fn_decl])
             client = genai_new.Client(api_key=self.config.GEMINI_API_KEY)
 
-            import PIL.Image as PILImage
-            import io
             buf = io.BytesIO()
             image_pil.save(buf, format="JPEG")
-            image_bytes = buf.getvalue()
-            image_part = genai_types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
-
+            image_part = genai_types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg")
             contents = [genai_types.Content(role="user", parts=[genai_types.Part.from_text(text=prompt), image_part])]
 
+            resp = None
             # Tool-call loop (max 10 rounds)
             for _round in range(10):
                 resp = client.models.generate_content(
                     model=model_name,
                     contents=contents,
-                    config=genai_types.GenerateContentConfig(
-                        temperature=0.0,
-                        tools=[tool],
-                    ),
+                    config=genai_types.GenerateContentConfig(temperature=0.0, tools=[tool]),
                 )
-                # Append model response to history
                 contents.append(genai_types.Content(role="model", parts=resp.candidates[0].content.parts))
 
                 fn_calls = [
@@ -842,18 +839,21 @@ class NutritionVideoPipeline:
                         results = rag.search_food_names(query, top_k=15) if query else []
                         tool_parts.append(
                             genai_types.Part.from_function_response(
-                                name=fc.name,
-                                response={"result": results},
+                                name=fc.name, response={"result": results},
                             )
                         )
                 if not tool_parts:
                     break
                 contents.append(genai_types.Content(role="user", parts=tool_parts))
 
-            response_text = resp.text or ""
+            response_text = (resp.text or "") if resp else ""
+            _fn_calling_succeeded = bool(response_text)
 
-        # ── Fallback: plain generation (no RAG loaded yet) ────────────────────
-        else:
+          except Exception as _fc_err:
+            logger.warning("Function-calling first pass failed (%s), falling back to plain generation", _fc_err)
+
+        # ── Fallback: plain generation ────────────────────────────────────────
+        if not _fn_calling_succeeded:
             gm = genai.GenerativeModel(
                 model_name,
                 generation_config=self._GEMINI_FIRST_PASS_GEN_CONFIG,
