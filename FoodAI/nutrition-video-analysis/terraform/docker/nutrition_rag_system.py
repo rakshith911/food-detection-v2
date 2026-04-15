@@ -1415,15 +1415,34 @@ class NutritionRAG:
             if word in desc_words:
                 score += 2.5
 
-        # Strongly reward cooked/prepared forms — verifier candidates are for plated food
+        # Reward cooked/prepared forms for foods that are typically cooked.
+        # For fresh produce (vegetables/fruit served raw), suppress the cooked bonus
+        # and instead reward 'raw' entries — e.g. "tomato" should surface
+        # "Tomatoes, raw" ahead of "Tomatoes, fresh, cooked".
         _COOKED_BONUS = {'cooked', 'prepared', 'boiled', 'steamed', 'baked',
                          'roasted', 'fried', 'grilled', 'restaurant', 'homemade'}
         _DRY_PENALTY  = {'unprepared', 'uncooked', 'dry', 'dried', 'dehydrated',
                          'powder', 'powdered', 'mix', 'packet', 'instant',
-                         'concentrate', 'seasoning', 'raw'}
-        if desc_words & _COOKED_BONUS:
-            score += 6.0
+                         'concentrate', 'seasoning'}
+        # Words that indicate the food is typically served raw as fresh produce
+        _RAW_PRODUCE  = {'tomato', 'tomatoes', 'cucumber', 'lettuce', 'carrot',
+                         'carrots', 'onion', 'onions', 'pepper', 'celery',
+                         'radish', 'spinach', 'rocket', 'watercress', 'herb',
+                         'herbs', 'parsley', 'coriander', 'mint'}
+        query_is_raw_produce = bool(set(query_words) & _RAW_PRODUCE)
+        if query_is_raw_produce:
+            # For fresh produce: reward raw entries, penalise cooked entries
+            if 'raw' in desc_words or 'fresh' in desc_words:
+                score += 6.0
+            if desc_words & _COOKED_BONUS:
+                score -= 4.0
+        else:
+            if desc_words & _COOKED_BONUS:
+                score += 6.0
         if desc_words & _DRY_PENALTY:
+            score -= 15.0
+        # 'raw' in dry-penalty only applies to non-produce (e.g. "raw chicken" as uncooked meat)
+        if 'raw' in desc_words and not query_is_raw_produce:
             score -= 15.0
 
         if "sauce" in desc_text and "sauce" not in query_text:
