@@ -736,8 +736,19 @@ class NutritionVideoPipeline:
             raise RuntimeError(f"Gemini init failed for production first pass: {e}")
 
         img_width, img_height = image_pil.size
+
+        # RAG reference: used for database-grounded label lookup via function calling.
+        _models = getattr(self, "models", None)
+        rag = getattr(_models, "rag", None) if _models is not None else None
+
         prompt = (
             "Analyze this food image for an image-only nutrition pipeline.\n\n"
+            "You have access to a tool `search_food_database` that searches the USDA/CoFID "
+            "nutrition database. For EACH visible food ingredient you identify, call "
+            "`search_food_database` with a short descriptive query (e.g. 'rice cooked', "
+            "'chicken breast grilled', 'tomato raw'). The tool returns real database entry "
+            "names — use the best matching name as the ingredient's `name` field in your JSON. "
+            "This ensures labels are always consistent across runs.\n\n"
             "Return ONLY valid JSON with this exact structure:\n"
             "{"
             "\"meal_name\": str, "
@@ -755,6 +766,7 @@ class NutritionVideoPipeline:
             "Rules:\n"
             "- visible_ingredients must contain only visually present food ingredients/components.\n"
             "- role_tag for visible ingredients must always be 'base'.\n"
+            "- Use the exact database entry name returned by search_food_database as the ingredient name.\n"
             "- Detect a plate or bowl if present and estimate its real-world diameter in cm.\n"
             "- Detect reference objects if present, including cards, utensils, cans, cups, packaged items, trays, takeout containers, parchment paper, baking paper, foil liners, wrappers, or other visible base/support objects whose dimensions can be reasonably estimated, and estimate their real-world width/height in cm.\n"
             "- If there is no plate/bowl but the food sits on a visible paper, tray, liner, wrapper, or container with estimable dimensions, include it in reference_objects.\n"
@@ -764,12 +776,72 @@ class NutritionVideoPipeline:
         prompt += self._build_user_context_suffix(user_context)
 
         model_name = self._flash_model_name()
-        gm = genai.GenerativeModel(
-            model_name,
-            generation_config=self._GEMINI_FIRST_PASS_GEN_CONFIG,
-        )
-        response = gm.generate_content([prompt, image_pil])
-        response_text = response.text or ""
+
+        # ── Function calling path (when RAG is loaded) ────────────────────────
+        if rag is not None and getattr(rag, "_unified_foods", None):
+            search_fn_decl = genai.protos.FunctionDeclaration(
+                name="search_food_database",
+                description=(
+                    "Search the USDA/CoFID nutrition database. Returns up to 15 real "
+                    "database entry names that match the query. Always call this for each "
+                    "ingredient before assigning its name."
+                ),
+                parameters=genai.protos.Schema(
+                    type=genai.protos.Type.OBJECT,
+                    properties={
+                        "query": genai.protos.Schema(
+                            type=genai.protos.Type.STRING,
+                            description="Short food description, e.g. 'rice cooked white', 'tomato raw', 'chicken breast grilled'",
+                        )
+                    },
+                    required=["query"],
+                ),
+            )
+            tool = genai.protos.Tool(function_declarations=[search_fn_decl])
+            gm = genai.GenerativeModel(
+                model_name,
+                generation_config=self._GEMINI_FIRST_PASS_GEN_CONFIG,
+                tools=[tool],
+            )
+            chat = gm.start_chat()
+            response = chat.send_message([prompt, image_pil])
+
+            # Tool-call loop (max 10 rounds to prevent infinite loops)
+            for _round in range(10):
+                fn_calls = [
+                    p.function_call
+                    for p in (response.candidates[0].content.parts or [])
+                    if hasattr(p, "function_call") and p.function_call and p.function_call.name
+                ]
+                if not fn_calls:
+                    break
+                tool_parts = []
+                for fc in fn_calls:
+                    if fc.name == "search_food_database":
+                        query = (fc.args or {}).get("query", "")
+                        results = rag.search_food_names(query, top_k=15) if query else []
+                        tool_parts.append(
+                            genai.protos.Part(
+                                function_response=genai.protos.FunctionResponse(
+                                    name=fc.name,
+                                    response={"result": results},
+                                )
+                            )
+                        )
+                if not tool_parts:
+                    break
+                response = chat.send_message(tool_parts)
+
+            response_text = response.text or ""
+
+        # ── Fallback: plain generation (no RAG loaded yet) ────────────────────
+        else:
+            gm = genai.GenerativeModel(
+                model_name,
+                generation_config=self._GEMINI_FIRST_PASS_GEN_CONFIG,
+            )
+            response = gm.generate_content([prompt, image_pil])
+            response_text = response.text or ""
 
         if "```json" in response_text:
             s = response_text.find("```json") + 7

@@ -759,6 +759,71 @@ class NutritionRAG:
                     hits[idx] = sim
         return sorted(hits.items(), key=lambda x: -x[1])
 
+    def search_food_names(self, query: str, top_k: int = 15) -> list[str]:
+        """
+        Search the unified database for food entry descriptions matching `query`.
+
+        Used by Gemini function-calling so the first pass can pick labels that
+        are real database entries rather than free-form text.
+
+        Strategy:
+          1. Token-overlap text search over all entry descriptions (fast, exact).
+          2. FAISS semantic search (catches synonyms / alternate wordings).
+          3. Merge, deduplicate, return up to `top_k` unique description strings.
+        """
+        if not self._unified_foods:
+            return []
+
+        q_lower = query.strip().lower()
+        q_tokens = set(re.split(r'\W+', q_lower)) - {'', 'a', 'an', 'the', 'with', 'and', 'or', 'of', 'in'}
+
+        # ── 1. Token-overlap text search ──────────────────────────────────────
+        scored: list[tuple[float, str]] = []
+        for entry in self._unified_foods:
+            desc = (entry.get("description") or "").strip()
+            if not desc:
+                continue
+            d_lower = desc.lower()
+            # Exact substring is highest priority
+            if q_lower in d_lower:
+                scored.append((2.0, desc))
+                continue
+            # Count token overlaps
+            d_tokens = set(re.split(r'\W+', d_lower)) - {'', 'a', 'an', 'the', 'with', 'and', 'or', 'of', 'in'}
+            overlap = len(q_tokens & d_tokens) / max(len(q_tokens), 1)
+            if overlap >= 0.5:
+                scored.append((overlap, desc))
+
+        text_results: list[str] = [
+            desc for _, desc in sorted(scored, key=lambda x: -x[0])[:top_k]
+        ]
+
+        # ── 2. FAISS semantic search ───────────────────────────────────────────
+        semantic_results: list[str] = []
+        if self._unified_index is not None and self._embedder is not None:
+            try:
+                hits = self._faiss_search(self._unified_index, [q_lower], top_k)
+                for idx, _sim in hits:
+                    if 0 <= idx < len(self._unified_foods):
+                        desc = (self._unified_foods[idx].get("description") or "").strip()
+                        if desc:
+                            semantic_results.append(desc)
+            except Exception:
+                pass
+
+        # ── 3. Merge & deduplicate ─────────────────────────────────────────────
+        seen: set[str] = set()
+        merged: list[str] = []
+        for desc in text_results + semantic_results:
+            key = desc.lower()
+            if key not in seen:
+                seen.add(key)
+                merged.append(desc)
+            if len(merged) >= top_k:
+                break
+
+        return merged
+
     def _clip_text_embedding(self, text: str) -> np.ndarray:
         inputs = self._clip_processor(text=[text], return_tensors="pt", padding=True, truncation=True)
         with torch.no_grad():
