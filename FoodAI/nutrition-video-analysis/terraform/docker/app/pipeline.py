@@ -973,14 +973,18 @@ class NutritionVideoPipeline:
         meal_context: Optional[str] = None,
     ) -> dict:
         rag = self.models.rag
+        logger.info("[%s] RAG lookup start: '%s' volume=%.1fml", job_id, label, volume_ml)
         nutrition = rag.get_nutrition_for_food(label, volume_ml, quantity=1, crop_image=crop_image, meal_context=meal_context)
+        logger.info("[%s] RAG lookup done: '%s' → kcal/100g=%.1f density=%.3f", job_id, label, float(nutrition.get("calories_per_100g") or 0.0), float(nutrition.get("density_g_per_ml") or 0.0))
         if role_tag == "base" and origin == "visible_base":
+            logger.info("[%s] RAG verifier start: '%s'", job_id, label)
             nutrition = self._verify_visible_rag_match_with_gemini(
                 label=label,
                 nutrition=nutrition,
                 crop_image=crop_image,
                 job_id=job_id,
             )
+            logger.info("[%s] RAG verifier done: '%s'", job_id, label)
         nutrition = self._attach_grounding_metadata(
             nutrition,
             rag,
@@ -2652,6 +2656,7 @@ class NutritionVideoPipeline:
         # instead of false positives (e.g. "Barbecue sauce" for a falafel bowl sauce).
         meal_context = (first_pass.get("meal_name") or "").strip() or None
 
+        logger.info("[%s] Nutrition computation start: %d visible, %d inferred, %d questionnaire items", job_id, len(visible_items), len(inferred_items), len(questionnaire_items))
         for item in visible_items:
             label = item["name"]
             confidence = float(item.get("confidence") or 0.0)
@@ -2931,6 +2936,7 @@ class NutritionVideoPipeline:
             user_context=user_context,
         )
 
+        logger.info("[%s] Starting nutrition analysis phase", job_id)
         nutrition_results = self._analyze_nutrition_from_production(
             first_pass=first_pass,
             visible_items=visible_items,
@@ -2941,6 +2947,7 @@ class NutritionVideoPipeline:
             sam3_results=sam3_results,
             job_id=job_id,
         )
+        logger.info("[%s] Nutrition analysis phase complete", job_id)
         overall_confidence = self._calculate_overall_confidence(
             first_pass=first_pass,
             visible_items=visible_items,
