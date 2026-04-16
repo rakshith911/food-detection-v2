@@ -2235,47 +2235,20 @@ class NutritionVideoPipeline:
             prompt=prompt,
             response_text=response_text,
             parsed_output=data,
-            metadata={"visible_ingredients": labels, "item_anchors": item_anchors},
+            metadata={"visible_ingredients": labels},
         )
-
-        # If area anchors were provided, override Gemini's volume with the
-        # deterministic formula: area_cm2 × height_cm × shape_factor × 10
-        # This caps variance to height + shape_factor estimation only.
-        anchor_map = {a["name"].lower(): a for a in item_anchors if "area_cm2" in a}
 
         volume_map = {}
         for entry in data:
             name = (entry.get("name") or "").strip().lower()
             if not name:
                 continue
-            gemini_volume = float(entry.get("volume_ml") or 0.0)
-            anchor = anchor_map.get(name)
-            if anchor:
-                height_cm = float(entry.get("height_cm") or 0.0)
-                shape_factor = float(entry.get("shape_factor") or 0.0)
-                if height_cm > 0 and shape_factor > 0:
-                    computed_volume = anchor["area_cm2"] * height_cm * shape_factor * 10.0
-                    # Sanity-clamp: don't let Gemini drift more than 40% from its own
-                    # free estimate (catches height/shape_factor hallucinations)
-                    if gemini_volume > 0:
-                        ratio = computed_volume / gemini_volume
-                        if ratio > 1.4:
-                            computed_volume = gemini_volume * 1.4
-                        elif ratio < 0.6:
-                            computed_volume = gemini_volume * 0.6
-                    volume_ml = round(computed_volume, 1)
-                else:
-                    # height/shape_factor missing — use Gemini's volume directly
-                    volume_ml = gemini_volume
-            else:
-                volume_ml = gemini_volume
-
             volume_map[name] = {
-                "volume_ml": volume_ml,
+                "volume_ml": float(entry.get("volume_ml") or 0.0),
                 "confidence": float(entry.get("confidence") or 0.0),
             }
 
-        logger.info(f"[{job_id}] Volume estimates (anchored={has_area_anchors}): { {k: v['volume_ml'] for k, v in volume_map.items()} }")
+        logger.info(f"[{job_id}] Volume estimates: { {k: v['volume_ml'] for k, v in volume_map.items()} }")
         return volume_map
 
     def _estimate_questionnaire_item_nutrition(self, verified_items: list[dict], job_id: str) -> list[dict]:
