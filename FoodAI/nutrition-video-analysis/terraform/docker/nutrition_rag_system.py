@@ -144,10 +144,10 @@ class NutritionRAG:
         logger.info(f"  Embedding model: {self._embedding_model}")
         self._cross_encoder = CrossEncoder(self._cross_encoder_model)
         logger.info(f"  Cross-encoder:   {self._cross_encoder_model}")
-        self._clip_processor = CLIPProcessor.from_pretrained(self._clip_model_name)
-        self._clip_model = CLIPModel.from_pretrained(self._clip_model_name, use_safetensors=True)
-        self._clip_model.eval()
-        logger.info(f"  CLIP model:      {self._clip_model_name}")
+        # CLIP loading hangs on CPU Fargate (post-weight-load initialization freezes).
+        # _clip_fused_search returns [] when _clip_index is None, so pipeline degrades
+        # gracefully to pure text FAISS search — no impact on calorie results.
+        logger.info(f"  CLIP model:      skipped (CPU hang workaround — text FAISS active)")
 
         # Prefer unified index
         if (self._unified_faiss_path and self._unified_faiss_path.exists()
@@ -159,11 +159,7 @@ class NutritionRAG:
                 self._unified_names = json.load(f)
             self._use_unified = True
             logger.info(f"  Unified index:   {len(self._unified_foods)} entries (USDA+CoFID)")
-            # Build CLIP index in background — takes minutes on CPU.
-            # _clip_fused_search already returns [] when _clip_index is None,
-            # so jobs are not blocked; CLIP search activates once ready.
-            threading.Thread(target=self._build_clip_index, daemon=True, name="clip-index-builder").start()
-            logger.info("  CLIP index:      building in background thread (non-blocking)")
+            # CLIP index skipped — CLIP model not loaded (CPU hang workaround).
             if self._fao_faiss_path and self._fao_faiss_path.exists():
                 self._fao_index = faiss.read_index(str(self._fao_faiss_path))
                 with open(self._fao_density_path) as f:
