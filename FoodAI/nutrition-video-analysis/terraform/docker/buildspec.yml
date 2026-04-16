@@ -32,9 +32,9 @@ phases:
       - echo Writing image definitions file...
       - printf '[{"name":"nutrition-video-processor","imageUri":"%s"}]' $ECR_REPO:latest > imagedefinitions.json
       - echo Deploying to ECS...
-      - CURRENT_TASK_DEF=$(aws ecs describe-task-definition --task-definition $ECS_TASK_FAMILY --region $REGION --query 'taskDefinition' --output json)
-      - NEW_TASK_DEF=$(echo $CURRENT_TASK_DEF | python3 -c "import json,sys; td=json.load(sys.stdin); td['containerDefinitions'][0]['image']='$ECR_REPO:latest'; [td.pop(k,None) for k in ['taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy']]; print(json.dumps(td))")
-      - NEW_TASK_DEF_ARN=$(echo $NEW_TASK_DEF | aws ecs register-task-definition --region $REGION --cli-input-json file:///dev/stdin --query 'taskDefinition.taskDefinitionArn' --output text)
+      - aws ecs describe-task-definition --task-definition $ECS_TASK_FAMILY --region $REGION --query 'taskDefinition' --output json > /tmp/current_task_def.json
+      - python3 -c "import json; td=json.load(open('/tmp/current_task_def.json')); td['containerDefinitions'][0]['image']='$ECR_REPO:latest'; [td.pop(k,None) for k in ['taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy']]; json.dump(td,open('/tmp/new_task_def.json','w'))"
+      - NEW_TASK_DEF_ARN=$(aws ecs register-task-definition --region $REGION --cli-input-json file:///tmp/new_task_def.json --query 'taskDefinition.taskDefinitionArn' --output text)
       - echo Registered new task definition $NEW_TASK_DEF_ARN
       - aws ecs update-service --cluster $ECS_CLUSTER --service $ECS_SERVICE --task-definition $NEW_TASK_DEF_ARN --force-new-deployment --region $REGION
       - echo ECS service updated. New task will start shortly.
