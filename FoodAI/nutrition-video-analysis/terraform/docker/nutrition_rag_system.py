@@ -159,7 +159,11 @@ class NutritionRAG:
                 self._unified_names = json.load(f)
             self._use_unified = True
             logger.info(f"  Unified index:   {len(self._unified_foods)} entries (USDA+CoFID)")
-            self._build_clip_index()
+            # Build CLIP index in background — takes minutes on CPU.
+            # _clip_fused_search already returns [] when _clip_index is None,
+            # so jobs are not blocked; CLIP search activates once ready.
+            threading.Thread(target=self._build_clip_index, daemon=True, name="clip-index-builder").start()
+            logger.info("  CLIP index:      building in background thread (non-blocking)")
             if self._fao_faiss_path and self._fao_faiss_path.exists():
                 self._fao_index = faiss.read_index(str(self._fao_faiss_path))
                 with open(self._fao_density_path) as f:

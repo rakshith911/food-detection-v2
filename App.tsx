@@ -1,7 +1,12 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import * as Notifications from 'expo-notifications';
-import { Alert, Animated, AppState, View, StyleSheet } from 'react-native';
+import { Alert, Animated, AppState, View, StyleSheet, LogBox } from 'react-native';
+
+LogBox.ignoreLogs([
+  '[Nutrition API] Failed to check status',
+  'Network request failed',
+]);
 import { NavigationContainer, CommonActions } from '@react-navigation/native';
 import { createStackNavigator, TransitionPresets } from '@react-navigation/stack';
 // ActivityIndicator and Text moved to AppLoader component

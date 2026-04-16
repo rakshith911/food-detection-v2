@@ -14,7 +14,7 @@ import {
   TouchableWithoutFeedback,
   KeyboardAvoidingView,
   Alert,
-  NativeModules,
+
 } from 'react-native';
 import { useEvent, useEventListener } from 'expo';
 import { useVideoPlayer, VideoView } from 'expo-video';
@@ -257,14 +257,11 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
 
       // Generate a thumbnail from the first frame of the video so the history
       // card and MealDetailScreen have an image to show while the video loads.
-      // Guard with NativeModules check first — require() alone doesn't prevent
-      // the crash when the native module isn't linked (e.g. no dev client rebuild).
       let videoThumbnailUri: string | undefined;
-      if (videoUri && NativeModules.ExpoVideoThumbnails) {
+      if (videoUri) {
         try {
-          // eslint-disable-next-line @typescript-eslint/no-var-requires
-          const VideoThumbnails = require('expo-video-thumbnails');
-          const { uri } = await VideoThumbnails.getThumbnailAsync(videoUri, { time: 0 });
+          const { getThumbnailAsync } = await import('expo-video-thumbnails');
+          const { uri } = await getThumbnailAsync(videoUri, { time: 0 });
           videoThumbnailUri = uri;
         } catch {
           // Non-fatal — thumbnail is a nice-to-have, not required

@@ -272,7 +272,7 @@ export class NutritionAnalysisAPI {
       console.log('[Nutrition API] Job status:', data.status);
       return data;
     } catch (error) {
-      console.error('[Nutrition API] Failed to check status:', error);
+      console.warn('[Nutrition API] Failed to check status:', error);
       return null;
     }
   }
