@@ -844,7 +844,32 @@ class NutritionVideoPipeline:
             try:
                 data = json.loads(_repair_json(json_str))
             except json.JSONDecodeError:
-                data = json.loads(_repair_json(_truncate_to_valid_json(json_str)))
+                try:
+                    data = json.loads(_repair_json(_truncate_to_valid_json(json_str)))
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "[%s] First pass JSON parsing failed completely (response_text=%r), "
+                        "retrying with minimal prompt", job_id, response_text[:200]
+                    )
+                    # Retry with a shorter, more explicit prompt
+                    retry_prompt = (
+                        "List ALL food items visible in this image.\n"
+                        "Return ONLY this JSON (no markdown):\n"
+                        '{"meal_name": "<dish name>", "meal_confidence": 0.9, '
+                        '"cuisine_type": "", "cuisine_confidence": 0.0, '
+                        '"cooking_method": "", "cooking_method_confidence": 0.0, '
+                        '"visible_ingredients": [{"name": "<food name>", "role_tag": "base", "confidence": 0.8}], '
+                        '"plate_or_bowl": null, "reference_objects": [], "notes": ""}'
+                    )
+                    retry_resp = gm.generate_content([retry_prompt, image_pil])
+                    retry_text = (retry_resp.text or "").strip()
+                    s2 = retry_text.find("{")
+                    e2 = retry_text.rfind("}") + 1
+                    try:
+                        data = json.loads(retry_text[s2:e2] if s2 >= 0 else "{}")
+                    except json.JSONDecodeError:
+                        logger.warning("[%s] Retry also failed, using empty fallback", job_id)
+                        data = {}
         self._record_gemini_output(
             stage="production_image_first_pass",
             job_id=job_id,
@@ -2758,7 +2783,38 @@ class NutritionVideoPipeline:
             if (item.get("name") or "").strip()
         ]
         if not visible_items:
-            raise RuntimeError("Production image pipeline found no visible ingredients")
+            # Retry: ask Gemini directly for a simple ingredient list
+            logger.warning("[%s] First pass returned no visible ingredients, retrying with targeted prompt", job_id)
+            try:
+                import google.generativeai as _genai
+                _genai.configure(api_key=self.config.GEMINI_API_KEY)
+                _gm = _genai.GenerativeModel(
+                    self._flash_model_name(),
+                    generation_config=self._GEMINI_FIRST_PASS_GEN_CONFIG,
+                )
+                _retry_resp = _gm.generate_content([
+                    'What food items are visible in this image? '
+                    'Return ONLY JSON: {"meal_name": "<dish>", "visible_ingredients": [{"name": "<food>", "role_tag": "base", "confidence": 0.8}]}',
+                    pil_image,
+                ])
+                _rt = (_retry_resp.text or "").strip()
+                _s = _rt.find("{"); _e = _rt.rfind("}") + 1
+                _d = json.loads(_rt[_s:_e]) if _s >= 0 else {}
+                _items = [
+                    {"name": (i.get("name") or "").strip(), "role_tag": "base", "confidence": float(i.get("confidence") or 0.8)}
+                    for i in (_d.get("visible_ingredients") or [])
+                    if (i.get("name") or "").strip()
+                ]
+                if _items:
+                    visible_items = _items
+                    first_pass["visible_ingredients"] = _items
+                    if _d.get("meal_name") and not first_pass.get("meal_name"):
+                        first_pass["meal_name"] = _d["meal_name"]
+                    logger.info("[%s] Fallback ingredient detection found %d items", job_id, len(_items))
+            except Exception as _retry_err:
+                logger.warning("[%s] Fallback ingredient detection also failed: %s", job_id, _retry_err)
+            if not visible_items:
+                raise RuntimeError("Production image pipeline found no visible ingredients")
 
         segmentation_prompts = [item["name"] for item in visible_items]
         vessel = first_pass.get("plate_or_bowl")

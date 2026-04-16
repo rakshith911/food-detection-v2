@@ -394,13 +394,14 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
     const isPendingOrAnalyzing =
       isAnalyzing ||
       (hasNoResultYet && item.analysisStatus !== 'failed');
-    // Only treat as "unidentified" when there is truly no data — no meal name and no calories.
+    // Only treat as "no result" when there is truly no data — no meal name and no calories.
     // A user-cleared entry (calories=0 but mealName set) should stay tappable and show "-".
     const hasZeroCalories = isCompletedOrFailed && totalCalories === 0 && !hasMealName;
     const normalizedMealName = toSentenceCase(item.mealName || '');
     const isNoFoodDetected = normalizedMealName === 'No food detected';
     const isNonTappable = isPendingOrAnalyzing || hasZeroCalories || isNoFoodDetected;
-    const titleText = isPendingOrAnalyzing ? '' : (hasZeroCalories ? 'Unidentified Food' : normalizedMealName);
+    const failedTitle = item.analysisStatus === 'failed' ? 'Unable to analyze' : 'No food detected';
+    const titleText = isPendingOrAnalyzing ? '' : (hasZeroCalories ? failedTitle : normalizedMealName);
     const subtitleText = isPendingOrAnalyzing
       ? 'Analyzing...'
       : totalCalories === 0
