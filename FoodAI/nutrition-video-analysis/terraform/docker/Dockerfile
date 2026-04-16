@@ -62,9 +62,9 @@ RUN echo "numpy==1.24.3" > /tmp/constraints_st.txt && \
     python -c "from sentence_transformers import SentenceTransformer; print('✅ sentence-transformers 3.3.1 imported successfully')" && \
     echo "✅ Verified NumPy 1.24.3 and sentence-transformers 3.3.1 are installed"
 
-# Force reinstall transformers to break Docker cache (use version from requirements.txt)
+# Pin transformers to a known stable version — git HEAD broke CLIPModel CPU init.
 # CRITICAL: Reinstall NumPy after transformers to prevent upgrade
-RUN pip install --no-cache-dir --force-reinstall "git+https://github.com/huggingface/transformers.git" && \
+RUN pip install --no-cache-dir --force-reinstall "transformers==4.47.1" && \
     pip install --no-cache-dir --force-reinstall --no-deps "numpy==1.24.3" && \
     python -c "import numpy; assert numpy.__version__ == '1.24.3', f'NumPy upgraded to {numpy.__version__} after transformers install!'"
 
