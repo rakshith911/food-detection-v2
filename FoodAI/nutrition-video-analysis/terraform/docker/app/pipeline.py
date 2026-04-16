@@ -2233,10 +2233,11 @@ class NutritionVideoPipeline:
             "  Image 2: the calibrated depth map (brighter/warmer = closer to camera = taller food).\n\n"
             f"{scale_note}\n\n"
             + anchor_block +
-            "\nReturn ONLY valid JSON — an array where every visible ingredient appears exactly once:\n"
+            f"\nIngredient names to use (copy these EXACTLY into the output — do not rename, translate, or reword them): {json.dumps(labels)}\n"
+            "\nReturn ONLY valid JSON — an array with one entry per ingredient, using the exact names above:\n"
             "[{\"name\": \"rice\", \"volume_ml\": 180, \"height_cm\": 2.1, \"shape_factor\": 0.60, \"confidence\": 0.85}, ...]\n\n"
             "Rules:\n"
-            "- Every ingredient in the pre-computed list must appear in the output.\n"
+            "- Every ingredient in the list above must appear in the output with its exact name.\n"
             "- volume_ml must be > 0.\n"
             "- confidence between 0 and 1.\n"
             "- Estimate only the visible portion — do not add hidden or extra items here.\n"
@@ -2422,13 +2423,21 @@ class NutritionVideoPipeline:
             logger.warning(f"[{job_id}] Gemini inferred hidden/extra init failed: {e}")
             return []
 
+        def _get_volume_entry(name: str) -> dict:
+            entry = volume_map.get(name.lower())
+            if entry is None:
+                for vkey, vval in volume_map.items():
+                    if self._ingredient_names_match(name, vkey):
+                        return vval
+            return entry or {}
+
         visible_payload = [
             {
                 "name": item["name"],
                 "role_tag": item.get("role_tag") or "base",
                 "confidence": float(item.get("confidence") or 0.0),
-                "estimated_volume_ml": float((volume_map.get(item["name"].lower()) or {}).get("volume_ml") or 0.0),
-                "volume_confidence": float((volume_map.get(item["name"].lower()) or {}).get("confidence") or 0.0),
+                "estimated_volume_ml": float(_get_volume_entry(item["name"]).get("volume_ml") or 0.0),
+                "volume_confidence": float(_get_volume_entry(item["name"]).get("confidence") or 0.0),
             }
             for item in visible_items
         ]
@@ -2646,10 +2655,19 @@ class NutritionVideoPipeline:
         for item in visible_items:
             label = item["name"]
             confidence = float(item.get("confidence") or 0.0)
-            volume_entry = volume_map.get(label.lower()) or {}
+            # Exact match first, then fuzzy fallback in case Gemini slightly renamed an ingredient
+            volume_entry = volume_map.get(label.lower())
+            if volume_entry is None:
+                for vkey, vval in volume_map.items():
+                    if self._ingredient_names_match(label, vkey):
+                        volume_entry = vval
+                        logger.info("[%s] Volume fuzzy match: '%s' → '%s'", job_id, label, vkey)
+                        break
+            volume_entry = volume_entry or {}
             volume_ml = float(volume_entry.get("volume_ml") or 0.0)
             volume_confidence = float(volume_entry.get("confidence") or 0.0)
             if volume_ml <= 0:
+                logger.warning("[%s] No volume found for '%s' — skipping item", job_id, label)
                 continue
 
             crop_image = self._extract_mask_crop(
