@@ -2156,39 +2156,9 @@ class NutritionVideoPipeline:
         if not labels:
             return {}
 
-        # ── Pre-compute ingredient areas from SAM3 masks + calibration scale ──
-        # pixels_per_cm is set by _calibrate_zoe_depth_from_reference when a
-        # reference object (plate/bowl) was detected. If unavailable we skip the
-        # area anchors and fall back to Gemini estimating area itself.
-        pixels_per_cm = float((calibration or {}).get("pixels_per_cm") or 0.0)
-        item_anchors = []
-        for item in visible_items:
-            name = item["name"]
-            anchor: dict = {"name": name}
-            if pixels_per_cm > 0 and sam3_results and calibrated_depth_np is not None:
-                mask = (sam3_results.get(name) or {}).get("mask")
-                if mask is not None:
-                    mask_resized = self._resize_mask_to_shape(mask, calibrated_depth_np.shape)
-                    mask_bool = mask_resized.astype(bool)
-                    area_px = int(mask_bool.sum())
-                    if area_px > 0:
-                        area_cm2 = round(area_px / (pixels_per_cm ** 2), 1)
-                        anchor["area_cm2"] = area_cm2
-                        # Mean calibrated depth (metres) within mask — converted to cm
-                        depth_vals = calibrated_depth_np[mask_bool]
-                        depth_vals = depth_vals[np.isfinite(depth_vals) & (depth_vals > 0)]
-                        if depth_vals.size > 0:
-                            anchor["mean_depth_m"] = round(float(np.median(depth_vals)), 4)
-            item_anchors.append(anchor)
-
         # ── Build scale context line ──
         vessel = first_pass.get("plate_or_bowl") or {}
-        if vessel.get("diameter_cm") and pixels_per_cm > 0:
-            scale_note = (
-                f"Scale reference: {vessel.get('vessel_type') or 'plate'} diameter = "
-                f"{float(vessel['diameter_cm']):.1f} cm = {pixels_per_cm:.1f} px/cm (calibrated)."
-            )
-        elif vessel.get("diameter_cm"):
+        if vessel.get("diameter_cm"):
             scale_note = (
                 f"A {vessel.get('vessel_type') or 'dish'} is present with estimated diameter "
                 f"{float(vessel['diameter_cm']):.1f} cm."
@@ -2196,49 +2166,11 @@ class NutritionVideoPipeline:
         else:
             scale_note = "No reliable vessel dimension detected; infer scale from the calibrated depth map."
 
-        # ── Build per-ingredient anchor block ──
-        # Sauces/condiments are spread thin across the whole bowl so their SAM3
-        # mask area is huge relative to their actual volume. Skip the area anchor
-        # for these and let Gemini estimate volume freely from the images.
-        _FLAT_TOKENS = ("sauce", "dressing", "dip", "gravy", "aioli",
-                        "mayo", "mayonnaise", "tahini", "ketchup", "salsa",
-                        "chutney", "vinaigrette")
-        for a in item_anchors:
-            if "area_cm2" in a and any(t in a["name"].lower() for t in _FLAT_TOKENS):
-                del a["area_cm2"]
-
-        has_area_anchors = any("area_cm2" in a for a in item_anchors)
-        if has_area_anchors:
-            anchor_lines = []
-            for a in item_anchors:
-                if "area_cm2" in a:
-                    anchor_lines.append(
-                        f"  {json.dumps(a['name'])}: projected_area={a['area_cm2']} cm²"
-                        + (f", median_depth={a['mean_depth_m']} m" if "mean_depth_m" in a else "")
-                    )
-                else:
-                    anchor_lines.append(f"  {json.dumps(a['name'])}: area unavailable — estimate freely")
-            anchor_block = (
-                "Pre-computed ingredient areas (from depth-calibrated SAM3 segmentation — treat as ground truth):\n"
-                + "\n".join(anchor_lines) + "\n\n"
-                "Your task: use the calibrated depth map (Image 2) to estimate the average "
-                "height/thickness of each ingredient above the plate surface, then compute:\n"
-                "  volume_ml = projected_area_cm2 × height_cm × shape_factor × 10\n"
-                "where shape_factor accounts for packing and surface curvature:\n"
-                "  - Loose/piled foods (rice, salad, shredded veg): 0.55 – 0.70\n"
-                "  - Compact solids (falafel, meat chunks, potato cubes): 0.65 – 0.80\n"
-                "  - Flat sauces / drizzles (tahini, ketchup, thin sauce layer): 0.85 – 0.95\n"
-                "  - Thick sauces / dips (hummus, tzatziki, guacamole): 0.75 – 0.90\n"
-                "  - Whole items (boiled egg, whole fruit, bread roll): 0.70 – 0.85\n"
-                "Do NOT change the pre-computed areas. Only vary height_cm and shape_factor.\n"
-            )
-        else:
-            # No area anchors — Gemini estimates volume freely from the two images
-            anchor_block = (
-                f"Visible ingredients: {json.dumps(labels)}.\n\n"
-                "Estimate the volume in ml for each ingredient using the RGB photo and the "
-                "calibrated depth map together.\n"
-            )
+        anchor_block = (
+            f"Visible ingredients: {json.dumps(labels)}.\n\n"
+            "Estimate the volume in ml for each ingredient using the RGB photo and the "
+            "calibrated depth map together.\n"
+        )
 
         prompt = (
             "You are a food volume estimation system.\n"
@@ -2475,10 +2407,14 @@ class NutritionVideoPipeline:
             "buried underneath, inside, or covered by other ingredients.\n"
             "Examples: rice under curry, noodles buried under toppings, bread inside a wrap, gravy under meat.\n"
             "Rules:\n"
-            "- Only include hidden items with strong visual or contextual clues from the actual scene.\n"
+            "- ONLY include hidden items that have DIRECT visual evidence in the depth map: a distinct elevated layer "
+            "beneath visible food, a pocket, or a wrap/roll shape that implies enclosed content.\n"
+            "- Do NOT infer hidden items from cuisine type or recipe knowledge alone. "
+            "A falafel bowl does not imply pita bread. A rice bowl does not imply noodles. "
+            "The depth map must show a physical layer that cannot be explained by visible ingredients.\n"
             "- Do not include items that are already visible in the base ingredient list.\n"
-            "- Do not infer hidden items from generic recipe knowledge alone — the scene must support it.\n"
-            "- Hidden items must themselves be calorie-significant (e.g. rice, bread, pastry, cheese inside — NOT salad leaves).\n\n"
+            "- Hidden items must themselves be calorie-significant (e.g. rice, bread, pastry, cheese inside — NOT salad leaves).\n"
+            "- When in doubt, return an empty array — false positives are worse than false negatives here.\n\n"
             "═══ HIGH-CALORIE EXTRAS (type=extra) ═══\n"
             "Extras are ONLY incremental amounts of genuinely HIGH-CALORIE additions beyond a standard preparation.\n"
             "High-calorie means roughly >200 kcal per 100g — things like oil, butter, ghee, cheese, cream, "
