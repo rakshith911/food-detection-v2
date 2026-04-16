@@ -2257,25 +2257,10 @@ class NutritionVideoPipeline:
             response = gm.generate_content(content)
         except Exception as e:
             logger.warning(
-                "[%s] Gemini volume estimation timed out or failed (%s) — "
-                "falling back to SAM3 area × default height", job_id, e
+                "[%s] Gemini volume estimation timed out or failed (%s) — returning empty volume map, "
+                "pipeline will use SAM3 area-only fallback", job_id, e
             )
-            # Build volume map from SAM3 areas alone using a default food height.
-            # shape_factor 0.5 approximates a rounded mound (hemisphere-ish).
-            fallback_map = {}
-            for anchor in item_anchors:
-                name = anchor.get("name", "").lower()
-                if not name:
-                    continue
-                area_cm2 = anchor.get("area_cm2")
-                if area_cm2 and area_cm2 > 0:
-                    default_height_cm = 2.5  # typical food pile height
-                    volume_ml = round(area_cm2 * default_height_cm * 0.5 * 10.0, 1)
-                else:
-                    volume_ml = 150.0  # absolute fallback when no mask available
-                fallback_map[name] = {"volume_ml": volume_ml, "confidence": 0.4}
-                logger.info("[%s] SAM3 fallback volume for '%s': %.1f ml", job_id, name, volume_ml)
-            return fallback_map
+            return {}
         response_text = response.text or ""
 
         if "```json" in response_text:
