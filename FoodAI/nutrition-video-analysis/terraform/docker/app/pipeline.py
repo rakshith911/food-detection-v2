@@ -2328,6 +2328,20 @@ class NutritionVideoPipeline:
             else:
                 volume_ml = gemini_volume
 
+            # Cap sauce/condiment volumes — these spread across large mask areas
+            # (thin drizzle over the whole bowl) causing area×height to be huge.
+            # A generous real-world sauce portion on a bowl/plate is ≤80ml.
+            _SAUCE_TOKENS = ("sauce", "dressing", "dip", "gravy", "aioli",
+                             "mayo", "mayonnaise", "tahini", "ketchup", "salsa",
+                             "chutney", "vinaigrette")
+            _SAUCE_MAX_ML = 80.0
+            if volume_ml > _SAUCE_MAX_ML and any(t in name for t in _SAUCE_TOKENS):
+                logger.info(
+                    f"[{job_id}] Volume cap applied for '{name}': "
+                    f"{volume_ml}ml → {_SAUCE_MAX_ML}ml (sauce/condiment cap)"
+                )
+                volume_ml = _SAUCE_MAX_ML
+
             volume_map[name] = {
                 "volume_ml": volume_ml,
                 "confidence": float(entry.get("confidence") or 0.0),
