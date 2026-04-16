@@ -2254,13 +2254,13 @@ class NutritionVideoPipeline:
             content.append(calibrated_depth_image)
 
         try:
-            response = gm.generate_content(content)
-        except Exception as e:
-            logger.warning(
-                "[%s] Gemini volume estimation timed out or failed (%s) — returning empty volume map, "
-                "pipeline will use SAM3 area-only fallback", job_id, e
+            response = gm.generate_content(
+                content,
+                request_options={"timeout": 120},
             )
-            return {}
+        except Exception as e:
+            logger.warning("[%s] Gemini volume estimation failed (%s)", job_id, e)
+            raise
         response_text = response.text or ""
 
         if "```json" in response_text:
