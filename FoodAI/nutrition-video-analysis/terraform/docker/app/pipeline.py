@@ -2197,6 +2197,16 @@ class NutritionVideoPipeline:
             scale_note = "No reliable vessel dimension detected; infer scale from the calibrated depth map."
 
         # ── Build per-ingredient anchor block ──
+        # Sauces/condiments are spread thin across the whole bowl so their SAM3
+        # mask area is huge relative to their actual volume. Skip the area anchor
+        # for these and let Gemini estimate volume freely from the images.
+        _FLAT_TOKENS = ("sauce", "dressing", "dip", "gravy", "aioli",
+                        "mayo", "mayonnaise", "tahini", "ketchup", "salsa",
+                        "chutney", "vinaigrette")
+        for a in item_anchors:
+            if "area_cm2" in a and any(t in a["name"].lower() for t in _FLAT_TOKENS):
+                del a["area_cm2"]
+
         has_area_anchors = any("area_cm2" in a for a in item_anchors)
         if has_area_anchors:
             anchor_lines = []
