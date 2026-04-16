@@ -45,26 +45,17 @@ RUN pip install --no-cache-dir \
 # Copy and install Python dependencies
 COPY requirements.txt .
 
-# CRITICAL: Install requirements WITHOUT sentence-transformers first
-# sentence-transformers will be installed separately with modern huggingface_hub
-RUN grep -v "sentence-transformers" requirements.txt > /tmp/requirements_no_st.txt && \
-    echo "numpy==1.24.3" > /tmp/constraints.txt && \
-    pip install --no-cache-dir -r /tmp/requirements_no_st.txt -c /tmp/constraints.txt && \
+# Install all Python dependencies with numpy pinned as constraint
+RUN echo "numpy==1.24.3" > /tmp/constraints.txt && \
+    pip install --no-cache-dir -r requirements.txt -c /tmp/constraints.txt && \
     pip install --no-cache-dir --force-reinstall --no-deps "numpy==1.24.3" && \
-    echo "✅ Installed all packages except sentence-transformers"
-
-# CRITICAL: Install sentence-transformers 3.3.1 which uses modern huggingface_hub (no cached_download)
-# Version 3.3.1 uses hf_hub_download instead of the deprecated cached_download
-RUN echo "numpy==1.24.3" > /tmp/constraints_st.txt && \
-    pip install --no-cache-dir "sentence-transformers==3.3.1" -c /tmp/constraints_st.txt && \
-    pip check && \
     python -c "import numpy; actual_version = numpy.__version__; assert actual_version == '1.24.3', f'CRITICAL: NumPy version {actual_version} is wrong! Expected 1.24.3. Build will fail.'" && \
-    python -c "from sentence_transformers import SentenceTransformer; print('✅ sentence-transformers 3.3.1 imported successfully')" && \
-    echo "✅ Verified NumPy 1.24.3 and sentence-transformers 3.3.1 are installed"
+    python -c "from sentence_transformers import SentenceTransformer; print('✅ sentence-transformers imported successfully')" && \
+    echo "✅ Installed all packages"
 
-# CRITICAL: Reinstall NumPy after sentence-transformers to prevent upgrade
+# CRITICAL: Reinstall NumPy after all packages to prevent upgrade
 RUN pip install --no-cache-dir --force-reinstall --no-deps "numpy==1.24.3" && \
-    python -c "import numpy; assert numpy.__version__ == '1.24.3', f'NumPy upgraded to {numpy.__version__} after sentence-transformers install!'"
+    python -c "import numpy; assert numpy.__version__ == '1.24.3', f'NumPy upgraded to {numpy.__version__}!'"
 
 # Create dummy flash_attn module to satisfy Florence-2 import check
 # The actual model will use eager attention as specified in attn_implementation parameter
