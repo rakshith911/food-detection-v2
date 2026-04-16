@@ -736,19 +736,8 @@ class NutritionVideoPipeline:
             raise RuntimeError(f"Gemini init failed for production first pass: {e}")
 
         img_width, img_height = image_pil.size
-
-        # RAG reference: used for database-grounded label lookup via function calling.
-        _models = getattr(self, "models", None)
-        rag = getattr(_models, "rag", None) if _models is not None else None
-
         prompt = (
             "Analyze this food image for an image-only nutrition pipeline.\n\n"
-            "You have access to a tool `search_food_database` that searches the USDA/CoFID "
-            "nutrition database. For EACH visible food ingredient you identify, call "
-            "`search_food_database` with a short descriptive query (e.g. 'rice cooked', "
-            "'chicken breast grilled', 'tomato raw'). The tool returns real database entry "
-            "names — use the best matching name as the ingredient's `name` field in your JSON. "
-            "This ensures labels are always consistent across runs.\n\n"
             "Return ONLY valid JSON with this exact structure:\n"
             "{"
             "\"meal_name\": str, "
@@ -764,10 +753,10 @@ class NutritionVideoPipeline:
             "}\n\n"
             f"Image size: {img_width}x{img_height}.\n"
             "Rules:\n"
-            "- visible_ingredients must contain ONLY food items you can directly see in the image. Do NOT include items commonly served with this dish that are not physically visible.\n"
-            "- If you cannot see it, do not list it. Pita bread, tortillas, wraps, or any bread not visible in the frame must NOT be listed.\n"
+            "- visible_ingredients must contain ONLY food items you can directly see in the image. Do NOT include items that are commonly served with this dish but are not physically visible in the image.\n"
+            "- If you cannot see it, do not list it. Bread, pita, tortillas, wraps, or any item not visible in the frame must NOT be listed.\n"
             "- role_tag for visible ingredients must always be 'base'.\n"
-            "- Use the exact database entry name returned by search_food_database as the ingredient name.\n"
+            "- Use simple, common food names (e.g. 'white sauce', 'yellow rice', 'falafel') — not long database-style descriptions.\n"
             "- Detect a plate or bowl if present and estimate its real-world diameter in cm.\n"
             "- Detect reference objects if present, including cards, utensils, cans, cups, packaged items, trays, takeout containers, parchment paper, baking paper, foil liners, wrappers, or other visible base/support objects whose dimensions can be reasonably estimated, and estimate their real-world width/height in cm.\n"
             "- If there is no plate/bowl but the food sits on a visible paper, tray, liner, wrapper, or container with estimable dimensions, include it in reference_objects.\n"
@@ -777,89 +766,12 @@ class NutritionVideoPipeline:
         prompt += self._build_user_context_suffix(user_context)
 
         model_name = self._flash_model_name()
-
-        # ── Function calling path (when RAG is loaded) ────────────────────────
-        # Uses google-genai (new SDK) which has stable function-calling support.
-        # Wrapped in try/except so any failure falls through to plain generation.
-        _fn_calling_succeeded = False
-        if rag is not None and getattr(rag, "_unified_foods", None):
-          try:
-            from google import genai as genai_new
-            from google.genai import types as genai_types
-            import io
-
-            search_fn_decl = genai_types.FunctionDeclaration(
-                name="search_food_database",
-                description=(
-                    "Search the USDA/CoFID nutrition database. Returns up to 15 real "
-                    "database entry names that match the query. Always call this for each "
-                    "ingredient before assigning its name."
-                ),
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Short food description, e.g. 'rice cooked white', 'tomato raw', 'chicken breast grilled'",
-                        }
-                    },
-                    "required": ["query"],
-                },
-            )
-            tool = genai_types.Tool(function_declarations=[search_fn_decl])
-            client = genai_new.Client(api_key=self.config.GEMINI_API_KEY)
-
-            buf = io.BytesIO()
-            image_pil.save(buf, format="JPEG")
-            image_part = genai_types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg")
-            contents = [genai_types.Content(role="user", parts=[genai_types.Part.from_text(text=prompt), image_part])]
-
-            resp = None
-            # Tool-call loop (max 10 rounds)
-            for _round in range(10):
-                resp = client.models.generate_content(
-                    model=model_name,
-                    contents=contents,
-                    config=genai_types.GenerateContentConfig(temperature=0.0, tools=[tool]),
-                )
-                contents.append(genai_types.Content(role="model", parts=resp.candidates[0].content.parts))
-
-                fn_calls = [
-                    p.function_call
-                    for p in (resp.candidates[0].content.parts or [])
-                    if hasattr(p, "function_call") and p.function_call and p.function_call.name
-                ]
-                if not fn_calls:
-                    break
-
-                tool_parts = []
-                for fc in fn_calls:
-                    if fc.name == "search_food_database":
-                        query = dict(fc.args or {}).get("query", "")
-                        results = rag.search_food_names(query, top_k=15) if query else []
-                        tool_parts.append(
-                            genai_types.Part.from_function_response(
-                                name=fc.name, response={"result": results},
-                            )
-                        )
-                if not tool_parts:
-                    break
-                contents.append(genai_types.Content(role="user", parts=tool_parts))
-
-            response_text = (resp.text or "") if resp else ""
-            _fn_calling_succeeded = bool(response_text)
-
-          except Exception as _fc_err:
-            logger.warning("Function-calling first pass failed (%s), falling back to plain generation", _fc_err)
-
-        # ── Fallback: plain generation ────────────────────────────────────────
-        if not _fn_calling_succeeded:
-            gm = genai.GenerativeModel(
-                model_name,
-                generation_config=self._GEMINI_FIRST_PASS_GEN_CONFIG,
-            )
-            response = gm.generate_content([prompt, image_pil])
-            response_text = response.text or ""
+        gm = genai.GenerativeModel(
+            model_name,
+            generation_config=self._GEMINI_FIRST_PASS_GEN_CONFIG,
+        )
+        response = gm.generate_content([prompt, image_pil])
+        response_text = response.text or ""
 
         if "```json" in response_text:
             s = response_text.find("```json") + 7
