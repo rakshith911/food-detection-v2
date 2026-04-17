@@ -2,7 +2,7 @@ import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { StyleSheet, Text, View, Image, TouchableOpacity, ScrollView, StatusBar, Alert, LayoutAnimation, Platform, UIManager, Animated, Linking, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { PanGestureHandler, State } from 'react-native-gesture-handler';
-
+import { Video, ResizeMode } from 'expo-av';
 import { Camera } from 'react-native-vision-camera';
 import { Ionicons } from '@expo/vector-icons';
 import Svg, { Path } from 'react-native-svg';
@@ -19,30 +19,20 @@ import BottomButtonContainer from '../components/BottomButtonContainer';
 import TutorialScreen from './TutorialScreen';
 import { toSentenceCase } from '../utils/textCase';
 
-// Generates a thumbnail on-the-fly for video cards that don't have a cached imageUri
-function VideoThumbnail({ videoUri, jobId, style }: { videoUri: string; jobId?: string; style: any }) {
-  const [thumbUri, setThumbUri] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const { getThumbnailAsync } = await import('expo-video-thumbnails');
-        const { uri } = await getThumbnailAsync(videoUri, { time: 0 });
-        if (!cancelled) setThumbUri(uri);
-      } catch {}
-    })();
-    return () => { cancelled = true; };
-  }, [videoUri]);
-
-  if (!thumbUri) {
-    return (
-      <View style={[style, { backgroundColor: '#1a2e0a', alignItems: 'center', justifyContent: 'center' }]}>
-        <Ionicons name="videocam" size={36} color="rgba(255,255,255,0.4)" />
-      </View>
-    );
-  }
-  return <Image source={{ uri: thumbUri }} style={style} resizeMode="cover" />;
+// Shows the first frame of a video as a static thumbnail using expo-av (already linked).
+function VideoThumbnail({ videoUri, style }: { videoUri: string; style: any }) {
+  return (
+    <Video
+      source={{ uri: videoUri }}
+      style={style}
+      resizeMode={ResizeMode.COVER}
+      shouldPlay={false}
+      isMuted
+      isLooping={false}
+      useNativeControls={false}
+      positionMillis={0}
+    />
+  );
 }
 
 // Image component that falls back to S3 presigned URL when the local file is unavailable (e.g. after reinstall)
@@ -429,7 +419,6 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
             ) : item.videoUri ? (
               <VideoThumbnail
                 videoUri={item.videoUri}
-                jobId={item.job_id}
                 style={styles.media}
               />
             ) : (

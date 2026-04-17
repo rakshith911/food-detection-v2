@@ -41,7 +41,7 @@ import {
   getTableTotals,
   hydrateDishTables,
 } from '../utils/mealTables';
-import { toSentenceCase } from '../utils/textCase';
+import { toDisplayFoodLabel, toSentenceCase } from '../utils/textCase';
 
 
 export default function MealDetailScreen() {
@@ -106,7 +106,7 @@ export default function MealDetailScreen() {
         ...table,
         rows: table.rows.map((row) => ({
           ...row,
-          name: toSentenceCase(row.name),
+          name: toDisplayFoodLabel(row.name),
         })),
       })),
     []
@@ -134,7 +134,14 @@ export default function MealDetailScreen() {
   const [resolvingVideoUri, setResolvingVideoUri] = useState<boolean>(!!item?.job_id && !!item?.videoUri);
 
   useEffect(() => {
-    // Always fetch from S3 when job_id is available — presigned URLs are always fresh
+    // For video analyses, item.imageUri is the saved first-frame thumbnail and should
+    // remain the pre-play preview instead of being replaced by a fetched media URL.
+    if (isVideo) {
+      setResolvedImageUri(item?.imageUri);
+      return;
+    }
+
+    // Always fetch from S3 for images when job_id is available — presigned URLs are fresh
     if (item?.job_id) {
       getImagePresignedUrl(item.job_id)
         .then(url => { setResolvedImageUri(url || item?.imageUri); })
@@ -142,7 +149,7 @@ export default function MealDetailScreen() {
     } else {
       setResolvedImageUri(item?.imageUri);
     }
-  }, [item?.id, item?.job_id]);
+  }, [isVideo, item?.id, item?.job_id, item?.imageUri]);
 
   useEffect(() => {
     // Always fetch from S3 when job_id is available — works on any device after reinstall.
@@ -794,6 +801,7 @@ export default function MealDetailScreen() {
               ? effectiveSegmentedImages?.video_overlay_url ?? null
               : null;
             const displayUri = overlayUri || resolvedImageUri || null;
+            const videoThumbnailUri = resolvedImageUri || item.imageUri || overlayUri || null;
             const showImageLoader = !isVideo && !!displayUri;
             // Use resolvedVideoUri directly — it is pre-initialised to item?.videoUri so
             // the player always has a URI while the presigned URL fetch is in-flight.
@@ -855,9 +863,9 @@ export default function MealDetailScreen() {
               )}
               {/* Thumbnail overlay: shown when not playing to mask the Video component's
                   black initialization frame. Fades out once the user presses play. */}
-              {!isVideoPlaying && resolvedImageUri && (
+              {!isVideoPlaying && videoThumbnailUri && (
                 <OptimizedImage
-                  source={{ uri: resolvedImageUri }}
+                  source={{ uri: videoThumbnailUri }}
                   style={[styles.media, StyleSheet.absoluteFillObject]}
                   resizeMode="cover"
                   cachePolicy="memory-disk"

@@ -6,7 +6,7 @@ import type {
   QuestionnaireContext,
   QuestionnaireIngredient,
 } from '../store/slices/historySlice';
-import { toSentenceCase } from './textCase';
+import { toDisplayFoodLabel, toSentenceCase } from './textCase';
 
 const TABLE_TITLES: Record<DishTableKey, string> = {
   base: 'Base Kcal Table',
@@ -51,7 +51,7 @@ const createRow = (
   prefix: DishTableKey
 ): DishContent => ({
   id: `${prefix}_${Date.now()}_${index}`,
-  name: toSentenceCase(name || 'Unknown Food'),
+  name: toDisplayFoodLabel(name || 'Unknown Food'),
   weight: mass_g && Math.round(mass_g) > 0 ? Math.round(mass_g).toString() : '',
   calories: Math.round(total_calories || 0).toString(),
 });
