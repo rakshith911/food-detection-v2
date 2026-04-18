@@ -1,0 +1,124 @@
+FROM public.ecr.aws/docker/library/ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV OPENCV_IO_ENABLE_OPENEXR=1
+ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+ENV TORCH_CUDA_ARCH_LIST=8.9
+ENV MAX_JOBS=1
+ENV CMAKE_BUILD_PARALLEL_LEVEL=1
+ENV HF_HOME=/app/hf_cache
+ENV TRANSFORMERS_CACHE=/app/hf_cache/hub
+ENV TRELLIS_SRC_DIR=/opt/TRELLIS.2
+ENV TRELLIS_MODEL_ID=microsoft/TRELLIS.2-4B
+ENV CONDA_DIR=/opt/conda
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=/opt/conda/bin:/usr/local/cuda/bin:${PATH}
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN printf 'Acquire::Retries "10";\nAcquire::http::Timeout "60";\nAcquire::https::Timeout "60";\nAcquire::ForceIPv4 "true";\n' > /etc/apt/apt.conf.d/80-retries
+
+# Use the AWS regional Ubuntu mirror inside CodeBuild/EC2 to avoid flaky
+# connections to the default global mirror during large package installs.
+RUN if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then \
+      sed -i 's|http://archive.ubuntu.com/ubuntu/|http://us-east-1.ec2.archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources && \
+      sed -i 's|http://security.ubuntu.com/ubuntu/|http://us-east-1.ec2.archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources; \
+    elif [ -f /etc/apt/sources.list ]; then \
+      sed -i 's|http://archive.ubuntu.com/ubuntu/|http://us-east-1.ec2.archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list && \
+      sed -i 's|http://security.ubuntu.com/ubuntu/|http://us-east-1.ec2.archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list; \
+    fi
+
+RUN for attempt in 1 2 3; do \
+      apt-get update && apt-get install -y --no-install-recommends --fix-missing \
+    wget \
+    gnupg \
+    python3.10 \
+    python3.10-dev \
+    python3-pip \
+    git \
+    curl \
+    ca-certificates \
+    libjpeg-dev \
+    ffmpeg \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    build-essential \
+    ninja-build \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/* && break; \
+      echo "apt install failed on attempt ${attempt}, retrying..." >&2; \
+      rm -rf /var/lib/apt/lists/*; \
+      sleep 15; \
+    done
+
+# Install CUDA toolkit from NVIDIA's Ubuntu repository so we avoid Docker Hub
+# pull throttling while still matching TRELLIS.2's CUDA 12.4 toolchain.
+RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb && \
+    dpkg -i /tmp/cuda-keyring.deb && \
+    rm /tmp/cuda-keyring.deb
+
+RUN for attempt in 1 2 3; do \
+      apt-get update && apt-get install -y --no-install-recommends --fix-missing \
+    cuda-toolkit-12-4 \
+    && rm -rf /var/lib/apt/lists/* && break; \
+      echo "cuda toolkit install failed on attempt ${attempt}, retrying..." >&2; \
+      rm -rf /var/lib/apt/lists/*; \
+      sleep 15; \
+    done
+
+RUN ln -sf /usr/bin/python3.10 /usr/bin/python && \
+    ln -sf /usr/bin/python3.10 /usr/bin/python3
+
+RUN wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh && \
+    bash /tmp/miniconda.sh -b -p ${CONDA_DIR} && \
+    rm /tmp/miniconda.sh && \
+    ${CONDA_DIR}/bin/conda clean -afy
+
+RUN ${CONDA_DIR}/bin/conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && \
+    ${CONDA_DIR}/bin/conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r && \
+    ${CONDA_DIR}/bin/conda config --system --set always_yes yes
+
+WORKDIR /app
+
+RUN mkdir -p /app/hf_cache /app/data /opt
+
+COPY FoodAI/nutrition-video-analysis/terraform/docker/trellis_glb_runner.py /app/trellis_glb_runner.py
+COPY TRELLIS.2 ${TRELLIS_SRC_DIR}
+
+WORKDIR ${TRELLIS_SRC_DIR}
+
+# Reuse the exact TRELLIS.2 environment flow. These shims make setup.sh work
+# during Docker builds where we do not have sudo or a real attached GPU.
+RUN printf '#!/bin/bash\nexit 0\n' > /usr/local/bin/nvidia-smi && chmod +x /usr/local/bin/nvidia-smi && \
+    printf '#!/bin/bash\n"$@"\n' > /usr/local/bin/sudo && chmod +x /usr/local/bin/sudo
+
+RUN ${CONDA_DIR}/bin/conda create -n trellis2 python=3.10 && \
+    ${CONDA_DIR}/bin/conda run -n trellis2 pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
+RUN ${CONDA_DIR}/bin/conda run -n trellis2 pip install --no-cache-dir psutil boto3
+RUN ${CONDA_DIR}/bin/conda run -n trellis2 bash -lc "cd ${TRELLIS_SRC_DIR} && . ./setup.sh --basic"
+# setup.sh installs flash-attn through pip's build isolation, which loses the
+# preinstalled torch/cu124 environment during Docker builds. Install it
+# directly and fail the image build if the runtime import does not work.
+RUN ${CONDA_DIR}/bin/conda run -n trellis2 bash -lc "pip install --no-build-isolation flash-attn==2.7.3 && python -c 'import flash_attn; print(flash_attn.__file__)'"
+RUN ${CONDA_DIR}/bin/conda run -n trellis2 bash -lc "cd ${TRELLIS_SRC_DIR} && . ./setup.sh --nvdiffrast && python -c 'import nvdiffrast.torch as dr; print(dr.__file__)'"
+RUN ${CONDA_DIR}/bin/conda run -n trellis2 bash -lc "cd ${TRELLIS_SRC_DIR} && . ./setup.sh --nvdiffrec && python -c 'from nvdiffrec_render.light import EnvironmentLight; print(EnvironmentLight.__module__)'"
+RUN ${CONDA_DIR}/bin/conda run -n trellis2 bash -lc "cd ${TRELLIS_SRC_DIR} && . ./setup.sh --cumesh"
+RUN ${CONDA_DIR}/bin/conda run -n trellis2 bash -lc "cd ${TRELLIS_SRC_DIR} && . ./setup.sh --o-voxel"
+RUN ${CONDA_DIR}/bin/conda run -n trellis2 bash -lc "cd ${TRELLIS_SRC_DIR} && . ./setup.sh --flexgemm"
+
+RUN ${CONDA_DIR}/bin/conda run -n trellis2 python - <<'PY'
+import flash_attn
+import torch
+print("flash_attn_ok", flash_attn.__file__)
+print("torch_cuda", torch.version.cuda)
+PY
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD /opt/conda/envs/trellis2/bin/python -c "import torch; print(1 if torch.cuda.is_available() else 0)" || exit 1
+
+CMD ["/opt/conda/envs/trellis2/bin/python", "/app/trellis_glb_runner.py", "--help"]

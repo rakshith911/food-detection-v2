@@ -1,0 +1,54 @@
+{
+  "name": "nutrition-video-analysis-dev-trellis-build",
+  "description": "Build and push the isolated TRELLIS GPU image",
+  "source": {
+    "type": "S3",
+    "location": "nutrition-video-analysis-dev-videos-dbenpoj2/trellis-testing/source-bundles/trellis-source-clean-20260417.zip",
+    "buildspec": "FoodAI/nutrition-video-analysis/terraform/docker/buildspec.trellis-gpu.yml",
+    "insecureSsl": false
+  },
+  "artifacts": {
+    "type": "NO_ARTIFACTS"
+  },
+  "cache": {
+    "type": "NO_CACHE"
+  },
+  "environment": {
+    "type": "LINUX_CONTAINER",
+    "image": "aws/codebuild/standard:7.0",
+    "computeType": "BUILD_GENERAL1_LARGE",
+    "privilegedMode": true,
+    "imagePullCredentialsType": "CODEBUILD",
+    "environmentVariables": [
+      {
+        "name": "AWS_DEFAULT_REGION",
+        "value": "us-east-1",
+        "type": "PLAINTEXT"
+      },
+      {
+        "name": "AWS_ACCOUNT_ID",
+        "value": "185329004895",
+        "type": "PLAINTEXT"
+      },
+      {
+        "name": "ECR_REPO_NAME",
+        "value": "nutrition-video-analysis-dev-trellis-gpu",
+        "type": "PLAINTEXT"
+      }
+    ]
+  },
+  "serviceRole": "arn:aws:iam::185329004895:role/nutrition-video-analysis-dev-trellis-codebuild-role",
+  "timeoutInMinutes": 60,
+  "queuedTimeoutInMinutes": 480,
+  "logsConfig": {
+    "cloudWatchLogs": {
+      "status": "ENABLED",
+      "groupName": "/aws/codebuild/nutrition-video-analysis-dev-trellis-build",
+      "streamName": "build"
+    },
+    "s3Logs": {
+      "status": "DISABLED",
+      "encryptionDisabled": false
+    }
+  }
+}

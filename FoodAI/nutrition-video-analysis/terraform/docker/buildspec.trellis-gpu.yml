@@ -1,0 +1,44 @@
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - echo Logging in to Amazon ECR...
+      - aws --version
+      - REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - ECR_REPO=$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$ECR_REPO_NAME
+      - echo ECR repository $ECR_REPO
+      - aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $ECR_REPO
+      - IMAGE_TAG=${IMAGE_TAG_OVERRIDE:-trellis-gpu-$(date +%Y%m%d-%H%M%S)}
+      - 'echo "TRELLIS GPU image tag: $IMAGE_TAG"'
+
+  build:
+    commands:
+      - echo Build started on `date`
+      - echo "Building TRELLIS GPU image with --no-cache"
+      - docker build --no-cache --pull -f FoodAI/nutrition-video-analysis/terraform/docker/Dockerfile.trellis-gpu -t trellis-gpu:$IMAGE_TAG .
+      - echo Tagging images...
+      - docker tag trellis-gpu:$IMAGE_TAG $ECR_REPO:$IMAGE_TAG
+      - docker tag trellis-gpu:$IMAGE_TAG $ECR_REPO:trellis-gpu-test
+
+  post_build:
+    commands:
+      - echo Build completed on `date`
+      - echo Verifying built image before push...
+      - |
+        if docker image inspect trellis-gpu:$IMAGE_TAG >/dev/null 2>&1; then
+          echo Pushing TRELLIS GPU images...
+          docker push $ECR_REPO:$IMAGE_TAG
+          docker push $ECR_REPO:trellis-gpu-test
+          printf '{"repository":"%s","image_tag":"%s","image_uri":"%s"}\n' "$ECR_REPO" "$IMAGE_TAG" "$ECR_REPO:$IMAGE_TAG" > trellis-gpu-image.json
+          cat trellis-gpu-image.json
+        else
+          echo "TRELLIS image was not built; skipping push."
+          printf '{"repository":"%s","image_tag":"","image_uri":"","status":"build_failed"}\n' "$ECR_REPO" > trellis-gpu-image.json
+          cat trellis-gpu-image.json
+        fi
+
+artifacts:
+  files:
+    - trellis-gpu-image.json
