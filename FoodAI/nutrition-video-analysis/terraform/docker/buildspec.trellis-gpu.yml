@@ -12,6 +12,11 @@ phases:
       - aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $ECR_REPO
       - IMAGE_TAG=${IMAGE_TAG_OVERRIDE:-trellis-gpu-$(date +%Y%m%d-%H%M%S)}
       - 'echo "TRELLIS GPU image tag: $IMAGE_TAG"'
+      - echo Downloading TRELLIS.2 source from S3...
+      - aws s3 cp s3://nutrition-video-analysis-dev-videos-dbenpoj2/trellis-testing/source-bundles/trellis-source-clean-20260417.zip /tmp/trellis-source.zip
+      - unzip -q /tmp/trellis-source.zip -d /tmp/trellis-src
+      - mv /tmp/trellis-src/TRELLIS.2 ./TRELLIS.2
+      - echo "TRELLIS.2 source ready"
 
   build:
     commands:
