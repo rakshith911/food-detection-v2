@@ -587,7 +587,7 @@ function AppContent() {
                 } as any,
                 job_id: jobId,
                 ...(results.segmented_images ? { segmented_images: results.segmented_images } : {}),
-                ...(results.trellis_mp4_url ? { videoUri: results.trellis_mp4_url } : {}),
+                ...(results.trellis_mp4_url ? { trellis_mp4_url: results.trellis_mp4_url } : {}),
               },
             }));
             console.log(`[ResumeCheck] ✅ Updated analysis ${entry.id} to completed`);
@@ -634,22 +634,24 @@ function AppContent() {
     hasRunColdStartCheck.current = true;
     checkPendingJobs('Cold start (history loaded)');
 
-    // Backfill trellis_mp4_url for completed items that were saved before this feature
+    // Backfill trellis_mp4_url for completed items saved before this feature
     const toBackfill = historyRef.current.filter(
-      (e) => e.analysisStatus === 'completed' && e.job_id && !e.videoUri
+      (e) => e.analysisStatus === 'completed' && e.job_id && !e.trellis_mp4_url
     );
-    for (const entry of toBackfill) {
-      try {
-        const res = await nutritionAnalysisAPI.getResults(entry.job_id!, true, false);
-        if (res?.trellis_mp4_url && userRef.current?.email) {
-          dispatch(updateAnalysis({
-            userEmail: userRef.current.email,
-            analysisId: entry.id,
-            updates: { videoUri: res.trellis_mp4_url },
-          }));
-        }
-      } catch {}
-    }
+    (async () => {
+      for (const entry of toBackfill) {
+        try {
+          const res = await nutritionAnalysisAPI.getResults(entry.job_id!, true, false);
+          if (res?.trellis_mp4_url && userRef.current?.email) {
+            dispatch(updateAnalysis({
+              userEmail: userRef.current.email,
+              analysisId: entry.id,
+              updates: { trellis_mp4_url: res.trellis_mp4_url },
+            }));
+          }
+        } catch {}
+      }
+    })();
   }, [isAuthenticated, isHistoryLoading, checkPendingJobs]);
 
   const handleSplashFinish = useCallback(() => {

@@ -209,14 +209,17 @@ export default function MealDetailScreen() {
         const fresh = await nutritionAnalysisAPI.getResults(item.job_id!, true, true);
         if (cancelled) return;
         const hasResult = fresh?.segmented_images?.overlay_urls?.length || fresh?.segmented_images?.video_overlay_url;
-        if (hasResult) {
+        if (hasResult || fresh?.trellis_mp4_url) {
           setOverlayLoadFailed(false);
           setVideoOverlayError(false);
           setRefreshedSegmentedImages(fresh.segmented_images || null);
           await dispatch(updateAnalysis({
             userEmail: user.email,
             analysisId: item.id,
-            updates: { segmented_images: fresh.segmented_images },
+            updates: {
+              segmented_images: fresh.segmented_images,
+              ...(fresh.trellis_mp4_url ? { trellis_mp4_url: fresh.trellis_mp4_url } : {}),
+            },
           })).unwrap();
         }
       } catch {
@@ -800,9 +803,11 @@ export default function MealDetailScreen() {
             const videoOverlayUrl = (!overlayLoadFailed && !videoOverlayError)
               ? effectiveSegmentedImages?.video_overlay_url ?? null
               : null;
+            // TRELLIS MP4: for image jobs, use trellis_mp4_url as the "overlay video" (same UI as video pipeline)
+            const trellisMP4Url = item.trellis_mp4_url ?? null;
             const displayUri = overlayUri || resolvedImageUri || null;
             const videoThumbnailUri = resolvedImageUri || item.imageUri || overlayUri || null;
-            const showImageLoader = !isVideo && !!displayUri;
+            const showImageLoader = !isVideo && !trellisMP4Url && !!displayUri;
             // Use resolvedVideoUri directly — it is pre-initialised to item?.videoUri so
             // the player always has a URI while the presigned URL fetch is in-flight.
             const originalVideoUri = resolvedVideoUri ?? null;
@@ -894,6 +899,45 @@ export default function MealDetailScreen() {
                   </View>
                 </TouchableOpacity>
               )}
+            </>
+          ) : trellisMP4Url ? (
+            // Image job with TRELLIS MP4 — same play/pause UI as the video pipeline
+            <>
+              <Video
+                ref={overlayVideoRef}
+                key={trellisMP4Url}
+                source={{ uri: trellisMP4Url }}
+                style={[styles.media, { position: 'absolute', top: 0, left: 0, opacity: isVideoPlaying ? 1 : 0 }]}
+                resizeMode={ResizeMode.COVER}
+                isLooping
+                isMuted
+                shouldPlay={isVideoPlaying}
+                useNativeControls={false}
+                onPlaybackStatusUpdate={(status) => {
+                  if (!status.isLoaded && (status as any).error) {
+                    setVideoOverlayError(true);
+                  }
+                }}
+              />
+              {videoThumbnailUri && (
+                <OptimizedImage
+                  source={{ uri: videoThumbnailUri }}
+                  style={[styles.media, StyleSheet.absoluteFillObject, { opacity: isVideoPlaying ? 0 : 1 }]}
+                  resizeMode="cover"
+                  cachePolicy="memory-disk"
+                  priority="normal"
+                  onImageLoad={() => setMediaLoading(false)}
+                />
+              )}
+              <TouchableOpacity
+                style={styles.playButtonOverlay}
+                onPress={handleVideoPlay}
+                activeOpacity={0.7}
+              >
+                <View style={styles.playButton}>
+                  <Ionicons name={isVideoPlaying ? 'pause' : 'play'} size={28} color="#FFFFFF" />
+                </View>
+              </TouchableOpacity>
             </>
           ) : (
             // Show segmented overlay when available; on load error refetch by job_id or show original image

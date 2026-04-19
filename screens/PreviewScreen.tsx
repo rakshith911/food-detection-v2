@@ -452,7 +452,7 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
             },
             segmented_images: typeof result === 'object' && result?.segmented_images ? result.segmented_images : undefined,
             job_id: typeof result === 'object' && 'job_id' in result ? (result as any).job_id : undefined,
-            ...(typeof result === 'object' && (result as any).trellis_mp4_url ? { videoUri: (result as any).trellis_mp4_url } : {}),
+            ...(typeof result === 'object' && (result as any).trellis_mp4_url ? { trellis_mp4_url: (result as any).trellis_mp4_url } : {}),
             analysisStatus: 'completed',
             analysisProgress: 100,
           },

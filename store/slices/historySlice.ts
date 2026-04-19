@@ -74,6 +74,7 @@ export interface AnalysisEntry {
   questionnaireContext?: QuestionnaireContext;
   feedback?: FeedbackData;
   segmented_images?: SegmentedImages;  // Segmented image URLs (may expire; use job_id to refetch)
+  trellis_mp4_url?: string;           // Presigned URL for TRELLIS 3D preview MP4 (image jobs only)
   job_id?: string;  // Nutrition API job id – used to refetch fresh segmented_images URLs when they expire
   analysisStatus?: 'analyzing' | 'completed' | 'failed';  // Analysis status
   analysisProgress?: number;  // Progress from 0 to 100

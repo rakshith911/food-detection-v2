@@ -409,15 +409,20 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
               disabled={isNonTappable}
             >
           <View style={styles.mediaWrapper}>
-            {item.videoUri ? (
+            {item.trellis_mp4_url ? (
               <VideoThumbnail
-                videoUri={item.videoUri}
+                videoUri={item.trellis_mp4_url}
                 style={styles.media}
               />
             ) : item.imageUri ? (
               <HistoryCardImage
                 imageUri={item.imageUri}
                 jobId={item.job_id}
+                style={styles.media}
+              />
+            ) : item.videoUri ? (
+              <VideoThumbnail
+                videoUri={item.videoUri}
                 style={styles.media}
               />
             ) : (
