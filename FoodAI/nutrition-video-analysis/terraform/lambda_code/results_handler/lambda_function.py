@@ -190,8 +190,19 @@ def lambda_handler(event, context):
                         'video_overlay_url': video_overlay_url,
                     }
 
-                # TRELLIS MP4 preview — key stored as trellis_mp4_s3_key in results JSON
+                # TRELLIS MP4 preview — prefer stored key, fall back to scanning predictable prefix
                 trellis_mp4_s3_key = detailed_results.get('trellis_mp4_s3_key')
+                if not trellis_mp4_s3_key:
+                    # Pipeline may not have saved the key — scan the output folder
+                    try:
+                        trellis_prefix = f'v2/trellis/outputs/{job_id}/'
+                        resp = s3.list_objects_v2(Bucket=S3_RESULTS_BUCKET, Prefix=trellis_prefix)
+                        for obj in resp.get('Contents', []):
+                            if obj['Key'].endswith('.mp4'):
+                                trellis_mp4_s3_key = obj['Key']
+                                break
+                    except Exception:
+                        pass
                 if trellis_mp4_s3_key:
                     try:
                         trellis_mp4_url = s3.generate_presigned_url(
