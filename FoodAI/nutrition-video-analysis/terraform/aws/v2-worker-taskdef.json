@@ -4,6 +4,17 @@
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "4096",
   "memory": "16384",
+  "ephemeralStorage": { "sizeInGiB": 50 },
+  "volumes": [
+    {
+      "name": "efs-models",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "fs-024641216e82076f0",
+        "rootDirectory": "/",
+        "transitEncryption": "ENABLED"
+      }
+    }
+  ],
   "executionRoleArn": "arn:aws:iam::185329004895:role/nutrition-video-analysis-dev-ecs-exec-20251207194438790300000005",
   "taskRoleArn": "arn:aws:iam::185329004895:role/nutrition-video-analysis-dev-ecs-task-20251207194437704600000002",
   "containerDefinitions": [
@@ -20,6 +31,7 @@
         { "name": "S3_MODELS_BUCKET",        "value": "nutrition-video-analysis-dev-models-dbenpoj2" },
         { "name": "PRODUCTION_ASSETS_PREFIX","value": "production_assets/model_assets" },
         { "name": "SQS_QUEUE_URL",           "value": "https://sqs.us-east-1.amazonaws.com/185329004895/food-detection-v2-jobs" },
+        { "name": "SQS_VIDEO_QUEUE_URL",     "value": "https://sqs.us-east-1.amazonaws.com/185329004895/food-detection-v2-jobs" },
         { "name": "QUEUE_TYPE",              "value": "sqs" },
         { "name": "DYNAMODB_JOBS_TABLE",     "value": "food-detection-v2-jobs" },
         { "name": "ENABLE_TRELLIS",          "value": "true" },
@@ -46,6 +58,13 @@
           "awslogs-stream-prefix": "ecs"
         }
       },
+      "mountPoints": [
+        {
+          "sourceVolume": "efs-models",
+          "containerPath": "/app/PRODUCTION",
+          "readOnly": false
+        }
+      ],
       "healthCheck": {
         "command": ["CMD-SHELL", "python -c 'print(1)' || exit 1"],
         "interval": 30,
