@@ -2136,6 +2136,7 @@ class NutritionVideoPipeline:
         calibration: dict = None,
         glb_s3_key: str = None,
         mp4_s3_key: str = None,
+        trellis_volume_ml: float = None,
         # Legacy params kept for call-site compatibility — no longer used
         raw_depth_image: Image.Image = None,
         masked_depth_image: Image.Image = None,
@@ -2319,6 +2320,24 @@ class NutritionVideoPipeline:
             }
         if total_dish_volume_ml is not None:
             volume_map["_total_dish"] = {"volume_ml": float(total_dish_volume_ml), "confidence": 1.0}
+
+        # ── TRELLIS geometric volume anchor ──
+        # If we have a mathematically-derived total food volume from the 3-D mesh,
+        # rescale all per-ingredient Gemini estimates proportionally so they sum to
+        # the geometric total. Gemini's per-ingredient RATIOS are trusted; the 3-D
+        # mesh provides the accurate SCALE.
+        if trellis_volume_ml is not None and trellis_volume_ml > 0:
+            ingredient_keys = [k for k in volume_map if k != "_total_dish"]
+            gemini_total = sum(volume_map[k]["volume_ml"] for k in ingredient_keys)
+            if gemini_total > 0:
+                scale = trellis_volume_ml / gemini_total
+                for k in ingredient_keys:
+                    volume_map[k]["volume_ml"] = round(volume_map[k]["volume_ml"] * scale, 1)
+                volume_map["_total_dish"] = {"volume_ml": round(trellis_volume_ml, 1), "confidence": 1.0}
+                logger.info(
+                    "[%s] Rescaled Gemini volumes with TRELLIS anchor: gemini_total=%.1f → trellis=%.1f (scale=%.3f)",
+                    job_id, gemini_total, trellis_volume_ml, scale,
+                )
 
         logger.info(f"[{job_id}] Volume estimates: { {k: v['volume_ml'] for k, v in volume_map.items()} }")
         return volume_map
@@ -2885,6 +2904,8 @@ class NutritionVideoPipeline:
         # ── TRELLIS (v2): generate GLB + MP4 after first pass ──
         trellis_glb_s3_key = None
         trellis_mp4_s3_key = None
+        _trellis_food_vol_units = None
+        _trellis_vessel_diam_units = None
         if getattr(self.config, "ENABLE_TRELLIS", False):
             try:
                 from .trellis_gpu import run_trellis_for_job
@@ -2903,9 +2924,29 @@ class NutritionVideoPipeline:
                     if _mp4_local:
                         _mp4_key = f"{self.config.TRELLIS_OUTPUT_PREFIX}/{job_id}/{_stem}.mp4"
                         trellis_mp4_s3_key = _mp4_key
-                logger.info("[%s] TRELLIS done — glb_key=%s mp4_key=%s", job_id, trellis_glb_s3_key, trellis_mp4_s3_key)
+                    _trellis_food_vol_units = _trellis_results[_stem].get("food_volume_units")
+                    _trellis_vessel_diam_units = _trellis_results[_stem].get("vessel_diameter_units")
+                logger.info("[%s] TRELLIS done — glb=%s mp4=%s food_vol_units=%s", job_id, trellis_glb_s3_key, trellis_mp4_s3_key, _trellis_food_vol_units)
             except Exception as _trellis_err:
                 logger.warning("[%s] TRELLIS generation failed (non-fatal): %s", job_id, _trellis_err)
+
+        # ── TRELLIS geometric volume (signed-tetrahedra mesh → real-world cm³) ──
+        # Uses Gemini first-pass vessel diameter for scale calibration.
+        # food_volume_units × (vessel_cm / vessel_units)³ = food volume in cm³ ≈ ml
+        trellis_volume_ml = None
+        try:
+            import math as _math
+            _vessel = first_pass.get("plate_or_bowl") or {}
+            _vessel_cm = float(_vessel.get("diameter_cm") or 0)
+            if _vessel_cm > 0 and _trellis_food_vol_units and _trellis_vessel_diam_units and _trellis_vessel_diam_units > 0:
+                _k = _vessel_cm / float(_trellis_vessel_diam_units)  # cm per mesh unit
+                trellis_volume_ml = float(_trellis_food_vol_units) * (_k ** 3)
+                logger.info(
+                    "[%s] TRELLIS geometric volume: %.1f ml  (k=%.2f cm/unit, vessel=%.1f cm)",
+                    job_id, trellis_volume_ml, _k, _vessel_cm,
+                )
+        except Exception as _tv_err:
+            logger.warning("[%s] TRELLIS volume scaling failed: %s", job_id, _tv_err)
 
         volume_map = self._estimate_volume_from_raw_depth_with_gemini(
             image_rgb=img_rgb,
@@ -2919,6 +2960,7 @@ class NutritionVideoPipeline:
             user_context=user_context,
             glb_s3_key=trellis_glb_s3_key,
             mp4_s3_key=trellis_mp4_s3_key,
+            trellis_volume_ml=trellis_volume_ml,
         )
 
         verified_questionnaire = self._verify_questionnaire_items_with_gemini(

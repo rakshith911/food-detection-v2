@@ -294,6 +294,9 @@ export class NutritionAnalysisAPI {
       const response = await fetch(url);
 
       if (!response.ok) {
+        if (response.status === 404) {
+          return null;
+        }
         throw new Error(`Results fetch failed: ${response.statusText}`);
       }
 
@@ -526,7 +529,7 @@ export class NutritionAnalysisAPI {
 
       return data;
     } catch (error) {
-      console.error('[Nutrition API] Failed to get results:', error);
+      console.warn('[Nutrition API] Failed to get results:', error);
       return null;
     }
   }

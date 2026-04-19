@@ -146,8 +146,6 @@ def _render_video(mesh, mp4_path: Path, preview_seconds: float, preview_fps: int
 
     num_frames = max(1, int(round(preview_seconds * preview_fps)))
 
-    # MeshRenderer (nvdiffrast) is used — PbrMeshRenderer (nvdiffrec) is not compiled in this image.
-    # Surface normals are computed purely from mesh geometry, so output is unique per dish.
     renderer = MeshRenderer()
     renderer.rendering_options.resolution = 512
     renderer.rendering_options.near = 1
@@ -158,15 +156,37 @@ def _render_video(mesh, mp4_path: Path, preview_seconds: float, preview_fps: int
     pitchs = (0.25 + 0.5 * torch.sin(torch.linspace(0, 2 * 3.1415, num_frames))).tolist()
     extrinsics, intrinsics = yaw_pitch_r_fov_to_extrinsics_intrinsics(yaws, pitchs, 2, 40)
 
+    # Fixed world-space key light and fill light for Lambertian shading
+    key_dir = np.array([0.5, 0.8, 1.0], dtype=np.float32)
+    key_dir /= np.linalg.norm(key_dir)
+    fill_dir = np.array([-0.5, 0.2, 0.5], dtype=np.float32)
+    fill_dir /= np.linalg.norm(fill_dir)
+
     frames = []
     for extr, intr in zip(extrinsics, intrinsics):
-        res = renderer.render(mesh, extr, intr, return_types=["attr", "mask"])
-        # For MeshWithVoxel, attr splits via mesh.layout into named keys (e.g. base_color)
+        res = renderer.render(mesh, extr, intr, return_types=["attr", "normal", "mask"])
         color_key = "base_color" if "base_color" in res else "attr"
-        color = res[color_key]  # [3, H, W] in [0, 1]
-        mask = res["mask"]      # [H, W]
-        frame = np.clip(color.detach().cpu().numpy().transpose(1, 2, 0) * 255, 0, 255).astype(np.uint8)
-        frame[mask.detach().cpu().numpy() < 0.5] = 0
+        color = res[color_key].detach().cpu().numpy().transpose(1, 2, 0)   # [H, W, 3] in [0,1]
+        mask_np = res["mask"].detach().cpu().numpy()                        # [H, W]
+
+        # Lambertian shading from surface normals (world-space normals in [-1,1])
+        normal_raw = res["normal"].detach().cpu().numpy().transpose(1, 2, 0)  # [H, W, 3]
+        # normals come out in [0,1] range — remap to [-1,1]
+        normal_ws = normal_raw * 2.0 - 1.0
+        nlen = np.linalg.norm(normal_ws, axis=-1, keepdims=True).clip(1e-6)
+        normal_ws = normal_ws / nlen
+
+        key_diff  = np.clip((normal_ws * key_dir).sum(axis=-1, keepdims=True),  0, 1)
+        fill_diff = np.clip((normal_ws * fill_dir).sum(axis=-1, keepdims=True), 0, 1)
+
+        ambient = 0.35
+        key_strength  = 0.55
+        fill_strength = 0.15
+        shaded = color * (ambient + key_strength * key_diff + fill_strength * fill_diff)
+        shaded = np.clip(shaded, 0, 1)
+
+        frame = (shaded * 255).astype(np.uint8)
+        frame[mask_np < 0.5] = 0
         frames.append(frame)
 
     imageio.mimsave(str(mp4_path), frames, fps=preview_fps)
@@ -205,9 +225,40 @@ def main() -> int:
         image = Image.open(image_path).convert("RGB")
 
         started = time.time()
-        mesh = pipeline.run(image)[0]
+        preprocessed = pipeline.preprocess_image(image.copy())
+        mesh = pipeline.run(preprocessed, preprocess_image=False)[0]
         duration_s = time.time() - started
         print(f"Generation took {duration_s:.1f}s")
+
+        # ── Volume metrics from full-resolution mesh (before simplify) ──
+        food_volume_units = None
+        vessel_diameter_units = None
+        try:
+            import numpy as _np
+            verts = mesh.vertices.detach().cpu()   # [N, 3]
+            faces = mesh.faces.detach().cpu()       # [M, 3]
+
+            v0 = verts[faces[:, 0]]
+            v1 = verts[faces[:, 1]]
+            v2 = verts[faces[:, 2]]
+            signed_vol = ((v0 * torch.cross(v1, v2, dim=-1)).sum(dim=-1) / 6.0).sum().item()
+            total_volume_units = abs(signed_vol)
+
+            x_ext = float(verts[:, 0].max() - verts[:, 0].min())
+            z_ext = float(verts[:, 2].max() - verts[:, 2].min())
+            vessel_diameter_units = max(x_ext, z_ext)
+
+            y_min = float(verts[:, 1].min())
+            y_max = float(verts[:, 1].max())
+            # Approximate plate as bottom 12% of vertical extent
+            plate_height_units = 0.12 * (y_max - y_min)
+            plate_vol_units = _np.pi * (vessel_diameter_units / 2) ** 2 * plate_height_units
+            food_volume_units = max(0.0, total_volume_units - plate_vol_units)
+
+            print(f"Volume (mesh units): total={total_volume_units:.5f}  food~={food_volume_units:.5f}")
+            print(f"Vessel diameter (mesh units): {vessel_diameter_units:.4f}")
+        except Exception as _ve:
+            print(f"Volume computation failed (non-fatal): {_ve}")
 
         if not args.skip_video:
             # Render before simplify — simplify corrupts voxel attr data used for color sampling
@@ -226,6 +277,10 @@ def main() -> int:
                 "duration_seconds": round(duration_s, 2),
                 "voxel_count": int(len(mesh.coords)),
                 "voxel_size": float(mesh.voxel_size),
+                # Volume in arbitrary mesh units — use vessel_diameter_units + real-world
+                # vessel_diameter_cm from Gemini to compute k = cm/unit, then × k³ → cm³
+                "food_volume_units": round(food_volume_units, 8) if food_volume_units is not None else None,
+                "vessel_diameter_units": round(vessel_diameter_units, 6) if vessel_diameter_units is not None else None,
             }
         )
 

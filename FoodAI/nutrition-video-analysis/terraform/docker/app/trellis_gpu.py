@@ -257,10 +257,33 @@ def run_trellis_for_job(
 
     # Download outputs
     results = {}
+
+    # Parse manifest.json for volume metrics
+    manifest_by_stem = {}
+    manifest_key = f"{out_prefix}/manifest.json"
+    try:
+        import json as _json, tempfile as _tmp
+        _mf = Path(_tmp.mktemp(suffix=".json"))
+        _s3(region).download_file(out_bucket, manifest_key, str(_mf))
+        for entry in _json.loads(_mf.read_text()):
+            s = Path(entry.get("input_image", "")).stem
+            if s:
+                manifest_by_stem[s] = entry
+        _mf.unlink(missing_ok=True)
+        logger.info("[%s] Parsed TRELLIS manifest (%d entries)", job_id, len(manifest_by_stem))
+    except Exception as _me:
+        logger.warning("[%s] Could not parse TRELLIS manifest: %s", job_id, _me)
+
     for img_path in image_paths:
         stem = img_path.stem
         files = download_trellis_output(out_bucket, out_prefix, stem, region, job_id, local_output_dir)
         glb_key = f"{out_prefix}/{stem}.glb"
-        results[stem] = {**files, "glb_s3_key": glb_key if "glb" in files else None}
+        entry = manifest_by_stem.get(stem, {})
+        results[stem] = {
+            **files,
+            "glb_s3_key": glb_key if "glb" in files else None,
+            "food_volume_units": entry.get("food_volume_units"),
+            "vessel_diameter_units": entry.get("vessel_diameter_units"),
+        }
 
     return results
