@@ -106,7 +106,7 @@ RUN ${CONDA_DIR}/bin/conda run -n trellis2 bash -lc "cd ${TRELLIS_SRC_DIR} && . 
 # directly and fail the image build if the runtime import does not work.
 RUN ${CONDA_DIR}/bin/conda run -n trellis2 bash -lc "pip install --no-build-isolation flash-attn==2.7.3 && python -c 'import flash_attn; print(flash_attn.__file__)'"
 RUN ${CONDA_DIR}/bin/conda run -n trellis2 bash -lc "cd ${TRELLIS_SRC_DIR} && . ./setup.sh --nvdiffrast && python -c 'import nvdiffrast.torch as dr; print(dr.__file__)'"
-RUN ${CONDA_DIR}/bin/conda run -n trellis2 bash -lc "cd ${TRELLIS_SRC_DIR} && . ./setup.sh --nvdiffrec && python -c 'from nvdiffrec_render.light import EnvironmentLight; print(EnvironmentLight.__module__)'"
+# nvdiffrec requires -lcuda stub not available in CodeBuild (no GPU); skipped — we use MeshRenderer (nvdiffrast) not PbrMeshRenderer
 RUN ${CONDA_DIR}/bin/conda run -n trellis2 bash -lc "cd ${TRELLIS_SRC_DIR} && . ./setup.sh --cumesh"
 RUN ${CONDA_DIR}/bin/conda run -n trellis2 bash -lc "cd ${TRELLIS_SRC_DIR} && . ./setup.sh --o-voxel"
 RUN ${CONDA_DIR}/bin/conda run -n trellis2 bash -lc "cd ${TRELLIS_SRC_DIR} && . ./setup.sh --flexgemm"
