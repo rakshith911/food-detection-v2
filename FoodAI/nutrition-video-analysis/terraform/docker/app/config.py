@@ -104,6 +104,20 @@ class Settings(BaseSettings):
     # Number of frames to run Depth Anything V2 on for video (averaged)
     DEPTH_NUM_FRAMES: int = 3
 
+    # TRELLIS GPU (v2 pipeline)
+    ENABLE_TRELLIS: bool = False
+    TRELLIS_ECS_CLUSTER: str = "food-detection-v2-cluster"
+    TRELLIS_TASK_DEFINITION: str = "food-detection-v2-trellis-gpu"
+    TRELLIS_GPU_INSTANCE_ID: str = "i-0b1f38c1962e885fd"
+    TRELLIS_INPUT_BUCKET: str = "nutrition-video-analysis-dev-results-dbenpoj2"
+    TRELLIS_OUTPUT_BUCKET: str = "nutrition-video-analysis-dev-results-dbenpoj2"
+    TRELLIS_INPUT_PREFIX: str = "v2/trellis/inputs"
+    TRELLIS_OUTPUT_PREFIX: str = "v2/trellis/outputs"
+    TRELLIS_AWS_REGION: str = "us-east-1"
+    TRELLIS_TASK_TIMEOUT_S: int = 1800  # 30-min hard timeout per GPU task
+    TRELLIS_PREVIEW_SECONDS: int = 4
+    TRELLIS_PREVIEW_FPS: int = 15
+
     # External APIs
     GEMINI_API_KEY: Optional[str] = None
     GEMINI_FLASH_MODEL: str = "gemini-flash-latest"
