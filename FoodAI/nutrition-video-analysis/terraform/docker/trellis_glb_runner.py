@@ -34,7 +34,7 @@ DEFAULT_ENV_MAP = os.environ.get(
     "TRELLIS_ENV_MAP",
     str(DEFAULT_TRELLIS_SRC_DIR / "assets" / "hdri" / "forest.exr"),
 )
-DEFAULT_PREVIEW_SECONDS = float(os.environ.get("TRELLIS_PREVIEW_SECONDS", "8"))
+DEFAULT_PREVIEW_SECONDS = float(os.environ.get("TRELLIS_PREVIEW_SECONDS", "4"))
 DEFAULT_PREVIEW_FPS = int(os.environ.get("TRELLIS_PREVIEW_FPS", "15"))
 
 
