@@ -1,0 +1,41 @@
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - echo Logging in to Amazon ECR...
+      - aws --version
+      - REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - ECR_REPO=$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$ECR_REPO_NAME
+      - echo ECR repository $ECR_REPO
+      - aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $ECR_REPO
+      - IMAGE_TAG=worker-v2-$(date +%Y%m%d-%H%M%S)
+      - echo "Worker v2 image tag $IMAGE_TAG"
+
+  build:
+    commands:
+      - echo Build started on `date`
+      - docker build --no-cache --pull -f FoodAI/nutrition-video-analysis/terraform/docker/Dockerfile -t worker-v2:$IMAGE_TAG FoodAI/nutrition-video-analysis/terraform/docker
+      - docker tag worker-v2:$IMAGE_TAG $ECR_REPO:$IMAGE_TAG
+      - docker tag worker-v2:$IMAGE_TAG $ECR_REPO:latest
+
+  post_build:
+    commands:
+      - echo Build completed on `date`
+      - |
+        if docker image inspect worker-v2:$IMAGE_TAG >/dev/null 2>&1; then
+          echo Pushing worker v2 images...
+          docker push $ECR_REPO:$IMAGE_TAG
+          docker push $ECR_REPO:latest
+          printf '{"repository":"%s","image_tag":"%s","image_uri":"%s"}\n' "$ECR_REPO" "$IMAGE_TAG" "$ECR_REPO:$IMAGE_TAG" > worker-v2-image.json
+          cat worker-v2-image.json
+        else
+          echo "Worker image was not built; skipping push."
+          printf '{"repository":"%s","image_tag":"","image_uri":"","status":"build_failed"}\n' "$ECR_REPO" > worker-v2-image.json
+          cat worker-v2-image.json
+        fi
+
+artifacts:
+  files:
+    - worker-v2-image.json

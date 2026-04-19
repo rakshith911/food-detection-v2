@@ -1,0 +1,58 @@
+{
+  "family": "food-detection-v2-worker",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "4096",
+  "memory": "16384",
+  "executionRoleArn": "arn:aws:iam::185329004895:role/nutrition-video-analysis-dev-ecs-exec-20251207194438790300000005",
+  "taskRoleArn": "arn:aws:iam::185329004895:role/nutrition-video-analysis-dev-ecs-task-20251207194437704600000002",
+  "containerDefinitions": [
+    {
+      "name": "worker",
+      "image": "185329004895.dkr.ecr.us-east-1.amazonaws.com/food-detection-v2-worker:latest",
+      "essential": true,
+      "environment": [
+        { "name": "AWS_REGION",              "value": "us-east-1" },
+        { "name": "DEVICE",                  "value": "cpu" },
+        { "name": "DEBUG",                   "value": "false" },
+        { "name": "S3_RESULTS_BUCKET",       "value": "nutrition-video-analysis-dev-results-dbenpoj2" },
+        { "name": "S3_VIDEOS_BUCKET",        "value": "nutrition-video-analysis-dev-videos-dbenpoj2" },
+        { "name": "S3_MODELS_BUCKET",        "value": "nutrition-video-analysis-dev-models-dbenpoj2" },
+        { "name": "PRODUCTION_ASSETS_PREFIX","value": "production_assets/model_assets" },
+        { "name": "SQS_QUEUE_URL",           "value": "https://sqs.us-east-1.amazonaws.com/185329004895/food-detection-v2-jobs" },
+        { "name": "QUEUE_TYPE",              "value": "sqs" },
+        { "name": "DYNAMODB_JOBS_TABLE",     "value": "food-detection-v2-jobs" },
+        { "name": "ENABLE_TRELLIS",          "value": "true" },
+        { "name": "TRELLIS_ECS_CLUSTER",     "value": "food-detection-v2-cluster" },
+        { "name": "TRELLIS_TASK_DEFINITION", "value": "food-detection-v2-trellis-gpu" },
+        { "name": "TRELLIS_GPU_INSTANCE_ID", "value": "i-0b1f38c1962e885fd" },
+        { "name": "TRELLIS_INPUT_BUCKET",    "value": "nutrition-video-analysis-dev-results-dbenpoj2" },
+        { "name": "TRELLIS_OUTPUT_BUCKET",   "value": "nutrition-video-analysis-dev-results-dbenpoj2" },
+        { "name": "TRELLIS_INPUT_PREFIX",    "value": "v2/trellis/inputs" },
+        { "name": "TRELLIS_OUTPUT_PREFIX",   "value": "v2/trellis/outputs" },
+        { "name": "TRELLIS_AWS_REGION",      "value": "us-east-1" }
+      ],
+      "secrets": [
+        {
+          "name": "GEMINI_API_KEY",
+          "valueFrom": "arn:aws:ssm:us-east-1:185329004895:parameter/nutrition-video-analysis-dev/gemini-api-key"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/food-detection-v2-worker",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "python -c 'print(1)' || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      }
+    }
+  ]
+}
