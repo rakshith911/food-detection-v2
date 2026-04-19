@@ -7,7 +7,7 @@ import { Platform } from 'react-native';
 
 const API_BASE_URL =
   (typeof process !== 'undefined' && process.env?.EXPO_PUBLIC_NUTRITION_API_URL) ||
-  'https://qx3i66fa87.execute-api.us-east-1.amazonaws.com/v1';
+  'https://c89txc5qr6.execute-api.us-east-1.amazonaws.com/v1';
 
 export interface NutritionItem {
   food_name: string;
