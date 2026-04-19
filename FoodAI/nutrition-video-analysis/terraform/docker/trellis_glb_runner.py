@@ -160,10 +160,12 @@ def _render_video(mesh, mp4_path: Path, preview_seconds: float, preview_fps: int
 
     frames = []
     for extr, intr in zip(extrinsics, intrinsics):
-        res = renderer.render(mesh, extr, intr, return_types=["normal", "mask"])
-        normal = res["normal"]  # [3, H, W] surface normals mapped to [0, 1]
+        res = renderer.render(mesh, extr, intr, return_types=["attr", "mask"])
+        # For MeshWithVoxel, attr splits via mesh.layout into named keys (e.g. base_color)
+        color_key = "base_color" if "base_color" in res else "attr"
+        color = res[color_key]  # [3, H, W] in [0, 1]
         mask = res["mask"]      # [H, W]
-        frame = np.clip(normal.detach().cpu().numpy().transpose(1, 2, 0) * 255, 0, 255).astype(np.uint8)
+        frame = np.clip(color.detach().cpu().numpy().transpose(1, 2, 0) * 255, 0, 255).astype(np.uint8)
         frame[mask.detach().cpu().numpy() < 0.5] = 0
         frames.append(frame)
 
@@ -204,16 +206,17 @@ def main() -> int:
 
         started = time.time()
         mesh = pipeline.run(image)[0]
-        mesh.simplify(16_777_216)
         duration_s = time.time() - started
         print(f"Generation took {duration_s:.1f}s")
 
-        _export_glb(mesh, glb_path)
-        print(f"Saved {glb_path}")
-
         if not args.skip_video:
+            # Render before simplify — simplify corrupts voxel attr data used for color sampling
             _render_video(mesh, mp4_path, args.preview_seconds, args.preview_fps)
             print(f"Saved {mp4_path}")
+
+        mesh.simplify(16_777_216)
+        _export_glb(mesh, glb_path)
+        print(f"Saved {glb_path}")
 
         manifest.append(
             {

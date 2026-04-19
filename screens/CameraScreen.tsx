@@ -161,8 +161,7 @@ export default function CameraScreen() {
     try {
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ['images'],
-        allowsEditing: true,
-        aspect: [4, 3],
+        allowsEditing: false,
         quality: 1,
       });
 
@@ -207,8 +206,7 @@ export default function CameraScreen() {
     try {
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ['images', 'videos'],
-        allowsEditing: true,
-        aspect: [4, 3],
+        allowsEditing: false,
         videoMaxDuration: MAX_RECORDING_SECONDS,
         quality: 1,
       });
