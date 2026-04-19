@@ -634,10 +634,17 @@ function AppContent() {
     hasRunColdStartCheck.current = true;
     checkPendingJobs('Cold start (history loaded)');
 
-    // Backfill trellis_mp4_url for completed items saved before this feature
-    const toBackfill = historyRef.current.filter(
-      (e) => e.analysisStatus === 'completed' && e.job_id && !e.trellis_mp4_url
-    );
+    // Backfill trellis_mp4_url — only the 3 most recent completed image jobs without it
+    const TRELLIS_ENABLED_AFTER = new Date('2026-04-15T00:00:00Z').getTime();
+    const toBackfill = historyRef.current
+      .filter((e) =>
+        e.analysisStatus === 'completed' &&
+        e.job_id &&
+        !e.trellis_mp4_url &&
+        e.type === 'image' &&
+        new Date(e.timestamp).getTime() >= TRELLIS_ENABLED_AFTER
+      )
+      .slice(0, 3);
     (async () => {
       for (const entry of toBackfill) {
         try {
