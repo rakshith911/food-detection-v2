@@ -55,6 +55,7 @@ export interface NutritionAnalysisResult {
   download_url?: string;
   meal_name?: string;
   segmented_images?: SegmentedImages;  // New: URLs to segmented images
+  trellis_mp4_url?: string;            // Presigned URL for TRELLIS 3D preview MP4
   nutrition_summary?: {
     total_food_volume_ml: number;
     total_mass_g: number;

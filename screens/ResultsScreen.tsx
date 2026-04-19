@@ -19,18 +19,17 @@ import BottomButtonContainer from '../components/BottomButtonContainer';
 import TutorialScreen from './TutorialScreen';
 import { toSentenceCase } from '../utils/textCase';
 
-// Shows the first frame of a video as a static thumbnail using expo-av (already linked).
+// Auto-plays and loops the TRELLIS 3D rotating preview MP4 on the card.
 function VideoThumbnail({ videoUri, style }: { videoUri: string; style: any }) {
   return (
     <Video
       source={{ uri: videoUri }}
       style={style}
       resizeMode={ResizeMode.COVER}
-      shouldPlay={false}
+      shouldPlay
       isMuted
-      isLooping={false}
+      isLooping
       useNativeControls={false}
-      positionMillis={0}
     />
   );
 }
@@ -410,15 +409,15 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
               disabled={isNonTappable}
             >
           <View style={styles.mediaWrapper}>
-            {item.imageUri ? (
+            {item.videoUri ? (
+              <VideoThumbnail
+                videoUri={item.videoUri}
+                style={styles.media}
+              />
+            ) : item.imageUri ? (
               <HistoryCardImage
                 imageUri={item.imageUri}
                 jobId={item.job_id}
-                style={styles.media}
-              />
-            ) : item.videoUri ? (
-              <VideoThumbnail
-                videoUri={item.videoUri}
                 style={styles.media}
               />
             ) : (

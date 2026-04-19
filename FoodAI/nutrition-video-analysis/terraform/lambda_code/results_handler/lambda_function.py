@@ -190,6 +190,19 @@ def lambda_handler(event, context):
                         'video_overlay_url': video_overlay_url,
                     }
 
+                # TRELLIS MP4 preview — key stored as trellis_mp4_s3_key in results JSON
+                trellis_mp4_s3_key = detailed_results.get('trellis_mp4_s3_key')
+                if trellis_mp4_s3_key:
+                    try:
+                        trellis_mp4_url = s3.generate_presigned_url(
+                            'get_object',
+                            Params={'Bucket': S3_RESULTS_BUCKET, 'Key': trellis_mp4_s3_key},
+                            ExpiresIn=presigned_expires,
+                        )
+                        result['trellis_mp4_url'] = trellis_mp4_url
+                    except Exception:
+                        pass
+
             except s3.exceptions.NoSuchKey:
                 result['detailed_results'] = None
                 result['warning'] = 'Detailed results not found in S3'

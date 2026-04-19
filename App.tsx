@@ -587,6 +587,7 @@ function AppContent() {
                 } as any,
                 job_id: jobId,
                 ...(results.segmented_images ? { segmented_images: results.segmented_images } : {}),
+                ...(results.trellis_mp4_url ? { videoUri: results.trellis_mp4_url } : {}),
               },
             }));
             console.log(`[ResumeCheck] ✅ Updated analysis ${entry.id} to completed`);

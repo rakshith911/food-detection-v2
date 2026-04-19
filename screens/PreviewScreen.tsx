@@ -426,6 +426,7 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
             detailed_results: apiResult.detailed_results,
             segmented_images: apiResult.segmented_images,
             job_id: apiResult.job_id,
+            trellis_mp4_url: apiResult.trellis_mp4_url,
           };
           console.log('[PreviewScreen] result built, about to dispatch...');
         }
@@ -451,6 +452,7 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
             },
             segmented_images: typeof result === 'object' && result?.segmented_images ? result.segmented_images : undefined,
             job_id: typeof result === 'object' && 'job_id' in result ? (result as any).job_id : undefined,
+            ...(typeof result === 'object' && (result as any).trellis_mp4_url ? { videoUri: (result as any).trellis_mp4_url } : {}),
             analysisStatus: 'completed',
             analysisProgress: 100,
           },
