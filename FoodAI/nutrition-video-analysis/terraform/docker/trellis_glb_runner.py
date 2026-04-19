@@ -34,8 +34,8 @@ DEFAULT_ENV_MAP = os.environ.get(
     "TRELLIS_ENV_MAP",
     str(DEFAULT_TRELLIS_SRC_DIR / "assets" / "hdri" / "forest.exr"),
 )
-DEFAULT_PREVIEW_SECONDS = float(os.environ.get("TRELLIS_PREVIEW_SECONDS", "4"))
-DEFAULT_PREVIEW_FPS = int(os.environ.get("TRELLIS_PREVIEW_FPS", "15"))
+DEFAULT_PREVIEW_SECONDS = float(os.environ.get("PREVIEW_SECONDS", "8"))
+DEFAULT_PREVIEW_FPS = int(os.environ.get("PREVIEW_FPS", "15"))
 
 
 def _bootstrap_trellis_imports(trellis_src_dir: Path) -> None:
@@ -146,9 +146,8 @@ def _render_video(mesh, mp4_path: Path, preview_seconds: float, preview_fps: int
 
     num_frames = max(1, int(round(preview_seconds * preview_fps)))
 
-    # Bypass render_utils.get_renderer which picks PbrMeshRenderer for
-    # MeshWithPbrMaterial (requires nvdiffrec_render, not compiled in this image).
-    # MeshRenderer only needs nvdiffrast which is installed.
+    # MeshRenderer (nvdiffrast) is used — PbrMeshRenderer (nvdiffrec) is not compiled in this image.
+    # Surface normals are computed purely from mesh geometry, so output is unique per dish.
     renderer = MeshRenderer()
     renderer.rendering_options.resolution = 512
     renderer.rendering_options.near = 1
@@ -161,12 +160,11 @@ def _render_video(mesh, mp4_path: Path, preview_seconds: float, preview_fps: int
 
     frames = []
     for extr, intr in zip(extrinsics, intrinsics):
-        # "attr" for MeshWithPbrMaterial splits into base_color/metallic/roughness/alpha keys
-        res = renderer.render(mesh, extr, intr, return_types=["attr"])
-        color = res["base_color"]  # [3, H, W], actual texture colors in [0, 1]
-        alpha = res["alpha"]       # [1, H, W]
-        frame = np.clip(color.detach().cpu().numpy().transpose(1, 2, 0) * 255, 0, 255).astype(np.uint8)
-        frame[alpha.squeeze(0).detach().cpu().numpy() < 0.5] = 0
+        res = renderer.render(mesh, extr, intr, return_types=["normal", "mask"])
+        normal = res["normal"]  # [3, H, W] surface normals mapped to [0, 1]
+        mask = res["mask"]      # [H, W]
+        frame = np.clip(normal.detach().cpu().numpy().transpose(1, 2, 0) * 255, 0, 255).astype(np.uint8)
+        frame[mask.detach().cpu().numpy() < 0.5] = 0
         frames.append(frame)
 
     imageio.mimsave(str(mp4_path), frames, fps=preview_fps)
