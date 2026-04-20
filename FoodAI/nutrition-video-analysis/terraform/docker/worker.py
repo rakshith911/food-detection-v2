@@ -587,9 +587,21 @@ def process_message(message: dict, pipeline=None):
             error=str(e)
         )
 
-        # Don't delete message - let it return to queue for retry
-        # After max retries, it will go to DLQ if configured
-        
+        deterministic_errors = (
+            "TRELLIS geometric volume anchor is missing or invalid",
+            "Volume estimation did not return a positive total_dish_volume_ml",
+        )
+        if any(msg in str(e) for msg in deterministic_errors):
+            print(f"Deterministic failure for job {job_id}; deleting SQS message to avoid endless retries")
+            try:
+                sqs.delete_message(
+                    QueueUrl=SQS_VIDEO_QUEUE_URL,
+                    ReceiptHandle=receipt_handle
+                )
+            except Exception as delete_error:
+                print(f"WARNING: Failed to delete deterministic-failure message: {delete_error}")
+            return
+
         # Re-raise to ensure we don't silently continue
         raise
 

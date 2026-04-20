@@ -231,23 +231,34 @@ def main() -> int:
             raw_food_volume_units = max(0.0, total_volume_units - plate_vol_units)
             approx_food_height_units = max(0.0, y_max - support_plane_y)
             approx_food_footprint_units2 = float(x_ext * z_ext)
-            approx_food_to_total_ratio = (
+            raw_food_to_total_ratio = (
                 float(raw_food_volume_units / total_volume_units) if total_volume_units > 0 else None
             )
-            volume_candidate_valid = bool(
+            plate_subtracted_valid = bool(
                 raw_food_volume_units > 1e-6
                 and total_volume_units > 1e-6
                 and vessel_diameter_units > 1e-6
                 and approx_food_height_units > 1e-6
-                and approx_food_to_total_ratio is not None
-                and 0.10 <= approx_food_to_total_ratio <= 0.98
+                and raw_food_to_total_ratio is not None
+                and 0.10 <= raw_food_to_total_ratio <= 0.98
             )
-            food_volume_units = raw_food_volume_units if volume_candidate_valid else None
+            candidate_method = "plate_subtracted"
+            food_volume_units = raw_food_volume_units if plate_subtracted_valid else None
+            approx_food_to_total_ratio = raw_food_to_total_ratio
+            volume_candidate_valid = plate_subtracted_valid
             invalid_reason = None
-            if not volume_candidate_valid:
+            if not plate_subtracted_valid and total_volume_units > 1e-6 and vessel_diameter_units > 1e-6 and approx_food_height_units > 1e-6:
+                # The cylindrical plate subtraction is often too aggressive for open plates/bowls.
+                # Fall back to the raw mesh volume rather than collapsing to zero.
+                candidate_method = "total_mesh_fallback"
+                food_volume_units = total_volume_units
+                approx_food_to_total_ratio = 1.0
+                volume_candidate_valid = True
+                invalid_reason = "plate_subtraction_unreliable_used_total_mesh_fallback"
+            elif not volume_candidate_valid:
                 invalid_reason = (
                     "plate_subtraction_unreliable"
-                    if approx_food_to_total_ratio is not None
+                    if raw_food_to_total_ratio is not None
                     else "volume_ratio_unavailable"
                 )
 
@@ -263,6 +274,8 @@ def main() -> int:
                 "approx_food_footprint_units2": round(float(approx_food_footprint_units2), 6),
                 "total_volume_units": round(float(total_volume_units), 8),
                 "plate_volume_units": round(float(plate_vol_units), 8),
+                "raw_food_volume_units": round(float(raw_food_volume_units), 8),
+                "candidate_method": candidate_method,
                 "approx_food_to_total_ratio": (
                     round(float(approx_food_to_total_ratio), 6)
                     if approx_food_to_total_ratio is not None
@@ -274,9 +287,13 @@ def main() -> int:
 
             printable_food_volume = raw_food_volume_units if raw_food_volume_units is not None else float("nan")
             print(
-                f"Volume (mesh units): total={total_volume_units:.5f}  food~={printable_food_volume:.5f}  valid={volume_candidate_valid}"
+                f"Volume (mesh units): total={total_volume_units:.5f} raw_food={printable_food_volume:.5f} "
+                f"selected_food={float(food_volume_units or 0.0):.5f} method={candidate_method} valid={volume_candidate_valid}"
             )
-            print(f"Vessel diameter (mesh units): {vessel_diameter_units:.4f}")
+            print(
+                f"Vessel diameter (mesh units): {vessel_diameter_units:.4f} "
+                f"plate_height={plate_height_units:.5f} raw_ratio={float(raw_food_to_total_ratio or 0.0):.5f} invalid_reason={invalid_reason}"
+            )
         except Exception as _ve:
             print(f"Volume computation failed (non-fatal): {_ve}")
 

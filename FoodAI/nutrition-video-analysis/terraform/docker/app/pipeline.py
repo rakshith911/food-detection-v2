@@ -2876,6 +2876,7 @@ class NutritionVideoPipeline:
         _trellis_metadata = {}
         if getattr(self.config, "ENABLE_TRELLIS", False):
             try:
+                logger.info("[%s] Starting TRELLIS generation for %s", job_id, image_path.name)
                 from .trellis_gpu import run_trellis_for_job
                 import tempfile
                 _trellis_out_dir = Path(tempfile.mkdtemp(prefix="trellis_"))
@@ -2895,7 +2896,14 @@ class NutritionVideoPipeline:
                     _trellis_food_vol_units = _trellis_results[_stem].get("food_volume_units")
                     _trellis_vessel_diam_units = _trellis_results[_stem].get("vessel_diameter_units")
                     _trellis_metadata = _trellis_results[_stem].get("mesh_metadata") or {}
-                logger.info("[%s] TRELLIS done — glb=%s mp4=%s food_vol_units=%s", job_id, trellis_glb_s3_key, trellis_mp4_s3_key, _trellis_food_vol_units)
+                logger.info(
+                    "[%s] TRELLIS done — glb=%s mp4=%s food_vol_units=%s metadata=%s",
+                    job_id,
+                    trellis_glb_s3_key,
+                    trellis_mp4_s3_key,
+                    _trellis_food_vol_units,
+                    json.dumps(_trellis_metadata, sort_keys=True),
+                )
             except Exception as _trellis_err:
                 logger.warning("[%s] TRELLIS generation failed (non-fatal): %s", job_id, _trellis_err)
 
@@ -2922,10 +2930,23 @@ class NutritionVideoPipeline:
         if getattr(self.config, "ENABLE_TRELLIS", False) and not (
             trellis_volume_valid and trellis_volume_ml is not None and trellis_volume_ml > 0
         ):
+            logger.error(
+                "[%s] Rejecting image volume result: trellis_volume_ml=%s valid=%s metadata=%s",
+                job_id,
+                trellis_volume_ml,
+                trellis_volume_valid,
+                json.dumps(_trellis_metadata, sort_keys=True),
+            )
             raise RuntimeError(
                 "TRELLIS geometric volume anchor is missing or invalid; refusing Gemini-only fallback for image volume estimation"
             )
 
+        logger.info(
+            "[%s] Calling Gemini volume estimation with TRELLIS anchor %.3f ml and metadata keys=%s",
+            job_id,
+            float(trellis_volume_ml or 0.0),
+            sorted(_trellis_metadata.keys()),
+        )
         volume_map = self._estimate_volume_from_raw_depth_with_gemini(
             image_rgb=img_rgb,
             visible_items=visible_items,
