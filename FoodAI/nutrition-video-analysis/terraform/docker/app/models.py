@@ -475,9 +475,9 @@ class ModelManager:
         _ = self.florence2
         if not getattr(self.config, "USE_PRODUCTION_IMAGE_PIPELINE", True):
             _ = self.sam2
-        _ = self.sam3
+        # SAM3 and ZoeDepth are lazy-loaded only when the video pipeline requests them;
+        # they are not used in the v2 image pipeline (TRELLIS handles 3-D reconstruction).
         _ = self.depth_anything
-        _ = self.zoedepth
         _ = self.rag
         logger.info("All models preloaded")
 

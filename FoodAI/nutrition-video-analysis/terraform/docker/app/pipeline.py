@@ -22,7 +22,7 @@ import tempfile
 
 logger = logging.getLogger(__name__)
 
-from app.production_models import run_sam3_image, run_zoedepth
+from app.production_models import run_sam3_image, run_zoedepth  # kept for video pipeline
 
 # Initialize S3 client for uploading segmented images
 s3_client = None
@@ -2860,46 +2860,8 @@ class NutritionVideoPipeline:
             if not visible_items:
                 raise RuntimeError("Production image pipeline found no visible ingredients")
 
-        segmentation_prompts = [item["name"] for item in visible_items]
-        vessel = first_pass.get("plate_or_bowl")
-        if vessel and vessel.get("name"):
-            segmentation_prompts.append(vessel["name"])
-        for ref in first_pass.get("reference_objects") or []:
-            if ref.get("name"):
-                segmentation_prompts.append(ref["name"])
-        segmentation_prompts = list(dict.fromkeys(segmentation_prompts))
-
-        sam3_model, sam3_processor = self.models.sam3
-        sam3_results = run_sam3_image(sam3_model, sam3_processor, pil_image, segmentation_prompts, device=self.device)
-        logger.info(f"[{job_id}] SAM3 segmentation complete for prompts={segmentation_prompts}")
-
-        zoe_model = self.models.zoedepth
-        raw_depth = run_zoedepth(zoe_model, pil_image)
-        calibrated_depth, calibration = self._calibrate_zoe_depth_from_reference(raw_depth, sam3_results, first_pass)
-        logger.info(
-            f"[{job_id}] ZoeDepth inference complete: raw_shape={tuple(raw_depth.shape)} "
-            f"calibration_method={calibration.get('method')} reference={calibration.get('reference_name')}"
-        )
-
-        dish_mask = self._build_production_dish_mask(
-            visible_items=visible_items,
-            sam3_results=sam3_results,
-            target_shape=raw_depth.shape,
-            job_id=job_id,
-        )
-
-        debug_assets = self._save_production_debug_assets(
-            job_id=job_id,
-            image_rgb=img_rgb,
-            sam3_results=sam3_results,
-            raw_depth=raw_depth,
-            calibrated_depth=calibrated_depth,
-            dish_mask=dish_mask,
-        )
-
-        raw_depth_image = self._render_depth_image(raw_depth)
-        calibrated_depth_image = self._render_depth_image(calibrated_depth)
-        masked_depth_image = self._render_depth_image(calibrated_depth, mask=dish_mask)
+        sam3_results: dict = {}
+        calibration: dict = {"method": "trellis"}
 
         # ── TRELLIS (v2): generate GLB + MP4 after first pass ──
         trellis_glb_s3_key = None
@@ -2950,10 +2912,6 @@ class NutritionVideoPipeline:
 
         volume_map = self._estimate_volume_from_raw_depth_with_gemini(
             image_rgb=img_rgb,
-            calibrated_depth_image=calibrated_depth_image,
-            calibrated_depth_np=calibrated_depth,
-            sam3_results=sam3_results,
-            calibration=calibration,
             visible_items=visible_items,
             first_pass=first_pass,
             job_id=job_id,
@@ -2992,7 +2950,7 @@ class NutritionVideoPipeline:
             visible_items=visible_items,
             volume_map=volume_map,
             image_pil=pil_image,
-            calibrated_depth_image=calibrated_depth_image,
+            calibrated_depth_image=None,
             job_id=job_id,
             user_context=user_context,
         )
@@ -3012,7 +2970,7 @@ class NutritionVideoPipeline:
         overall_confidence = self._calculate_overall_confidence(
             first_pass=first_pass,
             visible_items=visible_items,
-            sam3_results=sam3_results,
+            sam3_results={},
             calibration=calibration,
             volume_map=volume_map,
             questionnaire_verification=self.last_questionnaire_verification,
@@ -3025,7 +2983,7 @@ class NutritionVideoPipeline:
             first_pass=first_pass,
             nutrition_results=nutrition_results,
             overall_confidence=overall_confidence,
-            debug_assets=debug_assets,
+            debug_assets={},
             calibration=calibration,
         )
 
@@ -3048,7 +3006,7 @@ class NutritionVideoPipeline:
                         "statistics": {
                             "max_volume_ml": float((volume_map.get(item["name"].lower()) or {}).get("volume_ml") or 0.0),
                         },
-                        "mask_bbox": self._mask_bbox((sam3_results.get(item["name"]) or {}).get("mask")),
+                        "mask_bbox": None,
                     }
                     for idx, item in enumerate(visible_items)
                 },
@@ -3058,10 +3016,7 @@ class NutritionVideoPipeline:
             "analysis_report": analysis_report,
             "questionnaire_verification": self.last_questionnaire_verification,
             "pipeline_runtime": {
-                "image_pipeline": "production",
-                "sam3_model_dir": str(self.config.SAM3_MODEL_DIR),
-                "zoedepth_checkpoint": str(self.config.ZOEDEPTH_CHECKPOINT),
-                "midas_repo_dir": str(self.config.MIDAS_REPO_DIR),
+                "image_pipeline": "trellis_v2",
                 "device": self.device,
             },
             "production_debug": {
@@ -3073,24 +3028,13 @@ class NutritionVideoPipeline:
                 "cooking_method": first_pass.get("cooking_method"),
                 "cooking_method_confidence": float(first_pass.get("cooking_method_confidence") or 0.0),
                 "visible_items": visible_items,
-                "sam3": debug_assets["masks"],
-                "depth_outputs": {
-                    "raw_min_m": float(np.nanmin(raw_depth)),
-                    "raw_max_m": float(np.nanmax(raw_depth)),
-                    "calibrated_min_m": float(np.nanmin(calibrated_depth)),
-                    "calibrated_max_m": float(np.nanmax(calibrated_depth)),
-                    "assets": debug_assets,
-                },
                 "gemini_pass_2_volume": volume_map,
                 "gemini_pass_3_inferred_items": inferred_nonvisible_items,
                 "questionnaire_items": questionnaire_nutrition,
                 "overall_confidence": overall_confidence,
                 "gemini_outputs": self.gemini_outputs,
                 "runtime": {
-                    "image_pipeline": "production",
-                    "sam3_model_dir": str(self.config.SAM3_MODEL_DIR),
-                    "zoedepth_checkpoint": str(self.config.ZOEDEPTH_CHECKPOINT),
-                    "midas_repo_dir": str(self.config.MIDAS_REPO_DIR),
+                    "image_pipeline": "trellis_v2",
                     "device": self.device,
                 },
             },
