@@ -228,13 +228,28 @@ def main() -> int:
             plate_height_units = 0.12 * (y_max - y_min)
             support_plane_y = y_min + plate_height_units
             plate_vol_units = _np.pi * (vessel_diameter_units / 2) ** 2 * plate_height_units
-            food_volume_units = max(0.0, total_volume_units - plate_vol_units)
+            raw_food_volume_units = max(0.0, total_volume_units - plate_vol_units)
             approx_food_height_units = max(0.0, y_max - support_plane_y)
             approx_food_footprint_units2 = float(x_ext * z_ext)
             approx_food_to_total_ratio = (
-                float(food_volume_units / total_volume_units) if total_volume_units > 0 else None
+                float(raw_food_volume_units / total_volume_units) if total_volume_units > 0 else None
             )
-            volume_candidate_valid = food_volume_units > 1e-6
+            volume_candidate_valid = bool(
+                raw_food_volume_units > 1e-6
+                and total_volume_units > 1e-6
+                and vessel_diameter_units > 1e-6
+                and approx_food_height_units > 1e-6
+                and approx_food_to_total_ratio is not None
+                and 0.10 <= approx_food_to_total_ratio <= 0.98
+            )
+            food_volume_units = raw_food_volume_units if volume_candidate_valid else None
+            invalid_reason = None
+            if not volume_candidate_valid:
+                invalid_reason = (
+                    "plate_subtraction_unreliable"
+                    if approx_food_to_total_ratio is not None
+                    else "volume_ratio_unavailable"
+                )
 
             mesh_metadata = {
                 "bbox_units": {
@@ -254,9 +269,13 @@ def main() -> int:
                     else None
                 ),
                 "volume_candidate_valid": volume_candidate_valid,
+                "volume_candidate_invalid_reason": invalid_reason,
             }
 
-            print(f"Volume (mesh units): total={total_volume_units:.5f}  food~={food_volume_units:.5f}")
+            printable_food_volume = raw_food_volume_units if raw_food_volume_units is not None else float("nan")
+            print(
+                f"Volume (mesh units): total={total_volume_units:.5f}  food~={printable_food_volume:.5f}  valid={volume_candidate_valid}"
+            )
             print(f"Vessel diameter (mesh units): {vessel_diameter_units:.4f}")
         except Exception as _ve:
             print(f"Volume computation failed (non-fatal): {_ve}")

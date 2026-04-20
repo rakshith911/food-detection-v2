@@ -2903,6 +2903,7 @@ class NutritionVideoPipeline:
         # Uses Gemini first-pass vessel diameter for scale calibration.
         # food_volume_units × (vessel_cm / vessel_units)³ = food volume in cm³ ≈ ml
         trellis_volume_ml = None
+        trellis_volume_valid = False
         try:
             import math as _math
             _vessel = first_pass.get("plate_or_bowl") or {}
@@ -2910,12 +2911,20 @@ class NutritionVideoPipeline:
             if _vessel_cm > 0 and _trellis_food_vol_units and _trellis_vessel_diam_units and _trellis_vessel_diam_units > 0:
                 _k = _vessel_cm / float(_trellis_vessel_diam_units)  # cm per mesh unit
                 trellis_volume_ml = float(_trellis_food_vol_units) * (_k ** 3)
+                trellis_volume_valid = bool(_trellis_metadata.get("volume_candidate_valid"))
                 logger.info(
-                    "[%s] TRELLIS geometric volume: %.1f ml  (k=%.2f cm/unit, vessel=%.1f cm)",
-                    job_id, trellis_volume_ml, _k, _vessel_cm,
+                    "[%s] TRELLIS geometric volume: %.1f ml  (k=%.2f cm/unit, vessel=%.1f cm, valid=%s)",
+                    job_id, trellis_volume_ml, _k, _vessel_cm, trellis_volume_valid,
                 )
         except Exception as _tv_err:
             logger.warning("[%s] TRELLIS volume scaling failed: %s", job_id, _tv_err)
+
+        if getattr(self.config, "ENABLE_TRELLIS", False) and not (
+            trellis_volume_valid and trellis_volume_ml is not None and trellis_volume_ml > 0
+        ):
+            raise RuntimeError(
+                "TRELLIS geometric volume anchor is missing or invalid; refusing Gemini-only fallback for image volume estimation"
+            )
 
         volume_map = self._estimate_volume_from_raw_depth_with_gemini(
             image_rgb=img_rgb,
@@ -2928,6 +2937,10 @@ class NutritionVideoPipeline:
             trellis_volume_ml=trellis_volume_ml,
             trellis_metadata=_trellis_metadata,
         )
+        total_dish_entry = volume_map.get("_total_dish") or {}
+        total_dish_volume_ml = float(total_dish_entry.get("volume_ml") or 0.0)
+        if total_dish_volume_ml <= 0:
+            raise RuntimeError("Volume estimation did not return a positive total_dish_volume_ml")
 
         verified_questionnaire = self._verify_questionnaire_items_with_gemini(
             {
