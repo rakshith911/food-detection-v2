@@ -14,6 +14,8 @@ import logging
 import json
 import sys
 import re
+import signal
+import time
 from datetime import datetime
 import os
 import subprocess
@@ -765,8 +767,42 @@ class NutritionVideoPipeline:
             model_name,
             generation_config=self._GEMINI_FIRST_PASS_GEN_CONFIG,
         )
-        response = gm.generate_content([prompt, image_pil])
+        timeout_s = int(os.environ.get("GEMINI_FIRST_PASS_TIMEOUT_SECONDS", "180"))
+        logger.info(
+            "[%s] Starting Gemini first pass (model=%s image=%dx%d timeout=%ss)",
+            job_id,
+            model_name,
+            img_width,
+            img_height,
+            timeout_s,
+        )
+
+        _old_handler = None
+        _timeout_supported = hasattr(signal, "SIGALRM") and hasattr(signal, "setitimer")
+
+        def _timeout_handler(signum, frame):
+            raise TimeoutError(f"Gemini first pass exceeded {timeout_s}s")
+
+        started = time.time()
+        try:
+            if _timeout_supported:
+                _old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+                signal.setitimer(signal.ITIMER_REAL, timeout_s)
+            response = gm.generate_content([prompt, image_pil])
+        except TimeoutError as timeout_err:
+            logger.error("[%s] Gemini first pass timed out after %.1fs", job_id, time.time() - started)
+            raise RuntimeError(str(timeout_err))
+        finally:
+            if _timeout_supported:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, _old_handler)
         response_text = response.text or ""
+        logger.info(
+            "[%s] Gemini first pass complete in %.1fs (%d chars)",
+            job_id,
+            time.time() - started,
+            len(response_text),
+        )
 
         if "```json" in response_text:
             s = response_text.find("```json") + 7
@@ -883,6 +919,14 @@ class NutritionVideoPipeline:
         data.setdefault("visible_ingredients", [])
         data.setdefault("reference_objects", [])
         data.setdefault("plate_or_bowl", None)
+        logger.info(
+            "[%s] Gemini first pass parsed: meal=%s visible_items=%d vessel=%s diameter_cm=%s",
+            job_id,
+            data.get("meal_name"),
+            len(data.get("visible_ingredients") or []),
+            (data.get("plate_or_bowl") or {}).get("vessel_type"),
+            (data.get("plate_or_bowl") or {}).get("diameter_cm"),
+        )
         return data
 
     @staticmethod
@@ -2821,6 +2865,7 @@ class NutritionVideoPipeline:
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
         pil_image = Image.fromarray(img_rgb)
 
+        logger.info("[%s] Image pipeline start for %s", job_id, image_path.name)
         first_pass = self._gemini_first_pass_image(pil_image, job_id, user_context=user_context)
         visible_items = [
             {
@@ -2864,6 +2909,12 @@ class NutritionVideoPipeline:
                 logger.warning("[%s] Fallback ingredient detection also failed: %s", job_id, _retry_err)
             if not visible_items:
                 raise RuntimeError("Production image pipeline found no visible ingredients")
+
+        logger.info(
+            "[%s] Image pipeline first pass ready: visible_items=%s",
+            job_id,
+            [item["name"] for item in visible_items],
+        )
 
         sam3_results: dict = {}
         calibration: dict = {"method": "trellis"}

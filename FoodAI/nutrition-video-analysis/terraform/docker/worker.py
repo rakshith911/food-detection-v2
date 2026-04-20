@@ -42,6 +42,7 @@ import os
 import sys
 import time
 import tempfile
+import threading
 import traceback
 import urllib.request
 import urllib.error
@@ -76,6 +77,8 @@ PRODUCTION_ASSETS_PREFIX = os.environ.get('PRODUCTION_ASSETS_PREFIX', 'productio
 MAX_FRAMES = int(os.environ.get('MAX_FRAMES', '60'))
 FRAME_SKIP = int(os.environ.get('FRAME_SKIP', '10'))
 DETECTION_INTERVAL = int(os.environ.get('DETECTION_INTERVAL', '30'))
+MESSAGE_VISIBILITY_TIMEOUT_SECONDS = int(os.environ.get('MESSAGE_VISIBILITY_TIMEOUT_SECONDS', '3600'))
+VISIBILITY_HEARTBEAT_INTERVAL_SECONDS = int(os.environ.get('VISIBILITY_HEARTBEAT_INTERVAL_SECONDS', '240'))
 
 print(f"🚀 Worker env: DEVICE={DEVICE} USE_PRODUCTION_IMAGE_PIPELINE={USE_PRODUCTION_IMAGE_PIPELINE}")
 print(f"🚀 Worker env: ZOEDEPTH_REPO_DIR={ZOEDEPTH_REPO_DIR}")
@@ -115,6 +118,35 @@ def update_job_status(job_id: str, status: str, **kwargs):
         ExpressionAttributeNames=expr_names,
         ExpressionAttributeValues=expr_values
     )
+
+
+def _start_visibility_heartbeat(receipt_handle: str, job_id: str) -> tuple[threading.Event, threading.Thread]:
+    """Keep SQS visibility alive while long-running jobs are processing."""
+    stop_event = threading.Event()
+    interval = max(30, min(VISIBILITY_HEARTBEAT_INTERVAL_SECONDS, max(60, MESSAGE_VISIBILITY_TIMEOUT_SECONDS // 2)))
+
+    def _heartbeat():
+        while not stop_event.wait(interval):
+            try:
+                sqs.change_message_visibility(
+                    QueueUrl=SQS_VIDEO_QUEUE_URL,
+                    ReceiptHandle=receipt_handle,
+                    VisibilityTimeout=MESSAGE_VISIBILITY_TIMEOUT_SECONDS,
+                )
+                print(
+                    f"[SQS] Extended visibility for job {job_id} "
+                    f"by {MESSAGE_VISIBILITY_TIMEOUT_SECONDS}s"
+                )
+            except Exception as hb_err:
+                print(f"[SQS] WARNING: Failed to extend visibility for job {job_id}: {hb_err}")
+
+    thread = threading.Thread(
+        target=_heartbeat,
+        name=f"sqs-visibility-{job_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
+    return stop_event, thread
 
 
 def download_media(s3_bucket: str, s3_key: str, local_path: str):
@@ -415,6 +447,8 @@ def real_process_video(video_path: str, job_id: str) -> dict:
 def process_message(message: dict, pipeline=None):
     """Process a single SQS message."""
     receipt_handle = message['ReceiptHandle']
+    stop_visibility_event = None
+    visibility_thread = None
     
     try:
         body = json.loads(message['Body'])
@@ -473,6 +507,7 @@ def process_message(message: dict, pipeline=None):
     try:
         # Update status
         update_job_status(job_id, 'processing', progress=0)
+        stop_visibility_event, visibility_thread = _start_visibility_heartbeat(receipt_handle, job_id)
 
         # Create temp directory for processing
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -571,12 +606,20 @@ def process_message(message: dict, pipeline=None):
             print(f"{'='*60}\n")
 
         # Delete message from queue
+        if stop_visibility_event is not None:
+            stop_visibility_event.set()
+        if visibility_thread is not None:
+            visibility_thread.join(timeout=2)
         sqs.delete_message(
             QueueUrl=SQS_VIDEO_QUEUE_URL,
             ReceiptHandle=receipt_handle
         )
 
     except Exception as e:
+        if stop_visibility_event is not None:
+            stop_visibility_event.set()
+        if visibility_thread is not None:
+            visibility_thread.join(timeout=2)
         print(f"CRITICAL ERROR processing job {job_id}: {str(e)}")
         traceback.print_exc()
 
@@ -642,7 +685,7 @@ def poll_queue():
                 QueueUrl=SQS_VIDEO_QUEUE_URL,
                 MaxNumberOfMessages=1,
                 WaitTimeSeconds=20,  # Long polling
-                VisibilityTimeout=900  # 15 minutes
+                VisibilityTimeout=MESSAGE_VISIBILITY_TIMEOUT_SECONDS
             )
 
             messages = response.get('Messages', [])
