@@ -472,12 +472,8 @@ class ModelManager:
     def preload_all(self):
         """Preload all models (useful for container warmup)"""
         logger.info("Preloading all models...")
-        _ = self.florence2
-        if not getattr(self.config, "USE_PRODUCTION_IMAGE_PIPELINE", True):
-            _ = self.sam2
-        # SAM3 and ZoeDepth are lazy-loaded only when the video pipeline requests them;
-        # they are not used in the v2 image pipeline (TRELLIS handles 3-D reconstruction).
-        _ = self.depth_anything
+        # Only preload what the v2 image pipeline actually needs at job time.
+        # Florence2, SAM3, ZoeDepth, DepthAnything are lazy-loaded for video/legacy paths only.
         _ = self.rag
         logger.info("All models preloaded")
 
