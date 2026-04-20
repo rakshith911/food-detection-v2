@@ -370,9 +370,8 @@ class ModelManager:
             f"device={self.device}, "
             f"use_production_image_pipeline={getattr(config, 'USE_PRODUCTION_IMAGE_PIPELINE', None)}, "
             f"production_root={getattr(config, 'PRODUCTION_ROOT', None)}, "
-            f"sam3_model_dir={getattr(config, 'SAM3_MODEL_DIR', None)}, "
-            f"zoedepth_checkpoint={getattr(config, 'ZOEDEPTH_CHECKPOINT', None)}, "
-            f"midas_repo_dir={getattr(config, 'MIDAS_REPO_DIR', None)}"
+            f"image_pipeline=gemini_labels_then_trellis, "
+            f"gemini_model={getattr(config, 'GEMINI_FLASH_MODEL', None)}"
         )
         
         # Models will be loaded on demand

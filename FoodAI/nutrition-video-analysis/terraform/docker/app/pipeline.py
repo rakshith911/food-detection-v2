@@ -22,8 +22,6 @@ import tempfile
 
 logger = logging.getLogger(__name__)
 
-from app.production_models import run_sam3_image, run_zoedepth  # kept for video pipeline
-
 # Initialize S3 client for uploading segmented images
 s3_client = None
 S3_RESULTS_BUCKET = os.environ.get('S3_RESULTS_BUCKET')
@@ -314,10 +312,7 @@ class NutritionVideoPipeline:
         if getattr(self.config, "USE_PRODUCTION_IMAGE_PIPELINE", True):
             logger.info(
                 f"[{job_id}] Attempting production image pipeline "
-                f"(Gemini -> SAM3 -> ZoeDepth -> Gemini volume) "
-                f"using SAM3={self.config.SAM3_MODEL_DIR} "
-                f"ZoeDepth={self.config.ZOEDEPTH_CHECKPOINT} "
-                f"MiDaS={self.config.MIDAS_REPO_DIR}"
+                f"(Gemini labels -> TRELLIS -> Gemini volume)"
             )
             return self._run_production_image_pipeline(image_path, job_id, user_context=user_context)
 
@@ -2141,10 +2136,10 @@ class NutritionVideoPipeline:
         raw_depth_image: Image.Image = None,
         masked_depth_image: Image.Image = None,
     ) -> dict:
-        """Estimate per-ingredient volumes using RGB + TRELLIS MP4 preview (v2) or calibrated depth (v1).
+        """Estimate per-ingredient volumes using RGB + TRELLIS MP4 preview when available.
 
-        When mp4_s3_key is provided (v2 pipeline), the MP4 is uploaded to Gemini Files
-        API and used instead of the calibrated depth image. Gemini natively supports video/mp4.
+        The current production image path is TRELLIS-first and does not rely on SAM3/ZoeDepth.
+        The legacy depth params are kept only for call-site compatibility.
         """
         try:
             import google.generativeai as genai
@@ -2177,7 +2172,7 @@ class NutritionVideoPipeline:
         original_pil = Image.fromarray(image_rgb)
 
         glb_file_ref = None
-        # v2: prefer MP4 preview video (Gemini-native video/mp4) over GLB
+        # Prefer the TRELLIS MP4 preview because Gemini can reason over video directly.
         _trellis_s3_key = mp4_s3_key or None
         _trellis_suffix = ".mp4"
         _trellis_mime = "video/mp4"
@@ -2202,7 +2197,7 @@ class NutritionVideoPipeline:
                 else:
                     raise RuntimeError(f"Gemini file not ACTIVE after 150s: {glb_file_ref.name}")
             except Exception as e:
-                logger.warning("[%s] TRELLIS preview upload to Gemini failed, falling back to depth image: %s", job_id, e)
+                logger.warning("[%s] TRELLIS preview upload to Gemini failed, falling back to image-only volume reasoning: %s", job_id, e)
                 glb_file_ref = None
             finally:
                 try:
@@ -2215,7 +2210,7 @@ class NutritionVideoPipeline:
                 "You are a food volume estimation system.\n"
                 "You are given TWO inputs for the same dish:\n"
                 "  Input 1: the original RGB photo.\n"
-                "  Input 2: a 360° preview video of the 3-D mesh reconstructed from the photo by a photogrammetry model.\n\n"
+                "  Input 2: a 360° preview video of the 3-D mesh reconstructed from the photo.\n\n"
                 f"{scale_note}\n\n"
                 + anchor_block +
                 "Use the 3-D mesh geometry shown in the video to estimate the volume of each ingredient by reasoning about "
@@ -2234,15 +2229,10 @@ class NutritionVideoPipeline:
             prompt += self._build_user_context_suffix(user_context)
             content = [prompt, original_pil, glb_file_ref]
         else:
-            anchor_block += (
-                "Estimate the volume in ml for each ingredient using the RGB photo and the "
-                "calibrated depth map together.\n"
-            )
+            anchor_block += "Estimate the volume in ml for each ingredient using the RGB photo.\n"
             prompt = (
                 "You are a food volume estimation system.\n"
-                "You are given TWO aligned images of the same dish:\n"
-                "  Image 1: the original RGB photo.\n"
-                "  Image 2: the calibrated depth map (brighter/warmer = closer to camera = taller food).\n\n"
+                "You are given the original RGB photo of a dish.\n\n"
                 f"{scale_note}\n\n"
                 + anchor_block +
                 f"\nIngredient names to use (copy these EXACTLY into the output — do not rename, translate, or reword them): {json.dumps(labels)}\n"
@@ -2255,10 +2245,7 @@ class NutritionVideoPipeline:
                 "- Estimate only the visible portion — do not add hidden or extra items here.\n"
             )
             prompt += self._build_user_context_suffix(user_context)
-            # Send RGB + calibrated depth only
             content = [prompt, original_pil]
-            if calibrated_depth_image is not None:
-                content.append(calibrated_depth_image)
 
         try:
             response = gm.generate_content(
@@ -2453,9 +2440,7 @@ class NutritionVideoPipeline:
         ]
         prompt = (
             "You are a food nutrition analysis expert reviewing an image-only dish analysis.\n"
-            "Image 1 is the original RGB photo. Image 2 is the calibrated depth map "
-            "(red/bright = closer to camera = taller/thicker, blue/dark = farther = flatter).\n"
-            "Use BOTH images together to identify hidden content and genuinely high-calorie extras.\n\n"
+            "Use the original RGB photo to identify hidden content and genuinely high-calorie extras.\n\n"
             "Return ONLY valid JSON as an array. Each entry must be:\n"
             "[{\"name\": str, \"type\": \"hidden\"|\"extra\", \"reason\": str, \"confidence\": number, "
             "\"volume_ml\": number, \"is_incremental\": true|false}]\n\n"
@@ -2471,11 +2456,10 @@ class NutritionVideoPipeline:
             "buried underneath, inside, or covered by other ingredients.\n"
             "Examples: rice under curry, noodles buried under toppings, bread inside a wrap, gravy under meat.\n"
             "Rules:\n"
-            "- ONLY include hidden items that have DIRECT visual evidence in the depth map: a distinct elevated layer "
-            "beneath visible food, a pocket, or a wrap/roll shape that implies enclosed content.\n"
+            "- ONLY include hidden items that have DIRECT visual evidence in the image: a visible pocket, enclosed wrap/roll shape, or a distinct covered layer implied by the presentation.\n"
             "- Do NOT infer hidden items from cuisine type or recipe knowledge alone. "
             "A falafel bowl does not imply pita bread. A rice bowl does not imply noodles. "
-            "The depth map must show a physical layer that cannot be explained by visible ingredients.\n"
+            "There must be real visual evidence that cannot be explained by visible ingredients alone.\n"
             "- Do not include items that are already visible in the base ingredient list.\n"
             "- Hidden items must themselves be calorie-significant (e.g. rice, bread, pastry, cheese inside — NOT salad leaves).\n"
             "- When in doubt, return an empty array — false positives are worse than false negatives here.\n\n"
@@ -2506,7 +2490,7 @@ class NutritionVideoPipeline:
             "Double / Excess Portions (calorie-dense items only):\n"
             "  - Portion is visually 2x or more of a normal single serving\n"
             "  - Multiple pieces when dish is normally one (e.g. 3 chicken thighs)\n"
-            "  - Use depth map to detect stacked or piled calorie-dense items\n"
+            "  - Use visible stacking, overflow, or distinct extra layers to detect piled calorie-dense items\n"
             "  - Apply this ONLY to calorie-dense foods: meat, rice, pasta, cheese, fried items\n\n"
             "CRITICAL — DO NOT flag as extra:\n"
             "  - Vegetables with low calorie density: lettuce, cucumber, tomato, spinach, peppers, onion, "
@@ -2534,7 +2518,8 @@ class NutritionVideoPipeline:
         try:
             import concurrent.futures as _cf
             with _cf.ThreadPoolExecutor(max_workers=1) as _tex:
-                _fut = _tex.submit(model.generate_content, [prompt, image_pil, calibrated_depth_image])
+                _content = [prompt, image_pil]
+                _fut = _tex.submit(model.generate_content, _content)
             response = _fut.result(timeout=45)
         except Exception as exc:
             logger.warning("[%s] _infer_hidden_and_extra_items_with_gemini timed out or failed (%s) — skipping", job_id, exc)
