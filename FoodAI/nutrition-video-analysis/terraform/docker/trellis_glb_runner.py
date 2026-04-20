@@ -206,6 +206,7 @@ def main() -> int:
         # ── Volume metrics from full-resolution mesh (before simplify) ──
         food_volume_units = None
         vessel_diameter_units = None
+        mesh_metadata: dict[str, object] = {}
         try:
             import numpy as _np
             verts = mesh.vertices.detach().cpu()
@@ -218,14 +219,42 @@ def main() -> int:
             total_volume_units = abs(signed_vol)
 
             x_ext = float(verts[:, 0].max() - verts[:, 0].min())
+            y_ext = float(verts[:, 1].max() - verts[:, 1].min())
             z_ext = float(verts[:, 2].max() - verts[:, 2].min())
             vessel_diameter_units = max(x_ext, z_ext)
 
             y_min = float(verts[:, 1].min())
             y_max = float(verts[:, 1].max())
             plate_height_units = 0.12 * (y_max - y_min)
+            support_plane_y = y_min + plate_height_units
             plate_vol_units = _np.pi * (vessel_diameter_units / 2) ** 2 * plate_height_units
             food_volume_units = max(0.0, total_volume_units - plate_vol_units)
+            approx_food_height_units = max(0.0, y_max - support_plane_y)
+            approx_food_footprint_units2 = float(x_ext * z_ext)
+            approx_food_to_total_ratio = (
+                float(food_volume_units / total_volume_units) if total_volume_units > 0 else None
+            )
+            volume_candidate_valid = food_volume_units > 1e-6
+
+            mesh_metadata = {
+                "bbox_units": {
+                    "width": round(x_ext, 6),
+                    "height": round(y_ext, 6),
+                    "depth": round(z_ext, 6),
+                },
+                "support_plane_y_units": round(float(support_plane_y), 6),
+                "approx_plate_height_units": round(float(plate_height_units), 6),
+                "approx_food_height_units": round(float(approx_food_height_units), 6),
+                "approx_food_footprint_units2": round(float(approx_food_footprint_units2), 6),
+                "total_volume_units": round(float(total_volume_units), 8),
+                "plate_volume_units": round(float(plate_vol_units), 8),
+                "approx_food_to_total_ratio": (
+                    round(float(approx_food_to_total_ratio), 6)
+                    if approx_food_to_total_ratio is not None
+                    else None
+                ),
+                "volume_candidate_valid": volume_candidate_valid,
+            }
 
             print(f"Volume (mesh units): total={total_volume_units:.5f}  food~={food_volume_units:.5f}")
             print(f"Vessel diameter (mesh units): {vessel_diameter_units:.4f}")
@@ -251,6 +280,7 @@ def main() -> int:
                 "voxel_size": float(mesh.voxel_size),
                 "food_volume_units": round(food_volume_units, 8) if food_volume_units is not None else None,
                 "vessel_diameter_units": round(vessel_diameter_units, 6) if vessel_diameter_units is not None else None,
+                "mesh_metadata": mesh_metadata,
             }
         )
 

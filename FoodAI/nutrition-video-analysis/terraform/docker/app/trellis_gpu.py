@@ -284,6 +284,7 @@ def run_trellis_for_job(
             "glb_s3_key": glb_key if "glb" in files else None,
             "food_volume_units": entry.get("food_volume_units"),
             "vessel_diameter_units": entry.get("vessel_diameter_units"),
+            "mesh_metadata": entry.get("mesh_metadata") or {},
         }
 
     return results

@@ -2132,6 +2132,7 @@ class NutritionVideoPipeline:
         glb_s3_key: str = None,
         mp4_s3_key: str = None,
         trellis_volume_ml: float = None,
+        trellis_metadata: dict = None,
         # Legacy params kept for call-site compatibility — no longer used
         raw_depth_image: Image.Image = None,
         masked_depth_image: Image.Image = None,
@@ -2161,6 +2162,17 @@ class NutritionVideoPipeline:
             )
         else:
             scale_note = "No reliable vessel dimension detected; use the 3-D model for scale."
+
+        trellis_metadata = trellis_metadata or {}
+        trellis_guidance = {}
+        if trellis_metadata:
+            trellis_guidance["mesh_metadata"] = trellis_metadata
+        if trellis_volume_ml is not None and trellis_volume_ml > 0:
+            trellis_guidance["scaled_food_volume_ml_candidate"] = round(float(trellis_volume_ml), 2)
+        if vessel.get("diameter_cm"):
+            trellis_guidance["vessel_diameter_cm"] = round(float(vessel["diameter_cm"]), 2)
+        if labels:
+            trellis_guidance["ingredient_labels"] = labels
 
         anchor_block = (
             f"Visible ingredients: {json.dumps(labels)}.\n\n"
@@ -2213,8 +2225,11 @@ class NutritionVideoPipeline:
                 "  Input 2: a 360° preview video of the 3-D mesh reconstructed from the photo.\n\n"
                 f"{scale_note}\n\n"
                 + anchor_block +
-                "Use the 3-D mesh geometry shown in the video to estimate the volume of each ingredient by reasoning about "
-                "the shape, height, and area visible across the rotation.\n\n"
+                "You also have TRELLIS-derived geometric metadata in JSON form below. Treat it as supporting evidence about "
+                "dish scale, height, footprint, and a candidate total food volume.\n"
+                f"TRELLIS metadata JSON: {json.dumps(trellis_guidance, ensure_ascii=True, sort_keys=True)}\n\n"
+                "Use the RGB photo for ingredient identity and texture. Use the video and metadata to reason about geometry, "
+                "layering, hidden portions, and coverage.\n\n"
                 f"Ingredient names to use (copy EXACTLY): {json.dumps(labels)}\n"
                 "\nReturn ONLY valid JSON — an array with one entry per ingredient:\n"
                 "[{\"name\": \"rice\", \"volume_ml\": 180, \"height_cm\": 2.1, \"shape_factor\": 0.60, \"confidence\": 0.85}, ...]\n\n"
@@ -2224,17 +2239,20 @@ class NutritionVideoPipeline:
                 "- confidence between 0 and 1.\n"
                 "- Also include a 'total_dish_volume_ml' key at the top level of the JSON object.\n"
                 "- Return a JSON object: {\"ingredients\": [...], \"total_dish_volume_ml\": <number>}\n"
-                "- Estimate only the visible portion.\n"
+                "- Infer hidden/base portions when strongly supported by layering cues. Example: rice or salad under toppings may extend beyond the visible area.\n"
+                "- Use sauce/condiment coverage cues to avoid double-counting. Covered ingredients still retain their own volume.\n"
+                "- If the TRELLIS candidate total volume looks plausible, keep your total close to it while using the RGB image to decide ingredient ratios.\n"
             )
             prompt += self._build_user_context_suffix(user_context)
             content = [prompt, original_pil, glb_file_ref]
         else:
-            anchor_block += "Estimate the volume in ml for each ingredient using the RGB photo.\n"
+            anchor_block += "Estimate the volume in ml for each ingredient using the RGB photo and TRELLIS metadata.\n"
             prompt = (
                 "You are a food volume estimation system.\n"
                 "You are given the original RGB photo of a dish.\n\n"
                 f"{scale_note}\n\n"
                 + anchor_block +
+                f"TRELLIS metadata JSON: {json.dumps(trellis_guidance, ensure_ascii=True, sort_keys=True)}\n\n"
                 f"\nIngredient names to use (copy these EXACTLY into the output — do not rename, translate, or reword them): {json.dumps(labels)}\n"
                 "\nReturn ONLY valid JSON — an array with one entry per ingredient, using the exact names above:\n"
                 "[{\"name\": \"rice\", \"volume_ml\": 180, \"height_cm\": 2.1, \"shape_factor\": 0.60, \"confidence\": 0.85}, ...]\n\n"
@@ -2242,7 +2260,9 @@ class NutritionVideoPipeline:
                 "- Every ingredient in the list above must appear in the output with its exact name.\n"
                 "- volume_ml must be > 0.\n"
                 "- confidence between 0 and 1.\n"
-                "- Estimate only the visible portion — do not add hidden or extra items here.\n"
+                "- Use TRELLIS metadata as geometry/scale context if available.\n"
+                "- Infer hidden/base portions only when strongly supported by the plating structure in the RGB image.\n"
+                "- Keep sauce/condiment volume separate from the ingredients it covers.\n"
             )
             prompt += self._build_user_context_suffix(user_context)
             content = [prompt, original_pil]
@@ -2293,7 +2313,7 @@ class NutritionVideoPipeline:
             prompt=prompt,
             response_text=response_text,
             parsed_output=data,
-            metadata={"visible_ingredients": labels},
+            metadata={"visible_ingredients": labels, "trellis_metadata": trellis_guidance},
         )
 
         volume_map = {}
@@ -2853,6 +2873,7 @@ class NutritionVideoPipeline:
         trellis_mp4_s3_key = None
         _trellis_food_vol_units = None
         _trellis_vessel_diam_units = None
+        _trellis_metadata = {}
         if getattr(self.config, "ENABLE_TRELLIS", False):
             try:
                 from .trellis_gpu import run_trellis_for_job
@@ -2873,6 +2894,7 @@ class NutritionVideoPipeline:
                         trellis_mp4_s3_key = _mp4_key
                     _trellis_food_vol_units = _trellis_results[_stem].get("food_volume_units")
                     _trellis_vessel_diam_units = _trellis_results[_stem].get("vessel_diameter_units")
+                    _trellis_metadata = _trellis_results[_stem].get("mesh_metadata") or {}
                 logger.info("[%s] TRELLIS done — glb=%s mp4=%s food_vol_units=%s", job_id, trellis_glb_s3_key, trellis_mp4_s3_key, _trellis_food_vol_units)
             except Exception as _trellis_err:
                 logger.warning("[%s] TRELLIS generation failed (non-fatal): %s", job_id, _trellis_err)
@@ -2904,6 +2926,7 @@ class NutritionVideoPipeline:
             glb_s3_key=trellis_glb_s3_key,
             mp4_s3_key=trellis_mp4_s3_key,
             trellis_volume_ml=trellis_volume_ml,
+            trellis_metadata=_trellis_metadata,
         )
 
         verified_questionnaire = self._verify_questionnaire_items_with_gemini(
