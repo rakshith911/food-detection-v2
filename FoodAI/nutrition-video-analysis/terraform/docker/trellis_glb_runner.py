@@ -247,15 +247,7 @@ def main() -> int:
             approx_food_to_total_ratio = raw_food_to_total_ratio
             volume_candidate_valid = plate_subtracted_valid
             invalid_reason = None
-            if not plate_subtracted_valid and total_volume_units > 1e-6 and vessel_diameter_units > 1e-6 and approx_food_height_units > 1e-6:
-                # The cylindrical plate subtraction is often too aggressive for open plates/bowls.
-                # Fall back to the raw mesh volume rather than collapsing to zero.
-                candidate_method = "total_mesh_fallback"
-                food_volume_units = total_volume_units
-                approx_food_to_total_ratio = 1.0
-                volume_candidate_valid = True
-                invalid_reason = "plate_subtraction_unreliable_used_total_mesh_fallback"
-            elif not volume_candidate_valid:
+            if not volume_candidate_valid:
                 invalid_reason = (
                     "plate_subtraction_unreliable"
                     if raw_food_to_total_ratio is not None
