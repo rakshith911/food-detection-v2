@@ -6,6 +6,7 @@ One g6.2xlarge GPU instance, one task at a time; instance is stopped after
 each job to save cost.
 """
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -16,6 +17,18 @@ logger = logging.getLogger(__name__)
 
 _STOP_WAIT_S = 300   # 5 min wait after issuing stop
 _START_WAIT_S = 300  # 5 min wait before launching ECS task after start
+
+
+class _WarmupHandle:
+    def __init__(self, thread: threading.Thread, done: threading.Event, error: dict):
+        self.thread = thread
+        self.done = done
+        self.error = error
+
+    def wait(self) -> None:
+        self.thread.join()
+        if self.error.get("exc") is not None:
+            raise self.error["exc"]
 
 
 def _ec2(region: str):
@@ -67,6 +80,29 @@ def ensure_instance_running(instance_id: str, region: str, job_id: str) -> None:
         return
 
     raise RuntimeError(f"[{job_id}] GPU instance in unexpected state: {state}")
+
+
+def start_instance_warmup(instance_id: str, region: str, job_id: str) -> _WarmupHandle:
+    """Start GPU warm-up in the background so it overlaps with CPU-side processing."""
+    done = threading.Event()
+    error: dict = {}
+
+    def _runner():
+        try:
+            ensure_instance_running(instance_id, region, job_id)
+        except Exception as exc:
+            error["exc"] = exc
+        finally:
+            done.set()
+
+    thread = threading.Thread(
+        target=_runner,
+        name=f"trellis-warmup-{job_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
+    logger.info("[%s] Started async GPU warm-up for instance %s", job_id, instance_id)
+    return _WarmupHandle(thread=thread, done=done, error=error)
 
 
 def stop_instance(instance_id: str, region: str, job_id: str) -> None:
@@ -211,6 +247,7 @@ def run_trellis_for_job(
     config,
     job_id: str,
     local_output_dir: Path,
+    warmup_handle: Optional[_WarmupHandle] = None,
 ) -> dict:
     """
     Start GPU → upload images → submit ECS task → wait → download outputs → stop GPU.
@@ -229,7 +266,12 @@ def run_trellis_for_job(
     local_output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        ensure_instance_running(instance_id, region, job_id)
+        if warmup_handle is not None:
+            logger.info("[%s] Waiting for async GPU warm-up to finish", job_id)
+            warmup_handle.wait()
+            logger.info("[%s] Async GPU warm-up finished", job_id)
+        else:
+            ensure_instance_running(instance_id, region, job_id)
 
         # Upload input images to S3
         input_keys = [

@@ -2866,6 +2866,17 @@ class NutritionVideoPipeline:
         pil_image = Image.fromarray(img_rgb)
 
         logger.info("[%s] Image pipeline start for %s", job_id, image_path.name)
+        trellis_warmup_handle = None
+        if getattr(self.config, "ENABLE_TRELLIS", False):
+            try:
+                from .trellis_gpu import start_instance_warmup
+                trellis_warmup_handle = start_instance_warmup(
+                    self.config.TRELLIS_GPU_INSTANCE_ID,
+                    self.config.TRELLIS_AWS_REGION,
+                    job_id,
+                )
+            except Exception as warmup_err:
+                logger.warning("[%s] Could not start async TRELLIS GPU warm-up: %s", job_id, warmup_err)
         first_pass = self._gemini_first_pass_image(pil_image, job_id, user_context=user_context)
         visible_items = [
             {
@@ -2936,6 +2947,7 @@ class NutritionVideoPipeline:
                     config=self.config,
                     job_id=job_id,
                     local_output_dir=_trellis_out_dir,
+                    warmup_handle=trellis_warmup_handle,
                 )
                 _stem = image_path.stem
                 if _stem in _trellis_results:
