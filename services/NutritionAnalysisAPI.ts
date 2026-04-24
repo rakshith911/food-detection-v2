@@ -34,9 +34,10 @@ export interface NutritionItem {
 }
 
 export interface SegmentedImage {
-  frame: string;
+  name?: string;
+  frame?: string;
   url: string;
-  key: string;
+  key?: string;
 }
 
 export interface SegmentedImages {

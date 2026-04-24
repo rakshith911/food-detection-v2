@@ -501,6 +501,20 @@ def process_message(message: dict, pipeline=None):
                 "zoedepth_colored": f"{output_dir}/zoedepth_colored.png",
                 "rgb": f"{output_dir}/rgb.png",
             }
+            full_results = results.get("full_results", {}) if isinstance(results, dict) else {}
+            gemini_depth_assets = (
+                full_results.get("production_debug", {}).get("gemini_depth_assets")
+                or full_results.get("production_debug", {}).get("depth_outputs", {}).get("gemini_metric_depth")
+                or {}
+            )
+            if gemini_depth_assets.get("full_depth_path"):
+                image_assets["gemini_depth_full"] = gemini_depth_assets["full_depth_path"]
+            for ingredient_asset in gemini_depth_assets.get("ingredients") or []:
+                asset_path = ingredient_asset.get("path")
+                slug = ingredient_asset.get("slug") or ingredient_asset.get("name") or "ingredient"
+                if asset_path:
+                    image_assets[f"gemini_depth_ingredient_{slug}"] = asset_path
+
             uploaded_keys = []
             for asset_name, local_path in image_assets.items():
                 if os.path.exists(local_path):

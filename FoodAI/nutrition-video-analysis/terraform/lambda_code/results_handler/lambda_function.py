@@ -167,7 +167,7 @@ def lambda_handler(event, context):
                             Params={'Bucket': S3_RESULTS_BUCKET, 'Key': s3_key},
                             ExpiresIn=presigned_expires,
                         )
-                        overlay_urls.append({'name': name, 'url': url})
+                        overlay_urls.append({'name': name, 'url': url, 'key': s3_key})
                     except Exception:
                         pass
 

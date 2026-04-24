@@ -125,6 +125,7 @@ export default function MealDetailScreen() {
   const [refreshingOverlay, setRefreshingOverlay] = useState(false);
   const [mediaLoading, setMediaLoading] = useState(true);
   const [videoOverlayError, setVideoOverlayError] = useState(false);
+  const [selectedDepthIngredient, setSelectedDepthIngredient] = useState<string | null>(null);
   // Resolved image/video URI — always fetched fresh from S3 (presigned URL).
   // Initialised to the locally-stored URI so something renders immediately while
   // the presigned URL fetch is in-flight; S3 URL overrides once resolved.
@@ -174,6 +175,28 @@ export default function MealDetailScreen() {
   // Use freshly fetched URLs when available, fall back to stored ones.
   // Stored URLs have 30-day expiry so they remain valid for normal usage patterns.
   const effectiveSegmentedImages = refreshedSegmentedImages ?? item?.segmented_images ?? null;
+
+  const normalizeAssetName = useCallback((value?: string | null) => (
+    (value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+  ), []);
+
+  const geminiDepthAssets = useMemo(() => {
+    const overlays = effectiveSegmentedImages?.overlay_urls || [];
+    const full = overlays.find((asset: any) => asset?.name === 'gemini_depth_full')?.url || null;
+    const ingredients: Record<string, string> = {};
+    overlays.forEach((asset: any) => {
+      const name = asset?.name || '';
+      if (!name.startsWith('gemini_depth_ingredient_') || !asset?.url) return;
+      const slug = name.replace('gemini_depth_ingredient_', '');
+      ingredients[slug] = asset.url;
+    });
+    return { full, ingredients };
+  }, [effectiveSegmentedImages?.overlay_urls]);
+
+  const selectedDepthUri = useMemo(() => {
+    if (!selectedDepthIngredient) return geminiDepthAssets.full;
+    return geminiDepthAssets.ingredients[normalizeAssetName(selectedDepthIngredient)] || geminiDepthAssets.full;
+  }, [geminiDepthAssets, normalizeAssetName, selectedDepthIngredient]);
   
   // Reset overlay state and loader when item changes
   useEffect(() => {
@@ -181,6 +204,7 @@ export default function MealDetailScreen() {
     setRefreshedSegmentedImages(null);
     setMediaLoading(true);
     setVideoOverlayError(false);
+    setSelectedDepthIngredient(null);
     // Re-seed resolved URIs from the new item immediately so there's no blank frame
     setResolvedImageUri(item?.imageUri);
     setResolvedVideoUri(item?.videoUri);
@@ -576,11 +600,22 @@ export default function MealDetailScreen() {
 
         {table.rows.map((row) => {
           const isEditing = editingRowId === row.id;
+          const isSelectedDepthRow = selectedDepthIngredient && normalizeAssetName(selectedDepthIngredient) === normalizeAssetName(row.name);
+          const RowContainer = isEditing ? View : TouchableOpacity;
           return (
-            <View
+            <RowContainer
               key={row.id}
               ref={(ref) => { rowRefs.current[row.id] = ref; }}
-              style={styles.tableRow}
+              style={[styles.tableRow, isSelectedDepthRow && styles.tableRowSelected]}
+              activeOpacity={0.85}
+              onPress={() => {
+                if (!row.name.trim()) return;
+                const slug = normalizeAssetName(row.name);
+                if (geminiDepthAssets.ingredients[slug]) {
+                  setSelectedDepthIngredient(row.name);
+                  setFullImageUri(geminiDepthAssets.ingredients[slug]);
+                }
+              }}
             >
               <View style={[styles.tableCell, { flex: 2 }]} pointerEvents="box-none">
                 {isEditing ? (
@@ -696,7 +731,7 @@ export default function MealDetailScreen() {
                   />
                 </TouchableOpacity>
               </View>
-            </View>
+            </RowContainer>
           );
         })}
 
@@ -800,7 +835,8 @@ export default function MealDetailScreen() {
             const videoOverlayUrl = (!overlayLoadFailed && !videoOverlayError)
               ? effectiveSegmentedImages?.video_overlay_url ?? null
               : null;
-            const displayUri = overlayUri || resolvedImageUri || null;
+            const depthUri = !overlayLoadFailed ? selectedDepthUri : null;
+            const displayUri = depthUri || overlayUri || resolvedImageUri || null;
             const videoThumbnailUri = resolvedImageUri || item.imageUri || overlayUri || null;
             const showImageLoader = !isVideo && !!displayUri;
             // Use resolvedVideoUri directly — it is pre-initialised to item?.videoUri so
@@ -1020,7 +1056,15 @@ export default function MealDetailScreen() {
                 autoFocus
               />
             ) : (
-              <TouchableOpacity onPress={() => setEditingMealName(true)}>
+              <TouchableOpacity
+                onPress={() => {
+                  if (selectedDepthIngredient) {
+                    setSelectedDepthIngredient(null);
+                  } else {
+                    setEditingMealName(true);
+                  }
+                }}
+              >
                 <Text style={styles.mealName}>{toSentenceCase(mealName)}</Text>
               </TouchableOpacity>
             )}
@@ -1286,6 +1330,9 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#F3F4F6',
     alignItems: 'center',
+  },
+  tableRowSelected: {
+    backgroundColor: '#F5F9EA',
   },
   tableCell: {
     paddingHorizontal: 8,

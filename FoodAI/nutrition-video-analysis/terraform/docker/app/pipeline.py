@@ -19,6 +19,7 @@ import os
 import subprocess
 import boto3
 import tempfile
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,10 @@ class NutritionVideoPipeline:
         **_GEMINI_GEN_CONFIG,
         "max_output_tokens": 4096,
     }
+    _GEMINI_DEPTH_IMAGE_MODEL = os.environ.get(
+        "GEMINI_DEPTH_IMAGE_MODEL",
+        "gemini-3.1-flash-image-preview",
+    )
 
     @staticmethod
     def _get_s3_client():
@@ -927,6 +932,312 @@ class NutritionVideoPipeline:
             "parsed_output": self._json_safe(parsed_output),
             "metadata": self._json_safe(metadata or {}),
         })
+
+    @staticmethod
+    def _slugify_asset_name(value: str) -> str:
+        slug = re.sub(r"[^a-zA-Z0-9]+", "_", (value or "").strip().lower()).strip("_")
+        return slug or "ingredient"
+
+    def _parse_json_object_or_array(self, response_text: str, expected: str = "object"):
+        text = (response_text or "").strip()
+        if "```json" in text:
+            start = text.find("```json") + 7
+            end = text.find("```", start)
+            text = text[start:end].strip() if end >= 0 else text[start:].strip()
+        elif "```" in text:
+            start = text.find("```") + 3
+            end = text.find("```", start)
+            text = text[start:end].strip() if end >= 0 else text[start:].strip()
+
+        if expected == "array":
+            start = text.find("[")
+            end = text.rfind("]") + 1
+        else:
+            start = text.find("{")
+            end = text.rfind("}") + 1
+        if start < 0 or end <= start:
+            raise json.JSONDecodeError("No JSON payload found", text, 0)
+        return json.loads(text[start:end])
+
+    def _pil_to_inline_part(self, image: Image.Image, mime_type: str = "image/jpeg", quality: int = 90):
+        from google.genai import types
+
+        buf = io.BytesIO()
+        fmt = "PNG" if mime_type == "image/png" else "JPEG"
+        save_kwargs = {}
+        if fmt == "JPEG":
+            save_kwargs["quality"] = quality
+        image.convert("RGB").save(buf, format=fmt, **save_kwargs)
+        return types.Part(inline_data=types.Blob(mime_type=mime_type, data=buf.getvalue()))
+
+    def _gemini_generate_image(self, image_pil: Image.Image, prompt: str, job_id: str, stage: str) -> tuple[Image.Image, str]:
+        from google import genai as genai_new
+        from google.genai import types
+
+        client = genai_new.Client(api_key=self.config.GEMINI_API_KEY)
+        start_time = time.monotonic()
+        try:
+            response = client.models.generate_content(
+                model=self._GEMINI_DEPTH_IMAGE_MODEL,
+                contents=types.Content(parts=[
+                    self._pil_to_inline_part(image_pil),
+                    types.Part(text=prompt),
+                ]),
+                config=types.GenerateContentConfig(response_modalities=["IMAGE", "TEXT"]),
+            )
+        except Exception as exc:
+            latency_s = time.monotonic() - start_time
+            is_rate_limit = "429" in str(exc) or "rate" in str(exc).lower() or "quota" in str(exc).lower()
+            logger.warning(
+                "[%s] Gemini image generation failed stage=%s model=%s latency=%.2fs rate_limited=%s error=%s",
+                job_id,
+                stage,
+                self._GEMINI_DEPTH_IMAGE_MODEL,
+                latency_s,
+                is_rate_limit,
+                exc,
+            )
+            raise
+        latency_s = time.monotonic() - start_time
+
+        response_text_parts = []
+        image_bytes = None
+        image_mime = "image/png"
+        for part in response.candidates[0].content.parts:
+            if getattr(part, "inline_data", None) and part.inline_data and part.inline_data.data:
+                image_bytes = part.inline_data.data
+                image_mime = part.inline_data.mime_type or image_mime
+            elif getattr(part, "text", None):
+                response_text_parts.append(part.text)
+        if not image_bytes:
+            logger.warning(
+                "[%s] Gemini image generation returned no image stage=%s model=%s latency=%.2fs",
+                job_id,
+                stage,
+                self._GEMINI_DEPTH_IMAGE_MODEL,
+                latency_s,
+            )
+            raise RuntimeError(f"Gemini depth image generation returned no image for {stage}")
+
+        logger.info(
+            "[%s] Gemini image generation complete stage=%s model=%s latency=%.2fs mime=%s bytes=%d",
+            job_id,
+            stage,
+            self._GEMINI_DEPTH_IMAGE_MODEL,
+            latency_s,
+            image_mime,
+            len(image_bytes),
+        )
+        self._record_gemini_output(
+            stage=stage,
+            job_id=job_id,
+            model_name=self._GEMINI_DEPTH_IMAGE_MODEL,
+            prompt=prompt,
+            response_text="\n".join(response_text_parts),
+            metadata={"image_mime": image_mime, "image_bytes": len(image_bytes), "latency_s": round(latency_s, 3)},
+        )
+        return Image.open(io.BytesIO(image_bytes)).convert("RGB"), image_mime
+
+    def _generate_gemini_metric_depth_assets(
+        self,
+        image_pil: Image.Image,
+        visible_items: list[dict],
+        first_pass: dict,
+        job_id: str,
+    ) -> dict:
+        output_dir = self.config.OUTPUT_DIR / f"production_{job_id}"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        labels = [item["name"] for item in visible_items if item.get("name")]
+        total_start = time.monotonic()
+        logger.info(
+            "[%s] Gemini metric-depth asset generation start labels=%d model=%s",
+            job_id,
+            len(labels),
+            self._GEMINI_DEPTH_IMAGE_MODEL,
+        )
+        full_prompt = (
+            "Generate a food-only colored metric depth map for this dish.\n\n"
+            "Output requirements:\n"
+            "- Same aspect ratio and framing as the input image.\n"
+            "- Show ONLY edible food; table, background, plate, tray, utensils, and container must be pure black.\n"
+            "- Use one fixed global depth gradient across the entire dish: RED = highest/top/closest food surface, "
+            "YELLOW/GREEN = mid height, BLUE = lowest/base/farthest food surface.\n"
+            "- Keep the gradient smooth and physically plausible, with crisp food silhouettes.\n"
+            "- No text, no labels, no legend, no arrows, no UI, no annotations.\n"
+            f"- Visible ingredient labels for guidance: {json.dumps(labels)}.\n"
+        )
+        full_image, full_mime = self._gemini_generate_image(
+            image_pil=image_pil,
+            prompt=full_prompt,
+            job_id=job_id,
+            stage="gemini_metric_depth_full_image",
+        )
+        full_path = output_dir / "gemini_depth_full.png"
+        full_image.save(full_path)
+
+        ingredient_assets = []
+        for item in visible_items:
+            label = item.get("name")
+            if not label:
+                continue
+            slug = self._slugify_asset_name(label)
+            prompt = (
+                f"Generate an isolated food-only colored metric depth map for ONLY this ingredient: {label}.\n\n"
+                "Use the same camera framing and aspect ratio as the input image. Keep this ingredient in its original location. "
+                "Everything else, including other ingredients, plate/tray/container/table/background, must be pure black.\n"
+                "Use the same fixed global height gradient: RED = highest/top/closest surface, YELLOW/GREEN = mid height, "
+                "BLUE = lowest/base/farthest surface. No text, no labels, no legend, no annotations."
+            )
+            try:
+                time.sleep(2)
+                ingredient_image, ingredient_mime = self._gemini_generate_image(
+                    image_pil=image_pil,
+                    prompt=prompt,
+                    job_id=job_id,
+                    stage="gemini_metric_depth_ingredient_image",
+                )
+                path = output_dir / f"gemini_depth_{slug}.png"
+                ingredient_image.save(path)
+                ingredient_assets.append({
+                    "name": label,
+                    "slug": slug,
+                    "path": str(path),
+                    "mime_type": ingredient_mime,
+                })
+            except Exception as exc:
+                is_rate_limit = "429" in str(exc) or "rate" in str(exc).lower() or "quota" in str(exc).lower()
+                logger.warning(
+                    "[%s] Gemini ingredient depth image failed ingredient='%s' rate_limited=%s error=%s",
+                    job_id,
+                    label,
+                    is_rate_limit,
+                    exc,
+                )
+
+        latency_s = time.monotonic() - total_start
+        logger.info(
+            "[%s] Gemini metric-depth asset generation complete latency=%.2fs full_depth=1 ingredient_depths=%d/%d",
+            job_id,
+            latency_s,
+            len(ingredient_assets),
+            len(labels),
+        )
+        return {
+            "method": "gemini_metric_depth",
+            "model": self._GEMINI_DEPTH_IMAGE_MODEL,
+            "full_depth_path": str(full_path),
+            "full_depth_mime_type": full_mime,
+            "latency_s": round(latency_s, 3),
+            "color_scale": {
+                "top_highest": "red",
+                "middle": "yellow_green",
+                "bottom_lowest": "blue",
+                "background": "black",
+            },
+            "ingredients": ingredient_assets,
+        }
+
+    def _estimate_gemini_metric_depth_volumes(
+        self,
+        image_rgb: np.ndarray,
+        full_depth_image: Image.Image,
+        visible_items: list[dict],
+        first_pass: dict,
+        depth_assets: dict,
+        job_id: str,
+        user_context: dict = None,
+    ) -> dict:
+        import google.generativeai as genai
+        genai.configure(api_key=self.config.GEMINI_API_KEY)
+
+        labels = [item["name"] for item in visible_items if item.get("name")]
+        vessel = first_pass.get("plate_or_bowl") or {}
+        refs = first_pass.get("reference_objects") or []
+        scale_context = {
+            "plate_or_bowl": vessel,
+            "reference_objects": refs,
+            "notes": first_pass.get("notes") or "",
+        }
+        prompt = (
+            "You are a food volume estimation system. You are given the original RGB food photo and a generated "
+            "food-only metric depth map for the same image. The depth map uses a fixed global scale: red is the "
+            "highest/top food surface, yellow/green is mid height, blue is the lowest/base food surface, and black is non-food.\n\n"
+            f"Dish: {first_pass.get('meal_name') or 'unknown'}\n"
+            f"Scale/context hints: {json.dumps(scale_context, ensure_ascii=True)}\n"
+            f"Ingredient names to use exactly: {json.dumps(labels, ensure_ascii=True)}\n\n"
+            "First estimate total visible dish volume. Then allocate that total across the visible ingredients using the RGB image "
+            "and the depth map together. Estimate only visible edible food; do not add hidden or extra items here.\n\n"
+            "Return ONLY valid JSON with this exact shape:\n"
+            "{"
+            "\"total_volume_ml\": number, "
+            "\"total_confidence\": number, "
+            "\"assumptions\": str, "
+            "\"ingredients\": ["
+            "{\"name\": str, \"volume_ml\": number, \"height_cm\": number|null, \"confidence\": number, \"reason\": str}"
+            "]"
+            "}\n"
+            "Rules: every ingredient name listed above must appear exactly once; all volumes must be > 0; confidence is 0..1."
+        )
+        prompt += self._build_user_context_suffix(user_context)
+
+        gm = genai.GenerativeModel(self._flash_model_name(), generation_config=self._GEMINI_GEN_CONFIG)
+        start_time = time.monotonic()
+        try:
+            response = gm.generate_content([prompt, Image.fromarray(image_rgb), full_depth_image], request_options={"timeout": 120})
+        except Exception as exc:
+            latency_s = time.monotonic() - start_time
+            is_rate_limit = "429" in str(exc) or "rate" in str(exc).lower() or "quota" in str(exc).lower()
+            logger.warning(
+                "[%s] Gemini metric-depth volume estimation failed model=%s latency=%.2fs rate_limited=%s error=%s",
+                job_id,
+                self._flash_model_name(),
+                latency_s,
+                is_rate_limit,
+                exc,
+            )
+            raise
+        latency_s = time.monotonic() - start_time
+        response_text = response.text or ""
+        parsed = self._parse_json_object_or_array(response_text, expected="object")
+        logger.info(
+            "[%s] Gemini metric-depth volume estimation complete model=%s latency=%.2fs total_volume_ml=%.1f ingredients=%d",
+            job_id,
+            self._flash_model_name(),
+            latency_s,
+            float(parsed.get("total_volume_ml") or 0.0),
+            len(parsed.get("ingredients") or []),
+        )
+        self._record_gemini_output(
+            stage="gemini_metric_depth_volume_estimation",
+            job_id=job_id,
+            model_name=self._flash_model_name(),
+            prompt=prompt,
+            response_text=response_text,
+            parsed_output=parsed,
+            metadata={"visible_ingredients": labels, "depth_assets": depth_assets, "latency_s": round(latency_s, 3)},
+        )
+
+        volume_map = {}
+        for entry in parsed.get("ingredients") or []:
+            name = (entry.get("name") or "").strip().lower()
+            if not name:
+                continue
+            volume_map[name] = {
+                "volume_ml": float(entry.get("volume_ml") or 0.0),
+                "confidence": float(entry.get("confidence") or 0.0),
+                "height_cm": entry.get("height_cm"),
+                "reason": entry.get("reason"),
+                "method": "gemini_metric_depth",
+            }
+
+        return {
+            "total_volume_ml": float(parsed.get("total_volume_ml") or 0.0),
+            "total_confidence": float(parsed.get("total_confidence") or 0.0),
+            "assumptions": parsed.get("assumptions") or "",
+            "volume_map": volume_map,
+            "raw_response": parsed,
+        }
 
     @staticmethod
     def _safe_average(values: list[float], default: float = 0.0) -> float:
@@ -2768,6 +3079,175 @@ class NutritionVideoPipeline:
                 logger.warning("[%s] Fallback ingredient detection also failed: %s", job_id, _retry_err)
             if not visible_items:
                 raise RuntimeError("Production image pipeline found no visible ingredients")
+
+        try:
+            depth_assets = self._generate_gemini_metric_depth_assets(
+                image_pil=pil_image,
+                visible_items=visible_items,
+                first_pass=first_pass,
+                job_id=job_id,
+            )
+            full_depth_image = Image.open(depth_assets["full_depth_path"]).convert("RGB")
+            volume_estimate = self._estimate_gemini_metric_depth_volumes(
+                image_rgb=img_rgb,
+                full_depth_image=full_depth_image,
+                visible_items=visible_items,
+                first_pass=first_pass,
+                depth_assets=depth_assets,
+                job_id=job_id,
+                user_context=user_context,
+            )
+            volume_map = volume_estimate.get("volume_map") or {}
+
+            verified_questionnaire = self._verify_questionnaire_items_with_gemini(
+                {
+                    "main_food_item": first_pass.get("meal_name"),
+                    "visible_ingredients": [{"name": item["name"]} for item in visible_items],
+                    "ingredient_breakdown": [item["name"] for item in visible_items],
+                    "additional_notes": first_pass.get("notes") or "",
+                },
+                user_context or {},
+                job_id,
+            )
+            self.last_questionnaire_verification = verified_questionnaire
+            verified_questionnaire = [
+                item for item in verified_questionnaire
+                if item.get("verdict") == "include"
+                and float(item.get("verification_confidence") or item.get("confidence") or 0.0) >= 0.6
+                and (
+                    (item.get("type") == "hidden" and not item.get("already_visible"))
+                    or item.get("type") == "extra"
+                )
+            ]
+            questionnaire_nutrition = self._estimate_questionnaire_item_nutrition(verified_questionnaire, job_id)
+            inferred_nonvisible_items = self._infer_hidden_and_extra_items_with_gemini(
+                first_pass=first_pass,
+                visible_items=visible_items,
+                volume_map=volume_map,
+                image_pil=pil_image,
+                calibrated_depth_image=full_depth_image,
+                job_id=job_id,
+                user_context=user_context,
+            )
+
+            logger.info("[%s] Starting Gemini metric-depth nutrition analysis phase", job_id)
+            nutrition_results = self._analyze_nutrition_from_production(
+                first_pass=first_pass,
+                visible_items=visible_items,
+                volume_map=volume_map,
+                inferred_items=inferred_nonvisible_items,
+                questionnaire_items=questionnaire_nutrition,
+                image_rgb=img_rgb,
+                sam3_results={},
+                job_id=job_id,
+            )
+            logger.info("[%s] Gemini metric-depth nutrition analysis phase complete", job_id)
+
+            calibration = {
+                "method": "gemini_metric_depth",
+                "calibrated": True,
+                "reference_name": None,
+                "confidence": volume_estimate.get("total_confidence"),
+            }
+            overall_confidence = self._calculate_overall_confidence(
+                first_pass=first_pass,
+                visible_items=visible_items,
+                sam3_results={},
+                calibration=calibration,
+                volume_map=volume_map,
+                questionnaire_verification=self.last_questionnaire_verification,
+                nutrition_results=nutrition_results,
+            )
+            debug_assets = {
+                "output_dir": str(self.config.OUTPUT_DIR / f"production_{job_id}"),
+                "rgb_path": str(self.config.OUTPUT_DIR / f"production_{job_id}" / "rgb.png"),
+                "gemini_depth_assets": depth_assets,
+                "masks": {},
+            }
+            Image.fromarray(img_rgb).save(Path(debug_assets["rgb_path"]))
+            analysis_report = self._build_export_report(
+                job_id=job_id,
+                media_name=image_path.name,
+                media_type="image",
+                first_pass=first_pass,
+                nutrition_results=nutrition_results,
+                overall_confidence=overall_confidence,
+                debug_assets={
+                    **debug_assets,
+                    "calibrated_depth_visual_path": depth_assets.get("full_depth_path"),
+                    "dish_masked_depth_path": depth_assets.get("full_depth_path"),
+                },
+                calibration=calibration,
+            )
+
+            return {
+                "job_id": job_id,
+                "meal_name": first_pass.get("meal_name"),
+                "media_name": image_path.name,
+                "media_type": "image",
+                "timestamp": datetime.utcnow().isoformat(),
+                "num_frames_processed": 1,
+                "calibration": calibration,
+                "tracking": {
+                    "objects": {
+                        f"ID{idx + 1}_{item['name']}": {
+                            "label": item["name"],
+                            "role_tag": item["role_tag"],
+                            "confidence": item["confidence"],
+                            "statistics": {
+                                "max_volume_ml": float((volume_map.get(item["name"].lower()) or {}).get("volume_ml") or 0.0),
+                            },
+                            "mask_bbox": None,
+                        }
+                        for idx, item in enumerate(visible_items)
+                    },
+                    "total_objects": len(visible_items),
+                },
+                "nutrition": nutrition_results,
+                "analysis_report": analysis_report,
+                "questionnaire_verification": self.last_questionnaire_verification,
+                "pipeline_runtime": {
+                    "image_pipeline": "gemini_metric_depth",
+                    "fallback_pipeline": "sam3_zoedepth",
+                    "gemini_depth_image_model": self._GEMINI_DEPTH_IMAGE_MODEL,
+                    "device": self.device,
+                },
+                "production_debug": {
+                    "gemini_pass_1": first_pass,
+                    "meal_name": first_pass.get("meal_name"),
+                    "meal_confidence": float(first_pass.get("meal_confidence") or 0.0),
+                    "cuisine_type": first_pass.get("cuisine_type"),
+                    "cuisine_confidence": float(first_pass.get("cuisine_confidence") or 0.0),
+                    "cooking_method": first_pass.get("cooking_method"),
+                    "cooking_method_confidence": float(first_pass.get("cooking_method_confidence") or 0.0),
+                    "visible_items": visible_items,
+                    "sam3": {},
+                    "depth_outputs": {
+                        "assets": debug_assets,
+                        "gemini_metric_depth": depth_assets,
+                    },
+                    "gemini_depth_assets": depth_assets,
+                    "gemini_pass_2_volume": volume_map,
+                    "gemini_metric_depth_volume": volume_estimate,
+                    "gemini_pass_3_inferred_items": inferred_nonvisible_items,
+                    "questionnaire_items": questionnaire_nutrition,
+                    "overall_confidence": overall_confidence,
+                    "gemini_outputs": self.gemini_outputs,
+                    "runtime": {
+                        "image_pipeline": "gemini_metric_depth",
+                        "fallback_pipeline": "sam3_zoedepth",
+                        "gemini_depth_image_model": self._GEMINI_DEPTH_IMAGE_MODEL,
+                        "device": self.device,
+                    },
+                },
+                "status": "completed",
+            }
+        except Exception as gemini_depth_err:
+            logger.exception(
+                "[%s] Gemini metric-depth pipeline failed; falling back to SAM3/ZoeDepth: %s",
+                job_id,
+                gemini_depth_err,
+            )
 
         segmentation_prompts = [item["name"] for item in visible_items]
         vessel = first_pass.get("plate_or_bowl")
