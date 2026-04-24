@@ -23,8 +23,6 @@ import time
 
 logger = logging.getLogger(__name__)
 
-from app.production_models import run_sam3_image, run_zoedepth
-
 # Initialize S3 client for uploading segmented images
 s3_client = None
 S3_RESULTS_BUCKET = os.environ.get('S3_RESULTS_BUCKET')
@@ -319,10 +317,7 @@ class NutritionVideoPipeline:
         if getattr(self.config, "USE_PRODUCTION_IMAGE_PIPELINE", True):
             logger.info(
                 f"[{job_id}] Attempting production image pipeline "
-                f"(Gemini -> SAM3 -> ZoeDepth -> Gemini volume) "
-                f"using SAM3={self.config.SAM3_MODEL_DIR} "
-                f"ZoeDepth={self.config.ZOEDEPTH_CHECKPOINT} "
-                f"MiDaS={self.config.MIDAS_REPO_DIR}"
+                f"(Gemini labels -> Gemini metric depth -> Gemini volume -> RAG)"
             )
             return self._run_production_image_pipeline(image_path, job_id, user_context=user_context)
 
@@ -335,16 +330,11 @@ class NutritionVideoPipeline:
           2. Pick the sharpest frame from the middle-third as the representative frame.
           3. Save it as a temp JPEG and run _run_production_image_pipeline on it —
              the image pipeline is completely untouched.
-          4. Extract detected food names from the result and run SAM3 on ~15 evenly-spaced
-             keyframes across the video.
-          5. Propagate keyframe masks to every frame (nearest-keyframe assignment — the
-             meal is static so this is accurate).
-          6. Render the full SAM3-segmented overlay video and upload to S3.
-          7. Return the image-pipeline result structure with media_type="video".
+          4. Return the image-pipeline result structure with media_type="video".
         """
         import tempfile
 
-        logger.info(f"[{job_id}] Starting video processing (SAM3 pipeline): {video_path.name}")
+        logger.info(f"[{job_id}] Starting video processing (Gemini metric-depth representative-frame pipeline): {video_path.name}")
 
         # Reset per-job state
         self.florence_detections = []
@@ -382,68 +372,12 @@ class NutritionVideoPipeline:
                 except Exception:
                     pass
 
-            # ── Step 4: Run SAM3 on keyframes for segmented video ─────────────
-            # Extract food labels from the image pipeline result
-            visible_items = (
-                image_result.get("production_debug", {}).get("visible_items") or []
-            )
-            food_labels = [item["name"] for item in visible_items if item.get("name")]
-            vessel = image_result.get("production_debug", {}).get("gemini_pass_1", {}).get("plate_or_bowl")
-            segmentation_prompts = list(dict.fromkeys(
-                food_labels
-                + ([vessel["name"]] if vessel and vessel.get("name") else [])
-            ))
-
-            sam3_per_keyframe: Dict[int, Dict[str, Any]] = {}
-            if segmentation_prompts:
-                n_total = len(all_frames)
-                # ~15 keyframes evenly spaced; always include the representative frame
-                n_keyframes = min(15, n_total)
-                step = max(1, n_total // n_keyframes)
-                keyframe_indices = list(range(0, n_total, step))
-                if rep_idx not in keyframe_indices:
-                    keyframe_indices.append(rep_idx)
-                keyframe_indices = sorted(set(keyframe_indices))
-
-                sam3_model, sam3_processor = self.models.sam3
-                from app.production_models import run_sam3_image
-                for kf_idx in keyframe_indices:
-                    kf_pil = Image.fromarray(all_frames[kf_idx])
-                    masks = run_sam3_image(
-                        sam3_model, sam3_processor,
-                        kf_pil, segmentation_prompts,
-                        device=self.device,
-                    )
-                    sam3_per_keyframe[kf_idx] = masks
-                    logger.info(
-                        f"[{job_id}] SAM3 keyframe {kf_idx}: "
-                        + ", ".join(f"{p}={'ok' if (masks.get(p) or {}).get('mask') is not None else 'no-mask'}"
-                                    for p in segmentation_prompts)
-                    )
-            else:
-                logger.warning(f"[{job_id}] No segmentation prompts — skipping SAM3 keyframes")
-
-            # ── Step 5: Generate segmented overlay video ───────────────────────
-            try:
-                self._generate_segmented_video_from_sam3(
-                    video_path=video_path,
-                    all_frames=all_frames,
-                    sam3_per_keyframe=sam3_per_keyframe,
-                    segmentation_prompts=segmentation_prompts,
-                    fps=fps,
-                    video_rotation=video_rotation,
-                    job_id=job_id,
-                )
-            except Exception as e:
-                logger.warning(f"[{job_id}] Segmented video generation failed (non-fatal): {e}", exc_info=True)
-
-            # ── Step 6: Return result (image pipeline structure + video metadata) ─
+            # ── Step 4: Return result (image pipeline structure + video metadata) ─
             image_result["media_type"] = "video"
             image_result["media_name"] = video_path.name
             image_result["num_frames_processed"] = len(all_frames)
-            image_result["pipeline_runtime"]["video_pipeline"] = "sam3_production"
+            image_result["pipeline_runtime"]["video_pipeline"] = "gemini_metric_depth_representative_frame"
             image_result["pipeline_runtime"]["representative_frame_idx"] = rep_idx
-            image_result["pipeline_runtime"]["num_keyframes_segmented"] = len(sam3_per_keyframe)
 
             logger.info(f"[{job_id}] ✓ Video processing completed successfully")
             return image_result
@@ -452,7 +386,7 @@ class NutritionVideoPipeline:
             logger.error(f"[{job_id}] Video pipeline failed: {e}", exc_info=True)
             raise
 
-    # ── Video helpers (SAM3 pipeline) ─────────────────────────────────────────
+    # ── Video helpers ─────────────────────────────────────────────────────────
 
     def _load_all_video_frames(
         self, video_path: Path, job_id: str
@@ -584,154 +518,6 @@ class NutritionVideoPipeline:
                 best_score = score
                 best_idx = i
         return best_idx
-
-    def _generate_segmented_video_from_sam3(
-        self,
-        video_path: Path,
-        all_frames: List[np.ndarray],
-        sam3_per_keyframe: Dict[int, Dict[str, Any]],
-        segmentation_prompts: List[str],
-        fps: float,
-        video_rotation: int,
-        job_id: str,
-    ) -> None:
-        """
-        Render a segmented overlay video using pre-computed SAM3 masks.
-
-        For each frame in all_frames the mask from the nearest keyframe is used
-        (nearest-keyframe propagation).  The meal is static so this is accurate
-        and fast.  Output is H.264 MP4, physically rotated via ffmpeg to match
-        the original video orientation, and uploaded to S3.
-        """
-        import cv2 as _cv2
-
-        if not sam3_per_keyframe or not all_frames:
-            logger.info(f"[{job_id}] No SAM3 keyframe data — skipping segmented video")
-            return
-
-        keyframe_indices = sorted(sam3_per_keyframe.keys())
-
-        _PALETTE_BGR = [
-            (0, 200, 255),   # yellow
-            (0, 255, 100),   # green
-            (255,  80,  80), # blue
-            ( 80,  80, 255), # red
-            (255,   0, 200), # magenta
-            (  0, 220, 180), # lime
-            (200,   0, 255), # purple
-            (  0, 180, 255), # orange
-        ]
-        label_colors: Dict[str, tuple] = {
-            prompt: _PALETTE_BGR[i % len(_PALETTE_BGR)]
-            for i, prompt in enumerate(segmentation_prompts)
-        }
-
-        h, w = all_frames[0].shape[:2]
-        overlay_dir = self.config.OUTPUT_DIR / job_id / "masks_overlay"
-        overlay_dir.mkdir(parents=True, exist_ok=True)
-        out_video_path = overlay_dir / "segmented_overlay_video.mp4"
-
-        render_fps = min(fps, 30.0)
-        fourcc = _cv2.VideoWriter_fourcc(*'mp4v')
-        writer = _cv2.VideoWriter(str(out_video_path), fourcc, render_fps, (w, h))
-        if not writer.isOpened():
-            logger.warning(f"[{job_id}] Could not open VideoWriter: {out_video_path}")
-            return
-
-        font = _cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.55
-        font_thickness = 1
-
-        def _nearest_keyframe(frame_idx: int) -> int:
-            return min(keyframe_indices, key=lambda k: abs(k - frame_idx))
-
-        for frame_idx, frame_rgb in enumerate(all_frames):
-            frame_bgr = _cv2.cvtColor(frame_rgb, _cv2.COLOR_RGB2BGR)
-            overlay = frame_bgr.copy()
-
-            kf = _nearest_keyframe(frame_idx)
-            masks_for_frame = sam3_per_keyframe.get(kf, {})
-
-            for prompt in segmentation_prompts:
-                entry = masks_for_frame.get(prompt) or {}
-                mask = entry.get("mask")
-                if mask is None:
-                    continue
-                # Resize mask to frame dimensions if needed
-                if mask.shape != (h, w):
-                    mask = _cv2.resize(
-                        mask.astype(np.uint8), (w, h),
-                        interpolation=_cv2.INTER_NEAREST,
-                    ).astype(bool)
-
-                color = label_colors.get(prompt, (128, 128, 128))
-                color_layer = np.zeros_like(frame_bgr, dtype=np.uint8)
-                color_layer[:] = color
-                blended = _cv2.addWeighted(overlay, 0.25, color_layer, 0.75, 0)
-                overlay[mask] = blended[mask]
-
-                contours, _ = _cv2.findContours(
-                    mask.astype(np.uint8), _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE
-                )
-                _cv2.drawContours(overlay, contours, -1, color, 2)
-
-                ys, xs = np.where(mask)
-                if len(xs) > 0:
-                    cx, cy = int(np.mean(xs)), int(np.mean(ys))
-                    (tw, th), _ = _cv2.getTextSize(prompt, font, font_scale, font_thickness)
-                    pad = 4
-                    px1 = max(0, cx - tw // 2 - pad)
-                    py1 = max(0, cy - th // 2 - pad)
-                    px2 = min(w, cx + tw // 2 + pad)
-                    py2 = min(h, cy + th // 2 + pad)
-                    _cv2.rectangle(overlay, (px1, py1), (px2, py2), (255, 255, 255), -1)
-                    _cv2.putText(overlay, prompt, (px1 + pad, py2 - pad),
-                                 font, font_scale, (0, 0, 0), font_thickness, _cv2.LINE_AA)
-
-            writer.write(overlay)
-
-        writer.release()
-        logger.info(f"[{job_id}] Wrote SAM3 segmented overlay video ({len(all_frames)} frames): {out_video_path}")
-
-        # Re-encode to H.264 with physical rotation correction
-        _tmp = out_video_path.with_suffix('.raw.mp4')
-        try:
-            out_video_path.rename(_tmp)
-            _vf = []
-            if video_rotation == 90:
-                _vf = ['-vf', 'transpose=2']
-            elif video_rotation in (270, -90):
-                _vf = ['-vf', 'transpose=1']
-            elif video_rotation == 180:
-                _vf = ['-vf', 'transpose=2,transpose=2']
-            subprocess.run(
-                ['ffmpeg', '-y', '-i', str(_tmp),
-                 *_vf,
-                 '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
-                 str(out_video_path)],
-                check=True, capture_output=True,
-            )
-            _tmp.unlink()
-            logger.info(f"[{job_id}] Re-encoded overlay video to H.264 (rotation={video_rotation}°)")
-        except Exception as enc_err:
-            logger.warning(f"[{job_id}] FFmpeg H.264 re-encode failed: {enc_err} — using mp4v")
-            if _tmp.exists():
-                _tmp.rename(out_video_path)
-
-        # Upload to S3
-        if S3_RESULTS_BUCKET and UPLOAD_SEGMENTED_IMAGES and out_video_path.exists():
-            try:
-                global s3_client
-                if s3_client is None:
-                    s3_client = boto3.client('s3')
-                s3_key = f"segmented_images/{job_id}/segmented_overlay_video.mp4"
-                s3_client.upload_file(
-                    str(out_video_path), S3_RESULTS_BUCKET, s3_key,
-                    ExtraArgs={'ContentType': 'video/mp4'},
-                )
-                logger.info(f"[{job_id}] Uploaded SAM3 segmented video → s3://{S3_RESULTS_BUCKET}/{s3_key}")
-            except Exception as e:
-                logger.warning(f"[{job_id}] Failed to upload segmented video: {e}")
 
     def _gemini_first_pass_image(self, image_pil, job_id: str, user_context: dict = None) -> dict:
         try:
@@ -1084,8 +870,10 @@ class NutritionVideoPipeline:
             slug = self._slugify_asset_name(label)
             prompt = (
                 f"Generate an isolated food-only colored metric depth map for ONLY this ingredient: {label}.\n\n"
-                "Use the same camera framing and aspect ratio as the input image. Keep this ingredient in its original location. "
-                "Everything else, including other ingredients, plate/tray/container/table/background, must be pure black.\n"
+                "Use the same camera framing and aspect ratio as the input image. Keep this ingredient in its original location.\n"
+                "CRITICAL: The output must contain ONLY pixels belonging to this ingredient. Do not show the plate, tray, "
+                "parchment, container, table, shadows, other ingredients, dish outline, ghost silhouettes, or context shapes.\n"
+                "Every pixel that is not this exact ingredient must be pure black (#000000).\n"
                 "Use the same fixed global height gradient: RED = highest/top/closest surface, YELLOW/GREEN = mid height, "
                 "BLUE = lowest/base/farthest surface. No text, no labels, no legend, no annotations."
             )
@@ -1920,7 +1708,6 @@ class NutritionVideoPipeline:
             "variant_volume_ml": self._round_optional(variant_total_volume, 1) if variant_items else None,
             "variant_contribution_kcal": self._round_optional(variant_total_kcal, 1) if variant_items else None,
             "variant_confidence": round(variant_confidence, 4) if variant_items else None,
-            "sam3_segmentation": debug_assets.get("sam3_segmentation_path"),
             "depth_map": debug_assets.get("calibrated_depth_visual_path") or debug_assets.get("raw_depth_visual_path"),
             "masked_depth_map": debug_assets.get("dish_masked_depth_path"),
         }
@@ -1972,11 +1759,9 @@ class NutritionVideoPipeline:
                 "weighted_components": overall_confidence.get("weighted_components") or {},
             },
             "assets": {
-                "sam3_segmentation": debug_assets.get("sam3_segmentation_path"),
                 "depth_map": debug_assets.get("calibrated_depth_visual_path") or debug_assets.get("raw_depth_visual_path"),
                 "masked_depth_map": debug_assets.get("dish_masked_depth_path"),
                 "rgb": debug_assets.get("rgb_path"),
-                "zoedepth_colored": debug_assets.get("zoedepth_colored_path"),
             },
             "context": {
                 "visible_ingredients": first_pass.get("visible_ingredients") or [],
@@ -2008,7 +1793,7 @@ class NutritionVideoPipeline:
         self,
         first_pass: dict,
         visible_items: list[dict],
-        sam3_results: dict,
+        segmentation_results: dict,
         calibration: dict,
         volume_map: dict,
         questionnaire_verification: list[dict],
@@ -2030,8 +1815,8 @@ class NutritionVideoPipeline:
 
         segmentation_values = []
         for item in visible_items:
-            sam_entry = sam3_results.get(item["name"]) or {}
-            score = sam_entry.get("score")
+            seg_entry = segmentation_results.get(item["name"]) or {}
+            score = seg_entry.get("score")
             if score is not None:
                 segmentation_values.append(float(score))
         segmentation_confidence = self._safe_average(segmentation_values, default=0.0)
@@ -2147,86 +1932,6 @@ class NutritionVideoPipeline:
         )
         return resized.astype(bool)
 
-    def _save_sam3_segmentation_overlay(
-        self,
-        image_rgb: np.ndarray,
-        sam3_results: dict,
-        out_path: Path,
-    ) -> None:
-        import cv2
-
-        palette = [
-            (255, 59, 48), (255, 149, 0), (255, 204, 0), (52, 199, 89),
-            (48, 176, 199), (0, 122, 255), (88, 86, 214), (255, 45, 85),
-            (162, 132, 194), (90, 200, 250), (255, 230, 167), (167, 235, 167),
-        ]
-
-        overlay = image_rgb.copy().astype(np.float32) / 255.0
-        label_info = []
-        h, w = image_rgb.shape[:2]
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.5
-        thickness = 1
-        pad = 4
-
-        for idx, (name, data) in enumerate(sam3_results.items()):
-            mask = self._resize_mask_to_shape(data.get("mask"), image_rgb.shape[:2])
-            if mask is None or mask.sum() == 0:
-                continue
-
-            color_rgb = np.array(palette[idx % len(palette)], dtype=np.float32) / 255.0
-            for channel in range(3):
-                overlay[:, :, channel] = np.where(
-                    mask,
-                    overlay[:, :, channel] * 0.35 + color_rgb[channel] * 0.65,
-                    overlay[:, :, channel],
-                )
-
-            mask_uint8 = mask.astype(np.uint8)
-            contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if contours:
-                contour_color_bgr = (
-                    int(palette[idx % len(palette)][2]),
-                    int(palette[idx % len(palette)][1]),
-                    int(palette[idx % len(palette)][0]),
-                )
-                temp_bgr = cv2.cvtColor((np.clip(overlay, 0, 1) * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
-                cv2.drawContours(temp_bgr, contours, -1, contour_color_bgr, 2)
-                overlay = cv2.cvtColor(temp_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-
-            ys, xs = np.where(mask)
-            if len(xs) == 0 or len(ys) == 0:
-                continue
-            cx, cy = int(np.mean(xs)), int(np.mean(ys))
-            display_label = name[:40]
-            (tw, th_text), baseline = cv2.getTextSize(display_label, font, font_scale, thickness)
-            tx = max(0, min(cx - tw // 2, w - tw - pad * 2))
-            ty = max(th_text + pad, min(cy + th_text // 2, h - baseline - pad))
-            label_info.append((display_label, tx, ty, tw, th_text, baseline))
-
-        result_bgr = cv2.cvtColor((np.clip(overlay, 0, 1) * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
-        for display_label, tx, ty, tw, th_text, baseline in label_info:
-            pill_x1 = max(0, tx - pad)
-            pill_y1 = max(0, ty - th_text - pad)
-            pill_x2 = min(w - 1, tx + tw + pad)
-            pill_y2 = min(h - 1, ty + baseline + pad)
-            cv2.rectangle(result_bgr, (pill_x1, pill_y1), (pill_x2, pill_y2), (255, 255, 255), -1)
-            cv2.putText(result_bgr, display_label, (tx, ty), font, font_scale, (0, 0, 0), thickness, cv2.LINE_AA)
-
-        Image.fromarray(cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)).save(out_path)
-
-    def _save_zoedepth_outputs(
-        self,
-        depth_map: np.ndarray,
-        color_path: Path,
-        raw_path: Path,
-    ) -> None:
-        from zoedepth.utils.misc import colorize, save_raw_16bit
-
-        colored = colorize(depth_map.astype(np.float32))
-        Image.fromarray(colored).save(color_path)
-        save_raw_16bit(depth_map.astype(np.float32), str(raw_path))
-
     def _render_depth_image(self, depth_map: np.ndarray, mask: Optional[np.ndarray] = None) -> Image.Image:
         import matplotlib
         matplotlib.use("Agg")
@@ -2251,316 +1956,6 @@ class NutritionVideoPipeline:
             output[mask.astype(bool)] = rgb[mask.astype(bool)]
             rgb = output
         return Image.fromarray(rgb)
-
-    def _build_production_dish_mask(
-        self,
-        visible_items: list[dict],
-        sam3_results: dict,
-        target_shape: tuple[int, ...],
-        job_id: str,
-    ) -> np.ndarray:
-        target_hw = tuple(target_shape[:2])
-        ingredient_masks = [
-            self._resize_mask_to_shape((sam3_results.get(item["name"]) or {}).get("mask"), target_hw)
-            for item in visible_items
-            if (sam3_results.get(item["name"]) or {}).get("mask") is not None
-        ]
-        ingredient_masks = [mask for mask in ingredient_masks if mask is not None and mask.any()]
-        if ingredient_masks:
-            return np.any(np.stack([mask.astype(bool) for mask in ingredient_masks], axis=0), axis=0)
-
-        fallback_masks = []
-        for name, entry in sam3_results.items():
-            resized = self._resize_mask_to_shape(entry.get("mask"), target_hw)
-            if resized is None or not resized.any():
-                continue
-            fallback_masks.append(resized.astype(bool))
-
-        if fallback_masks:
-            logger.warning(
-                f"[{job_id}] SAM3 returned no ingredient-specific masks; "
-                f"falling back to union of {len(fallback_masks)} available SAM3 mask(s)"
-            )
-            return np.any(np.stack(fallback_masks, axis=0), axis=0)
-
-        raise RuntimeError("Production image pipeline produced no usable SAM3 masks")
-
-    def _save_production_debug_assets(
-        self,
-        job_id: str,
-        image_rgb: np.ndarray,
-        sam3_results: dict,
-        raw_depth: np.ndarray,
-        calibrated_depth: np.ndarray,
-        dish_mask: np.ndarray,
-    ) -> dict:
-        output_dir = self.config.OUTPUT_DIR / f"production_{job_id}"
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        Image.fromarray(image_rgb).save(output_dir / "rgb.png")
-
-        self._save_sam3_segmentation_overlay(
-            image_rgb=image_rgb,
-            sam3_results=sam3_results,
-            out_path=output_dir / "sam3_segmentation.png",
-        )
-
-        self._save_zoedepth_outputs(
-            depth_map=raw_depth,
-            color_path=output_dir / "zoedepth_colored.png",
-            raw_path=output_dir / "zoedepth_raw.png",
-        )
-
-        raw_depth_image = self._render_depth_image(raw_depth)
-        raw_depth_image.save(output_dir / "zoe_depth_raw_visual.png")
-
-        calibrated_depth_image = self._render_depth_image(calibrated_depth)
-        calibrated_depth_image.save(output_dir / "zoe_depth_calibrated_visual.png")
-
-        masked_depth_image = self._render_depth_image(calibrated_depth, mask=dish_mask)
-        masked_depth_image.save(output_dir / "dish_masked_depth.png")
-
-        masks_summary = {}
-        for name, entry in sam3_results.items():
-            mask = entry.get("mask")
-            masks_summary[name] = {
-                "score": float(entry.get("score") or 0.0),
-                "mask_pixels": int(mask.sum()) if mask is not None else 0,
-                "bbox": self._mask_bbox(mask) if mask is not None else None,
-            }
-            if mask is not None:
-                Image.fromarray((mask.astype(np.uint8) * 255)).save(output_dir / f"{self._normalize_ingredient_name(name).replace(' ', '_')}_mask.png")
-
-        np.save(output_dir / "zoe_depth_raw.npy", raw_depth.astype(np.float32))
-        np.save(output_dir / "zoe_depth_calibrated.npy", calibrated_depth.astype(np.float32))
-        np.save(output_dir / "dish_mask.npy", dish_mask.astype(np.uint8))
-
-        return {
-            "output_dir": str(output_dir),
-            "rgb_path": str(output_dir / "rgb.png"),
-            "sam3_segmentation_path": str(output_dir / "sam3_segmentation.png"),
-            "zoedepth_colored_path": str(output_dir / "zoedepth_colored.png"),
-            "zoedepth_raw_path": str(output_dir / "zoedepth_raw.png"),
-            "raw_depth_visual_path": str(output_dir / "zoe_depth_raw_visual.png"),
-            "calibrated_depth_visual_path": str(output_dir / "zoe_depth_calibrated_visual.png"),
-            "dish_masked_depth_path": str(output_dir / "dish_masked_depth.png"),
-            "masks": masks_summary,
-        }
-
-    def _calibrate_zoe_depth_from_reference(self, raw_depth: np.ndarray, sam3_results: dict, first_pass: dict) -> tuple[np.ndarray, dict]:
-        scale = 1.0
-        calibration = {
-            "method": "raw_zoe",
-            "scale": 1.0,
-            "reference_name": None,
-            "reference_depth_raw_m": None,
-            "reference_geom_depth_m": None,
-        }
-
-        candidates = []
-        vessel = first_pass.get("plate_or_bowl")
-        if vessel and vessel.get("diameter_cm"):
-            candidates.append({
-                "name": vessel.get("name") or vessel.get("vessel_type") or "plate_or_bowl",
-                "known_size_cm": vessel.get("diameter_cm"),
-                "confidence": float(vessel.get("confidence") or 0.0),
-            })
-        for ref in first_pass.get("reference_objects") or []:
-            width_cm = ref.get("width_cm")
-            height_cm = ref.get("height_cm")
-            if width_cm or height_cm:
-                candidates.append({
-                    "name": ref.get("name") or "reference_object",
-                    "known_width_cm": float(width_cm) if width_cm else None,
-                    "known_height_cm": float(height_cm) if height_cm else None,
-                    "known_size_cm": float(width_cm or height_cm),
-                    "confidence": float(ref.get("confidence") or 0.0),
-                })
-
-        candidates.sort(key=lambda x: x["confidence"], reverse=True)
-
-        for candidate in candidates:
-            mask = (sam3_results.get(candidate["name"]) or {}).get("mask")
-            mask = self._resize_mask_to_shape(mask, raw_depth.shape)
-            bbox = self._mask_bbox(mask) if mask is not None else None
-            if mask is None or bbox is None:
-                continue
-            x1, y1, x2, y2 = bbox
-            pixel_width = x2 - x1
-            pixel_height = y2 - y1
-            if pixel_width <= 0 or pixel_height <= 0:
-                continue
-
-            geom_depth_candidates = []
-            known_width_cm = candidate.get("known_width_cm")
-            known_height_cm = candidate.get("known_height_cm")
-            if known_width_cm:
-                geom_depth_candidates.append((float(known_width_cm) / 100.0) * self.config.ZOE_FX / float(pixel_width))
-            if known_height_cm:
-                geom_depth_candidates.append((float(known_height_cm) / 100.0) * self.config.ZOE_FY / float(pixel_height))
-            if not geom_depth_candidates and candidate.get("known_size_cm"):
-                pixel_size = max(pixel_width, pixel_height)
-                geom_depth_candidates.append(
-                    (float(candidate["known_size_cm"]) / 100.0) * self.config.ZOE_FX / float(pixel_size)
-                )
-            if not geom_depth_candidates:
-                continue
-
-            geom_depth_m = float(np.median(np.asarray(geom_depth_candidates, dtype=np.float32)))
-            ref_pixels = raw_depth[mask.astype(bool)]
-            ref_pixels = ref_pixels[np.isfinite(ref_pixels) & (ref_pixels > 0.01)]
-            if ref_pixels.size < 20:
-                continue
-            raw_ref_depth_m = float(np.median(ref_pixels))
-            if raw_ref_depth_m <= 0:
-                continue
-            scale = geom_depth_m / raw_ref_depth_m
-            calibration = {
-                "method": "gemini_reference",
-                "scale": scale,
-                "reference_name": candidate["name"],
-                "reference_depth_raw_m": raw_ref_depth_m,
-                "reference_geom_depth_m": geom_depth_m,
-                "reference_size_cm": float(candidate["known_size_cm"]),
-                "reference_width_cm": known_width_cm,
-                "reference_height_cm": known_height_cm,
-                "bbox": bbox,
-                "confidence": float(candidate["confidence"]),
-                # pixels_per_cm derived from reference object size in pixels vs cm
-                # Used by pass 2 to pre-compute ingredient areas before sending to Gemini
-                "pixels_per_cm": pixel_width / float(candidate["known_size_cm"]),
-            }
-            break
-
-        return (raw_depth * scale).astype(np.float32), calibration
-
-    def _estimate_volume_from_raw_depth_with_gemini(
-        self,
-        image_rgb: np.ndarray,
-        visible_items: list[dict],
-        first_pass: dict,
-        job_id: str,
-        user_context: dict = None,
-        calibrated_depth_image: Image.Image = None,
-        calibrated_depth_np: np.ndarray = None,
-        sam3_results: dict = None,
-        calibration: dict = None,
-        # Legacy params kept for call-site compatibility — no longer used
-        raw_depth_image: Image.Image = None,
-        masked_depth_image: Image.Image = None,
-    ) -> dict:
-        """Estimate per-ingredient volumes using RGB + calibrated depth.
-
-        Area is pre-computed from SAM3 pixel counts + plate calibration so that
-        Gemini only needs to estimate height/thickness from the calibrated depth
-        image. This cuts the free-variable count from 2 (area + height) to 1
-        (height only), targeting <10 % run-to-run volume variance on the same dish.
-        """
-        try:
-            import google.generativeai as genai
-            genai.configure(api_key=self.config.GEMINI_API_KEY)
-        except Exception as e:
-            logger.warning(f"[{job_id}] Gemini volume pass init failed: {e}")
-            return {}
-
-        labels = [item["name"] for item in visible_items]
-        if not labels:
-            return {}
-
-        # ── Build scale context line ──
-        vessel = first_pass.get("plate_or_bowl") or {}
-        if vessel.get("diameter_cm"):
-            scale_note = (
-                f"A {vessel.get('vessel_type') or 'dish'} is present with estimated diameter "
-                f"{float(vessel['diameter_cm']):.1f} cm."
-            )
-        else:
-            scale_note = "No reliable vessel dimension detected; infer scale from the calibrated depth map."
-
-        anchor_block = (
-            f"Visible ingredients: {json.dumps(labels)}.\n\n"
-            "Estimate the volume in ml for each ingredient using the RGB photo and the "
-            "calibrated depth map together.\n"
-        )
-
-        prompt = (
-            "You are a food volume estimation system.\n"
-            "You are given TWO aligned images of the same dish:\n"
-            "  Image 1: the original RGB photo.\n"
-            "  Image 2: the calibrated depth map (brighter/warmer = closer to camera = taller food).\n\n"
-            f"{scale_note}\n\n"
-            + anchor_block +
-            f"\nIngredient names to use (copy these EXACTLY into the output — do not rename, translate, or reword them): {json.dumps(labels)}\n"
-            "\nReturn ONLY valid JSON — an array with one entry per ingredient, using the exact names above:\n"
-            "[{\"name\": \"rice\", \"volume_ml\": 180, \"height_cm\": 2.1, \"shape_factor\": 0.60, \"confidence\": 0.85}, ...]\n\n"
-            "Rules:\n"
-            "- Every ingredient in the list above must appear in the output with its exact name.\n"
-            "- volume_ml must be > 0.\n"
-            "- confidence between 0 and 1.\n"
-            "- Estimate only the visible portion — do not add hidden or extra items here.\n"
-        )
-        prompt += self._build_user_context_suffix(user_context)
-
-        model_name = self._flash_model_name()
-        gm = genai.GenerativeModel(model_name, generation_config=self._GEMINI_GEN_CONFIG)
-        original_pil = Image.fromarray(image_rgb)
-
-        # Send RGB + calibrated depth only — dropping raw depth and masked depth
-        # removes SAM3-segmentation variance from the input images
-        content = [prompt, original_pil]
-        if calibrated_depth_image is not None:
-            content.append(calibrated_depth_image)
-
-        try:
-            response = gm.generate_content(
-                content,
-                request_options={"timeout": 120},
-            )
-        except Exception as e:
-            logger.warning("[%s] Gemini volume estimation failed (%s)", job_id, e)
-            raise
-        response_text = response.text or ""
-
-        if "```json" in response_text:
-            s = response_text.find("```json") + 7
-            e_idx = response_text.find("```", s)
-            json_str = response_text[s:e_idx].strip()
-        elif "```" in response_text:
-            s = response_text.find("```") + 3
-            e_idx = response_text.find("```", s)
-            json_str = response_text[s:e_idx].strip()
-        else:
-            s = response_text.find("[")
-            e_idx = response_text.rfind("]") + 1
-            json_str = response_text[s:e_idx]
-
-        try:
-            data = json.loads(json_str)
-        except json.JSONDecodeError:
-            logger.warning("[%s] Gemini volume estimation returned invalid JSON — returning empty map", job_id)
-            return {}
-        self._record_gemini_output(
-            stage="production_image_volume_estimation",
-            job_id=job_id,
-            model_name=model_name,
-            prompt=prompt,
-            response_text=response_text,
-            parsed_output=data,
-            metadata={"visible_ingredients": labels},
-        )
-
-        volume_map = {}
-        for entry in data:
-            name = (entry.get("name") or "").strip().lower()
-            if not name:
-                continue
-            volume_map[name] = {
-                "volume_ml": float(entry.get("volume_ml") or 0.0),
-                "confidence": float(entry.get("confidence") or 0.0),
-            }
-
-        logger.info(f"[{job_id}] Volume estimates: { {k: v['volume_ml'] for k, v in volume_map.items()} }")
-        return volume_map
 
     def _estimate_questionnaire_item_nutrition(self, verified_items: list[dict], job_id: str) -> list[dict]:
         if not verified_items or not self.config.GEMINI_API_KEY:
@@ -2876,7 +2271,7 @@ class NutritionVideoPipeline:
         inferred_items: list[dict],
         questionnaire_items: list[dict],
         image_rgb: np.ndarray,
-        sam3_results: dict,
+        segmentation_results: dict,
         job_id: str,
     ) -> dict:
         item_components = {}
@@ -2905,10 +2300,11 @@ class NutritionVideoPipeline:
                 logger.warning("[%s] No volume found for '%s' — skipping item", job_id, label)
                 continue
 
-            crop_image = self._extract_mask_crop(
-                image_rgb,
-                self._resize_mask_to_shape((sam3_results.get(label) or {}).get("mask"), image_rgb.shape[:2]),
+            mask = self._resize_mask_to_shape(
+                (segmentation_results.get(label) or {}).get("mask"),
+                image_rgb.shape[:2],
             )
+            crop_image = self._extract_mask_crop(image_rgb, mask) if mask is not None else None
             nutrition = self._build_volume_nutrition_component(
                 label=label,
                 role_tag="base",
@@ -3138,7 +2534,7 @@ class NutritionVideoPipeline:
                 inferred_items=inferred_nonvisible_items,
                 questionnaire_items=questionnaire_nutrition,
                 image_rgb=img_rgb,
-                sam3_results={},
+                segmentation_results={},
                 job_id=job_id,
             )
             logger.info("[%s] Gemini metric-depth nutrition analysis phase complete", job_id)
@@ -3152,7 +2548,7 @@ class NutritionVideoPipeline:
             overall_confidence = self._calculate_overall_confidence(
                 first_pass=first_pass,
                 visible_items=visible_items,
-                sam3_results={},
+                segmentation_results={},
                 calibration=calibration,
                 volume_map=volume_map,
                 questionnaire_verification=self.last_questionnaire_verification,
@@ -3208,7 +2604,6 @@ class NutritionVideoPipeline:
                 "questionnaire_verification": self.last_questionnaire_verification,
                 "pipeline_runtime": {
                     "image_pipeline": "gemini_metric_depth",
-                    "fallback_pipeline": "sam3_zoedepth",
                     "gemini_depth_image_model": self._GEMINI_DEPTH_IMAGE_MODEL,
                     "device": self.device,
                 },
@@ -3221,7 +2616,6 @@ class NutritionVideoPipeline:
                     "cooking_method": first_pass.get("cooking_method"),
                     "cooking_method_confidence": float(first_pass.get("cooking_method_confidence") or 0.0),
                     "visible_items": visible_items,
-                    "sam3": {},
                     "depth_outputs": {
                         "assets": debug_assets,
                         "gemini_metric_depth": depth_assets,
@@ -3235,7 +2629,6 @@ class NutritionVideoPipeline:
                     "gemini_outputs": self.gemini_outputs,
                     "runtime": {
                         "image_pipeline": "gemini_metric_depth",
-                        "fallback_pipeline": "sam3_zoedepth",
                         "gemini_depth_image_model": self._GEMINI_DEPTH_IMAGE_MODEL,
                         "device": self.device,
                     },
@@ -3244,195 +2637,13 @@ class NutritionVideoPipeline:
             }
         except Exception as gemini_depth_err:
             logger.exception(
-                "[%s] Gemini metric-depth pipeline failed; falling back to SAM3/ZoeDepth: %s",
+                "[%s] Gemini metric-depth pipeline failed: %s",
                 job_id,
                 gemini_depth_err,
             )
+            raise
 
-        segmentation_prompts = [item["name"] for item in visible_items]
-        vessel = first_pass.get("plate_or_bowl")
-        if vessel and vessel.get("name"):
-            segmentation_prompts.append(vessel["name"])
-        for ref in first_pass.get("reference_objects") or []:
-            if ref.get("name"):
-                segmentation_prompts.append(ref["name"])
-        segmentation_prompts = list(dict.fromkeys(segmentation_prompts))
 
-        sam3_model, sam3_processor = self.models.sam3
-        sam3_results = run_sam3_image(sam3_model, sam3_processor, pil_image, segmentation_prompts, device=self.device)
-        logger.info(f"[{job_id}] SAM3 segmentation complete for prompts={segmentation_prompts}")
-
-        zoe_model = self.models.zoedepth
-        raw_depth = run_zoedepth(zoe_model, pil_image)
-        calibrated_depth, calibration = self._calibrate_zoe_depth_from_reference(raw_depth, sam3_results, first_pass)
-        logger.info(
-            f"[{job_id}] ZoeDepth inference complete: raw_shape={tuple(raw_depth.shape)} "
-            f"calibration_method={calibration.get('method')} reference={calibration.get('reference_name')}"
-        )
-
-        dish_mask = self._build_production_dish_mask(
-            visible_items=visible_items,
-            sam3_results=sam3_results,
-            target_shape=raw_depth.shape,
-            job_id=job_id,
-        )
-
-        debug_assets = self._save_production_debug_assets(
-            job_id=job_id,
-            image_rgb=img_rgb,
-            sam3_results=sam3_results,
-            raw_depth=raw_depth,
-            calibrated_depth=calibrated_depth,
-            dish_mask=dish_mask,
-        )
-
-        raw_depth_image = self._render_depth_image(raw_depth)
-        calibrated_depth_image = self._render_depth_image(calibrated_depth)
-        masked_depth_image = self._render_depth_image(calibrated_depth, mask=dish_mask)
-        volume_map = self._estimate_volume_from_raw_depth_with_gemini(
-            image_rgb=img_rgb,
-            calibrated_depth_image=calibrated_depth_image,
-            calibrated_depth_np=calibrated_depth,
-            sam3_results=sam3_results,
-            calibration=calibration,
-            visible_items=visible_items,
-            first_pass=first_pass,
-            job_id=job_id,
-            user_context=user_context,
-        )
-
-        verified_questionnaire = self._verify_questionnaire_items_with_gemini(
-            {
-                "main_food_item": first_pass.get("meal_name"),
-                "visible_ingredients": [{"name": item["name"]} for item in visible_items],
-                "ingredient_breakdown": [item["name"] for item in visible_items],
-                "additional_notes": first_pass.get("notes") or "",
-            },
-            user_context or {},
-            job_id,
-        )
-        self.last_questionnaire_verification = verified_questionnaire
-        verified_questionnaire = [
-            item for item in verified_questionnaire
-            if item.get("verdict") == "include"
-            and float(item.get("verification_confidence") or item.get("confidence") or 0.0) >= 0.6
-            and (
-                # hidden items must not already be visible in base
-                (item.get("type") == "hidden" and not item.get("already_visible"))
-                # extras are always included — already_visible just means the base stays in base table
-                # and the extra increment goes to high_calorie
-                or item.get("type") == "extra"
-            )
-        ]
-        questionnaire_nutrition = self._estimate_questionnaire_item_nutrition(verified_questionnaire, job_id)
-        inferred_nonvisible_items = self._infer_hidden_and_extra_items_with_gemini(
-            first_pass=first_pass,
-            visible_items=visible_items,
-            volume_map=volume_map,
-            image_pil=pil_image,
-            calibrated_depth_image=calibrated_depth_image,
-            job_id=job_id,
-            user_context=user_context,
-        )
-
-        logger.info("[%s] Starting nutrition analysis phase", job_id)
-        nutrition_results = self._analyze_nutrition_from_production(
-            first_pass=first_pass,
-            visible_items=visible_items,
-            volume_map=volume_map,
-            inferred_items=inferred_nonvisible_items,
-            questionnaire_items=questionnaire_nutrition,
-            image_rgb=img_rgb,
-            sam3_results=sam3_results,
-            job_id=job_id,
-        )
-        logger.info("[%s] Nutrition analysis phase complete", job_id)
-        overall_confidence = self._calculate_overall_confidence(
-            first_pass=first_pass,
-            visible_items=visible_items,
-            sam3_results=sam3_results,
-            calibration=calibration,
-            volume_map=volume_map,
-            questionnaire_verification=self.last_questionnaire_verification,
-            nutrition_results=nutrition_results,
-        )
-        analysis_report = self._build_export_report(
-            job_id=job_id,
-            media_name=image_path.name,
-            media_type="image",
-            first_pass=first_pass,
-            nutrition_results=nutrition_results,
-            overall_confidence=overall_confidence,
-            debug_assets=debug_assets,
-            calibration=calibration,
-        )
-
-        return {
-            "job_id": job_id,
-            "meal_name": first_pass.get("meal_name"),
-            "media_name": image_path.name,
-            "media_type": "image",
-            "timestamp": datetime.utcnow().isoformat(),
-            "num_frames_processed": 1,
-            "calibration": calibration,
-            "tracking": {
-                "objects": {
-                    f"ID{idx + 1}_{item['name']}": {
-                        "label": item["name"],
-                        "role_tag": item["role_tag"],
-                        "confidence": item["confidence"],
-                        "statistics": {
-                            "max_volume_ml": float((volume_map.get(item["name"].lower()) or {}).get("volume_ml") or 0.0),
-                        },
-                        "mask_bbox": self._mask_bbox((sam3_results.get(item["name"]) or {}).get("mask")),
-                    }
-                    for idx, item in enumerate(visible_items)
-                },
-                "total_objects": len(visible_items),
-            },
-            "nutrition": nutrition_results,
-            "analysis_report": analysis_report,
-            "questionnaire_verification": self.last_questionnaire_verification,
-            "pipeline_runtime": {
-                "image_pipeline": "production",
-                "sam3_model_dir": str(self.config.SAM3_MODEL_DIR),
-                "zoedepth_checkpoint": str(self.config.ZOEDEPTH_CHECKPOINT),
-                "midas_repo_dir": str(self.config.MIDAS_REPO_DIR),
-                "device": self.device,
-            },
-            "production_debug": {
-                "gemini_pass_1": first_pass,
-                "meal_name": first_pass.get("meal_name"),
-                "meal_confidence": float(first_pass.get("meal_confidence") or 0.0),
-                "cuisine_type": first_pass.get("cuisine_type"),
-                "cuisine_confidence": float(first_pass.get("cuisine_confidence") or 0.0),
-                "cooking_method": first_pass.get("cooking_method"),
-                "cooking_method_confidence": float(first_pass.get("cooking_method_confidence") or 0.0),
-                "visible_items": visible_items,
-                "sam3": debug_assets["masks"],
-                "depth_outputs": {
-                    "raw_min_m": float(np.nanmin(raw_depth)),
-                    "raw_max_m": float(np.nanmax(raw_depth)),
-                    "calibrated_min_m": float(np.nanmin(calibrated_depth)),
-                    "calibrated_max_m": float(np.nanmax(calibrated_depth)),
-                    "assets": debug_assets,
-                },
-                "gemini_pass_2_volume": volume_map,
-                "gemini_pass_3_inferred_items": inferred_nonvisible_items,
-                "questionnaire_items": questionnaire_nutrition,
-                "overall_confidence": overall_confidence,
-                "gemini_outputs": self.gemini_outputs,
-                "runtime": {
-                    "image_pipeline": "production",
-                    "sam3_model_dir": str(self.config.SAM3_MODEL_DIR),
-                    "zoedepth_checkpoint": str(self.config.ZOEDEPTH_CHECKPOINT),
-                    "midas_repo_dir": str(self.config.MIDAS_REPO_DIR),
-                    "device": self.device,
-                },
-            },
-            "status": "completed",
-        }
-    
     def _load_frames(self, video_path: Path) -> List[np.ndarray]:
         """Load frames from video. If VIDEO_NUM_FRAMES is set, enforce VIDEO_MAX_DURATION_SECONDS and load exactly that many frames evenly spaced."""
         cap = cv2.VideoCapture(str(video_path))

@@ -103,7 +103,7 @@ def _print_results(image_path: Path, result: dict, elapsed: float):
 
 def _run(paths: list[Path]):
     print(f"\n{'─'*72}")
-    print("  Loading models (SAM3 + ZoeDepth)…")
+    print("  Loading Gemini metric-depth pipeline...")
     print(f"{'─'*72}\n")
 
     t0 = time.time()
