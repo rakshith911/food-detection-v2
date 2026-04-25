@@ -1899,6 +1899,41 @@ class NutritionRAG:
         logger.info(f"[{field}] '{food_name}' produce lexical → '{matched}' ({source}, score={best_score:.2f}): {value}")
         return value, matched, source, entry
 
+    @staticmethod
+    def _branded_more_specific(food_name: str, branded_matched: Optional[str], usda_matched: Optional[str]) -> bool:
+        """Return True if branded_matched covers qualifier words from food_name that usda_matched misses.
+
+        Used to prefer branded over USDA when USDA only has a generic entry — e.g.
+        "kalamata olives" matched to "Olives, black" (missing "kalamata") while branded
+        has "Kalamata Olives".  Does NOT trigger for labels whose key words are already
+        in the USDA name (e.g. "yellow rice" → "Yellow rice, cooked" keeps USDA).
+        """
+        if not branded_matched or not usda_matched:
+            return False
+
+        _IGNORE = {
+            'raw', 'cooked', 'fresh', 'dried', 'canned', 'frozen', 'whole', 'sliced',
+            'diced', 'chopped', 'grilled', 'baked', 'fried', 'roasted', 'steamed',
+            'with', 'without', 'and', 'or', 'the', 'a', 'in', 'of', 'on', 'no',
+            'added', 'salt', 'oil', 'fat', 'sauce', 'water', 'serving', 'prepared',
+            'food', 'grade', 'style', 'type',
+        }
+
+        def _words(s: str) -> set:
+            return set(re.sub(r'[^a-z0-9\s]', ' ', s.lower()).split()) - _IGNORE
+
+        label_words = _words(food_name)
+        usda_words = _words(usda_matched)
+        branded_words = _words(branded_matched)
+
+        # Qualifier = label words absent from the USDA match
+        qualifiers = label_words - usda_words
+        if not qualifiers:
+            return False  # USDA already covers the label — keep it
+
+        # Prefer branded only if it actually contains those qualifiers
+        return bool(qualifiers & branded_words)
+
     def _pick_best_result(
         self,
         food_name: str,
@@ -2637,9 +2672,12 @@ class NutritionRAG:
                 if fao_d is not None:
                     unified_result = (fao_d, fao_m, fao_s, None)
             density, matched, source, entry = unified_result
-            # Branded is a strict fallback — only used when FAISS/FAO found nothing
+            branded_d, branded_m, branded_s, branded_e = _branded_fut.result()
             if density is None:
-                density, matched, source, entry = _branded_fut.result()
+                # Standard fallback when FAISS/FAO found nothing
+                density, matched, source, entry = branded_d, branded_m, branded_s, branded_e
+            elif self._branded_more_specific(food_name, branded_m, matched) and branded_d is not None:
+                density, matched, source, entry = branded_d, branded_m, branded_s, branded_e
         else:
             _r = _unified_fut.result()
             density, matched, source = _r[0], _r[1], _r[2]
@@ -2672,9 +2710,11 @@ class NutritionRAG:
 
         if self._use_unified:
             kcal, matched, source, _ = _unified_fut.result()
-            # Branded is a strict fallback — only used when FAISS found nothing
+            branded_kcal, branded_m, branded_s, _ = _branded_fut.result()
             if kcal is None:
-                kcal, matched, source, _ = _branded_fut.result()
+                kcal, matched, source = branded_kcal, branded_m, branded_s
+            elif self._branded_more_specific(food_name, branded_m, matched) and branded_kcal is not None:
+                kcal, matched, source = branded_kcal, branded_m, branded_s
         else:
             _r = _unified_fut.result()
             kcal, matched, source = _r[0], _r[1], _r[2]
@@ -2746,9 +2786,11 @@ class NutritionRAG:
 
         if self._use_unified:
             kcal_per_100g, calorie_matched, calorie_source, kcal_entry = _kcal_unified_fut.result()
-            # Branded is a strict fallback — only used when FAISS found nothing
+            b_kcal, b_matched, b_source, b_entry = _kcal_branded_fut.result()
             if kcal_per_100g is None:
-                kcal_per_100g, calorie_matched, calorie_source, kcal_entry = _kcal_branded_fut.result()
+                kcal_per_100g, calorie_matched, calorie_source, kcal_entry = b_kcal, b_matched, b_source, b_entry
+            elif self._branded_more_specific(food_name, b_matched, calorie_matched) and b_kcal is not None:
+                kcal_per_100g, calorie_matched, calorie_source, kcal_entry = b_kcal, b_matched, b_source, b_entry
         else:
             _r = _kcal_unified_fut.result()
             kcal_per_100g, calorie_matched, calorie_source = _r[0], _r[1], _r[2]
