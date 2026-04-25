@@ -189,9 +189,15 @@ export default function MealDetailScreen() {
       if (!name.startsWith('gemini_depth_ingredient_') || !asset?.url) return;
       const slug = name.replace('gemini_depth_ingredient_', '');
       ingredients[slug] = asset.url;
+      // Also index by display-label slug so tapping works after toDisplayFoodLabel strips
+      // leading prep words (e.g. "shredded_carrots" → display "Carrots" → slug "carrots").
+      const displaySlug = normalizeAssetName(toDisplayFoodLabel(slug.replace(/_/g, ' ')));
+      if (displaySlug && displaySlug !== slug) {
+        ingredients[displaySlug] = asset.url;
+      }
     });
     return { full, ingredients };
-  }, [effectiveSegmentedImages?.overlay_urls]);
+  }, [effectiveSegmentedImages?.overlay_urls, normalizeAssetName]);
 
   const selectedDepthUri = useMemo(() => {
     if (!selectedDepthIngredient) return geminiDepthAssets.full;
