@@ -1126,8 +1126,6 @@ class NutritionVideoPipeline:
         job_id: str,
     ) -> dict:
         verification_threshold = 0.5
-        if crop_image is None:
-            return nutrition
 
         rag = self.models.rag
         chosen_description = (nutrition.get("calorie_matched") or "").strip()
@@ -1182,8 +1180,9 @@ class NutritionVideoPipeline:
             import concurrent.futures as _cf
             model_name = self._flash_model_name()
             model = genai.GenerativeModel(model_name, generation_config=self._GEMINI_GEN_CONFIG)
+            content = [prompt, crop_image] if crop_image is not None else [prompt]
             with _cf.ThreadPoolExecutor(max_workers=1) as _tex:
-                _fut = _tex.submit(model.generate_content, [prompt, crop_image])
+                _fut = _tex.submit(model.generate_content, content)
             response = _fut.result(timeout=30)
             response_text = (response.text or "").strip()
             if "```" in response_text:

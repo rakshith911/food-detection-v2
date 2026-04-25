@@ -2636,8 +2636,10 @@ class NutritionRAG:
                 fao_d, fao_m, fao_s = self._lookup_legacy_density(food_name)
                 if fao_d is not None:
                     unified_result = (fao_d, fao_m, fao_s, None)
-            branded_result = _branded_fut.result()
-            density, matched, source, entry = self._pick_best_result(food_name, unified_result, branded_result)
+            density, matched, source, entry = unified_result
+            # Branded is a strict fallback — only used when FAISS/FAO found nothing
+            if density is None:
+                density, matched, source, entry = _branded_fut.result()
         else:
             _r = _unified_fut.result()
             density, matched, source = _r[0], _r[1], _r[2]
@@ -2669,9 +2671,10 @@ class NutritionRAG:
             _branded_fut = _ex.submit(self._lookup_branded_fallback, food_name, 'calories_per_100g')
 
         if self._use_unified:
-            kcal, matched, source, _ = self._pick_best_result(
-                food_name, _unified_fut.result(), _branded_fut.result()
-            )
+            kcal, matched, source, _ = _unified_fut.result()
+            # Branded is a strict fallback — only used when FAISS found nothing
+            if kcal is None:
+                kcal, matched, source, _ = _branded_fut.result()
         else:
             _r = _unified_fut.result()
             kcal, matched, source = _r[0], _r[1], _r[2]
@@ -2742,9 +2745,10 @@ class NutritionRAG:
             _kcal_branded_fut = _ex.submit(self._lookup_branded_fallback, food_name, 'calories_per_100g')
 
         if self._use_unified:
-            kcal_per_100g, calorie_matched, calorie_source, kcal_entry = self._pick_best_result(
-                food_name, _kcal_unified_fut.result(), _kcal_branded_fut.result()
-            )
+            kcal_per_100g, calorie_matched, calorie_source, kcal_entry = _kcal_unified_fut.result()
+            # Branded is a strict fallback — only used when FAISS found nothing
+            if kcal_per_100g is None:
+                kcal_per_100g, calorie_matched, calorie_source, kcal_entry = _kcal_branded_fut.result()
         else:
             _r = _kcal_unified_fut.result()
             kcal_per_100g, calorie_matched, calorie_source = _r[0], _r[1], _r[2]
