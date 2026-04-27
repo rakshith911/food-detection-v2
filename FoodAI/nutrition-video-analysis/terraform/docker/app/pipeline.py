@@ -154,6 +154,23 @@ class NutritionVideoPipeline:
         image.convert("RGB").save(buf, format=fmt, **save_kwargs)
         return types.Part(inline_data=types.Blob(mime_type=mime_type, data=buf.getvalue()))
 
+    def _gemini_clean_image(self, image_pil: Image.Image, job_id: str) -> Image.Image:
+        """Remove background (replace with black), keep only plate+food, remove plate reflections."""
+        prompt = (
+            "Edit this food image precisely:\n"
+            "1. Replace the entire background with pure black (#000000). Remove everything that is not the plate and the food on it.\n"
+            "2. Keep the plate and all food on the plate exactly as-is — do not alter shape, colour, or texture of food.\n"
+            "3. Remove any specular reflections or highlights on the plate surface, but keep the plate's natural colour and form.\n"
+            "4. Output only the edited image with no text, borders, or watermarks."
+        )
+        try:
+            cleaned, _ = self._gemini_generate_image(image_pil, prompt, job_id, stage="clean_image")
+            logger.info("[%s] Gemini image cleaning complete", job_id)
+            return cleaned
+        except Exception as exc:
+            logger.warning("[%s] Gemini image cleaning failed, using original image: %s", job_id, exc)
+            return image_pil
+
     def _gemini_generate_image(self, image_pil: Image.Image, prompt: str, job_id: str, stage: str) -> tuple[Image.Image, str]:
         from google import genai as genai_new
         from google.genai import types
@@ -2483,6 +2500,15 @@ class NutritionVideoPipeline:
 
         calibration: dict = {"method": "gemini_metric_depth", "calibrated": True}
 
+        # ── Gemini image cleaning: black background, plate+food only, remove reflections ──
+        logger.info("[%s] Cleaning image via Gemini before TRELLIS", job_id)
+        cleaned_pil = self._gemini_clean_image(pil_image, job_id)
+        import tempfile as _tf
+        _cleaned_dir = Path(_tf.mkdtemp(prefix="cleaned_"))
+        _cleaned_tmp = _cleaned_dir / image_path.name  # keep original filename so TRELLIS result keys match
+        cleaned_pil.save(str(_cleaned_tmp))
+        trellis_image_path = _cleaned_tmp
+
         # ── TRELLIS (v2): generate GLB + MP4 after first pass ──
         trellis_glb_s3_key = None
         trellis_mp4_s3_key = None
@@ -2493,7 +2519,7 @@ class NutritionVideoPipeline:
                 import tempfile
                 _trellis_out_dir = Path(tempfile.mkdtemp(prefix="trellis_"))
                 _trellis_results = run_trellis_for_job(
-                    image_paths=[image_path],
+                    image_paths=[trellis_image_path],
                     config=self.config,
                     job_id=job_id,
                     local_output_dir=_trellis_out_dir,
