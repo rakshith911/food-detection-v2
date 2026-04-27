@@ -154,6 +154,25 @@ class NutritionVideoPipeline:
         image.convert("RGB").save(buf, format=fmt, **save_kwargs)
         return types.Part(inline_data=types.Blob(mime_type=mime_type, data=buf.getvalue()))
 
+    def _gemini_tag_image(self, image_pil: Image.Image, visible_items: list, job_id: str) -> Image.Image:
+        """Generate an annotated image with each ingredient labeled directly on the food."""
+        ingredient_names = ", ".join(item["name"] for item in visible_items if item.get("name"))
+        prompt = (
+            f"This is a food image containing: {ingredient_names}.\n"
+            "Add clear, bold ingredient labels directly on top of each food item in the image. "
+            "Use a distinct bright colour for each label (e.g. white text with a semi-transparent coloured background pill/badge). "
+            "Place each label on or very close to the food item it refers to. "
+            "Keep the food image itself completely unchanged — only add the text labels on top. "
+            "Do not add borders, watermarks, or any other modifications."
+        )
+        try:
+            tagged, _ = self._gemini_generate_image(image_pil, prompt, job_id, stage="tag_image")
+            logger.info("[%s] Gemini image tagging complete (%d items)", job_id, len(visible_items))
+            return tagged
+        except Exception as exc:
+            logger.warning("[%s] Gemini image tagging failed, using original image: %s", job_id, exc)
+            return image_pil
+
     def _gemini_clean_image(self, image_pil: Image.Image, job_id: str) -> Image.Image:
         """Remove background (replace with black), keep only plate+food, remove plate reflections."""
         prompt = (
@@ -2616,9 +2635,19 @@ class NutritionVideoPipeline:
             questionnaire_verification=self.last_questionnaire_verification,
             nutrition_results=nutrition_results,
         )
+        output_dir = self.config.OUTPUT_DIR / f"production_{job_id}"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Generate tagged image (ingredients labeled on photo) — replaces v1 sam3_segmentation
+        logger.info("[%s] Generating tagged image with ingredient labels", job_id)
+        tagged_image = self._gemini_tag_image(pil_image, visible_items, job_id)
+        tagged_image_path = output_dir / "tagged.png"
+        tagged_image.save(str(tagged_image_path))
+
         debug_assets = {
-            "output_dir": str(self.config.OUTPUT_DIR / f"production_{job_id}"),
-            "rgb_path": str(self.config.OUTPUT_DIR / f"production_{job_id}" / "rgb.png"),
+            "output_dir": str(output_dir),
+            "rgb_path": str(output_dir / "rgb.png"),
+            "tagged_path": str(tagged_image_path),
             "gemini_depth_assets": depth_assets,
             "masks": {},
         }

@@ -530,6 +530,7 @@ def process_message(message: dict, pipeline=None):
             # expire before the stored URL would be used anyway.
             output_dir = f"/app/data/outputs/production_{job_id}"
             image_assets = {
+                "tagged": f"{output_dir}/tagged.png",  # labeled overlay — shown first in app
                 "rgb": f"{output_dir}/rgb.png",
             }
             full_results = results.get("full_results", {}) if isinstance(results, dict) else {}
