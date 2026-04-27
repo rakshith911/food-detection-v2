@@ -50,6 +50,10 @@ def _instance_state(instance_id: str, region: str) -> str:
     return resp["Reservations"][0]["Instances"][0]["State"]["Name"]
 
 
+_CAPACITY_RETRY_ATTEMPTS = 5
+_CAPACITY_RETRY_WAIT_S = 120  # 2 min between retries — gives AWS time to free capacity
+
+
 def ensure_instance_running(instance_id: str, region: str, job_id: str) -> None:
     state = _instance_state(instance_id, region)
     logger.info("[%s] GPU instance %s state: %s", job_id, instance_id, state)
@@ -62,8 +66,27 @@ def ensure_instance_running(instance_id: str, region: str, job_id: str) -> None:
             logger.info("[%s] Instance stopping — waiting %ds for it to fully stop", job_id, _STOP_WAIT_S)
             time.sleep(_STOP_WAIT_S)
 
-        logger.info("[%s] Starting GPU instance %s", job_id, instance_id)
-        _ec2(region).start_instances(InstanceIds=[instance_id])
+        # Retry start_instances on InsufficientInstanceCapacity — AWS capacity fluctuates
+        for attempt in range(1, _CAPACITY_RETRY_ATTEMPTS + 1):
+            try:
+                logger.info("[%s] Starting GPU instance %s (attempt %d/%d)", job_id, instance_id, attempt, _CAPACITY_RETRY_ATTEMPTS)
+                _ec2(region).start_instances(InstanceIds=[instance_id])
+                break
+            except Exception as exc:
+                if "InsufficientInstanceCapacity" in str(exc):
+                    if attempt < _CAPACITY_RETRY_ATTEMPTS:
+                        logger.warning(
+                            "[%s] InsufficientInstanceCapacity on attempt %d — waiting %ds before retry",
+                            job_id, attempt, _CAPACITY_RETRY_WAIT_S,
+                        )
+                        time.sleep(_CAPACITY_RETRY_WAIT_S)
+                    else:
+                        raise RuntimeError(
+                            f"[{job_id}] GPU instance {instance_id} could not start after "
+                            f"{_CAPACITY_RETRY_ATTEMPTS} attempts: {exc}"
+                        )
+                else:
+                    raise
 
         # Poll until running (up to 10 min)
         for _ in range(60):
