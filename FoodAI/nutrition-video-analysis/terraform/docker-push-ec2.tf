@@ -138,7 +138,7 @@ resource "aws_instance" "docker_push_temp" {
 
     # Build and push Docker image directly
     REGION="us-east-1"
-    REPO_NAME="nutrition-video-analysis-dev-video-processor"
+    REPO_NAME="food-detection-v2-worker"
     ACCOUNT_ID=\$(aws sts get-caller-identity --query Account --output text)
     ECR_REPO="\$ACCOUNT_ID.dkr.ecr.\$REGION.amazonaws.com/\$REPO_NAME"
 

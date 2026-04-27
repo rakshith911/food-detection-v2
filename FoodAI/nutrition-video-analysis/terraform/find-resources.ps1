@@ -12,4 +12,4 @@ $accountId = aws sts get-caller-identity --query Account --output text
 Write-Host "Account ID: $accountId" -ForegroundColor Yellow
 
 Write-Host "`n=== Task Definition ===" -ForegroundColor Cyan
-aws ecs describe-task-definition --task-definition nutrition-video-analysis-dev-video-processor --region us-east-1 --query "taskDefinition.containerDefinitions[0].{name:name,image:image,logConfiguration:logConfiguration,healthCheck:healthCheck}" --output json
+aws ecs describe-task-definition --task-definition food-detection-v2-worker --region us-east-1 --query "taskDefinition.containerDefinitions[0].{name:name,image:image,logConfiguration:logConfiguration,healthCheck:healthCheck}" --output json

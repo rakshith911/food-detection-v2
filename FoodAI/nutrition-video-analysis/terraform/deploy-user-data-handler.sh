@@ -5,9 +5,9 @@
 set -e
 
 REGION="us-east-1"
-FUNCTION_NAME="nutrition-video-analysis-dev-user-data-handler"
+FUNCTION_NAME="food-detection-v2-user-data-handler"
 ROLE_NAME="nutri-analysis-dev-lambda-exec"
-API_ID="qx3i66fa87"
+API_ID="c89txc5qr6"
 STAGE="v1"
 BUCKET="ukcal-user-uploads"
 VIDEOS_BUCKET="nutrition-video-analysis-dev-videos-dbenpoj2"

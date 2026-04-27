@@ -11,7 +11,7 @@ variable "aws_region" {
 variable "project_name" {
   description = "Project name"
   type        = string
-  default     = "nutrition-video-analysis"
+  default     = "food-detection-v2"
 }
 
 variable "environment" {
@@ -92,4 +92,3 @@ variable "user_data_bucket" {
   type        = string
   default     = "ukcal-user-uploads"
 }
-

@@ -4,9 +4,9 @@
 
 set -e
 REGION="${AWS_REGION:-us-east-1}"
-PROJECT_NAME="nutrition-video-analysis-dev-docker-build"
-CLUSTER="nutrition-video-analysis-dev-cluster"
-SERVICE="nutrition-video-analysis-dev-video-processor"
+PROJECT_NAME="food-detection-v2-dev-docker-build"
+CLUSTER="food-detection-v2-cluster"
+SERVICE="food-detection-v2-worker"
 
 echo "Starting CodeBuild project: $PROJECT_NAME (region: $REGION)"
 BUILD_ID=$(aws codebuild start-build --project-name "$PROJECT_NAME" --region "$REGION" --query 'build.id' --output text)

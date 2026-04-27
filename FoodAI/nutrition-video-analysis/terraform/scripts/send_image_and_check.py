@@ -23,7 +23,7 @@ except ImportError:
     urllib = None
 
 DEFAULT_IMAGE = "/Users/leo/FoodProject/food-detection/gemini_test.jpeg"
-DEFAULT_API_BASE = "https://qx3i66fa87.execute-api.us-east-1.amazonaws.com/v1"
+DEFAULT_API_BASE = "https://c89txc5qr6.execute-api.us-east-1.amazonaws.com/v1"
 POLL_INTERVAL = 10
 MAX_POLL_ATTEMPTS = 60  # ~10 minutes
 

@@ -5,7 +5,7 @@ Write-Host "Rebuilding Docker Image..." -ForegroundColor Cyan
 
 # Get config
 $REGION = "us-east-1"
-$REPO_NAME = "nutrition-video-analysis-dev-video-processor"
+$REPO_NAME = "food-detection-v2-worker"
 $ACCOUNT_ID = (aws sts get-caller-identity --query Account --output text)
 $ECR_REPO = "$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$REPO_NAME"
 
@@ -33,7 +33,7 @@ docker push ${ECR_REPO}:latest
 
 # Update ECS
 Write-Host "`nUpdating ECS service..."
-aws ecs update-service --cluster nutrition-video-analysis-dev-cluster --service nutrition-video-analysis-dev-video-processor --force-new-deployment --region $REGION
+aws ecs update-service --cluster food-detection-v2-cluster --service food-detection-v2-worker --force-new-deployment --region $REGION
 
 Write-Host "`nDone! Monitor logs with:" -ForegroundColor Green
-Write-Host "aws logs tail /aws/ecs/nutrition-video-analysis-dev-video-processor --follow --region $REGION"
+Write-Host "aws logs tail /aws/ecs/food-detection-v2-worker --follow --region $REGION"

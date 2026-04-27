@@ -51,7 +51,7 @@ export const awsConfig = {
   // API Gateway Configuration
   API: {
     // REQUIRED - API Gateway endpoint
-    endpoint: 'https://y7z615hzm3.execute-api.us-east-1.amazonaws.com/v1',
+    endpoint: 'https://c89txc5qr6.execute-api.us-east-1.amazonaws.com/v1',
   },
 
   // User Data Backup Configuration (S3)
@@ -59,7 +59,7 @@ export const awsConfig = {
   // The API endpoint is the nutrition analysis API Gateway (same terraform deployment)
   UserData: {
     s3Prefix: 'UKcal', // S3 key prefix for per-user data folders
-    apiEndpoint: 'https://qx3i66fa87.execute-api.us-east-1.amazonaws.com/v1', // Nutrition analysis API (has /user-data routes)
+    apiEndpoint: 'https://c89txc5qr6.execute-api.us-east-1.amazonaws.com/v1', // food-detection-v2 API
   },
 
   // Delete Account OTP – dedicated service (e.g. separate Cognito or Lambda + API)
@@ -92,4 +92,3 @@ export const awsConfig = {
 //    - User Pool ID: From "User Pool Overview"
 //    - App Client ID: From "App Integration" → "App clients"
 //    - Region: From your AWS region selector
-

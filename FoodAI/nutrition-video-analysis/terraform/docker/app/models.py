@@ -44,7 +44,6 @@ import logging
 
 from transformers import AutoProcessor, AutoModelForCausalLM
 from sam2.build_sam import build_sam2_video_predictor
-from app.production_models import load_sam3, load_zoedepth
 
 logger = logging.getLogger(__name__)
 
@@ -370,7 +369,7 @@ class ModelManager:
             f"device={self.device}, "
             f"use_production_image_pipeline={getattr(config, 'USE_PRODUCTION_IMAGE_PIPELINE', None)}, "
             f"production_root={getattr(config, 'PRODUCTION_ROOT', None)}, "
-            f"image_pipeline=gemini_labels_then_trellis, "
+            f"image_pipeline=gemini_metric_depth_with_trellis_preview, "
             f"gemini_model={getattr(config, 'GEMINI_FLASH_MODEL', None)}"
         )
         
@@ -378,9 +377,7 @@ class ModelManager:
         self._florence2 = None
         self._flan_t5 = None
         self._sam2 = None
-        self._sam3 = None
         self._depth_anything = None
-        self._zoedepth = None
         self._rag = None
     
     @property
@@ -425,32 +422,6 @@ class ModelManager:
         return self._depth_anything
 
     @property
-    def sam3(self):
-        """Lazy load SAM3"""
-        if self._sam3 is None:
-            logger.info(f"[ModelManager] Loading SAM3 for production image pipeline from {self.config.SAM3_MODEL_DIR}")
-            self._sam3 = load_sam3(
-                model_dir=self.config.SAM3_MODEL_DIR,
-                device=self.device
-            )
-        return self._sam3
-
-    @property
-    def zoedepth(self):
-        """Lazy load ZoeDepth"""
-        if self._zoedepth is None:
-            logger.info(
-                f"[ModelManager] Loading ZoeDepth for production image pipeline from "
-                f"{self.config.ZOEDEPTH_CHECKPOINT} with MiDaS repo {self.config.MIDAS_REPO_DIR}"
-            )
-            self._zoedepth = load_zoedepth(
-                checkpoint_path=self.config.ZOEDEPTH_CHECKPOINT,
-                midas_repo_dir=self.config.MIDAS_REPO_DIR,
-                device=self.device
-            )
-        return self._zoedepth
-
-    @property
     def rag(self):
         """Lazy load NutritionRAG"""
         if self._rag is None:
@@ -472,7 +443,7 @@ class ModelManager:
         """Preload all models (useful for container warmup)"""
         logger.info("Preloading all models...")
         # Only preload what the v2 image pipeline actually needs at job time.
-        # Florence2, SAM3, ZoeDepth, DepthAnything are lazy-loaded for video/legacy paths only.
+        # Heavy vision models are lazy-loaded for legacy paths only.
         _ = self.rag
         logger.info("All models preloaded")
 
@@ -480,9 +451,7 @@ class ModelManager:
         """Clear all cached models"""
         self._florence2 = None
         self._sam2 = None
-        self._sam3 = None
         self._depth_anything = None
-        self._zoedepth = None
         self._rag = None
         model_cache.clear()
         logger.info("Model cache cleared")

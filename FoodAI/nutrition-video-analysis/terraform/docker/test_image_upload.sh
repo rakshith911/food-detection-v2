@@ -3,7 +3,7 @@ set -e
 
 IMAGE_PATH="/Users/leo/FoodProject/food-detection/unhealthy-fast-food-delivery-menu-featuring-assorted-burgers-cheeseburgers-nuggets-french-fries-soda-high-calorie-low-356045884.jpg-2.jpg"
 S3_BUCKET="nutrition-video-analysis-dev-videos-dbenpoj2"
-SQS_QUEUE_URL="https://sqs.us-east-1.amazonaws.com/185329004895/nutrition-video-analysis-dev-video-processing"
+SQS_QUEUE_URL="https://sqs.us-east-1.amazonaws.com/185329004895/food-detection-v2-jobs"
 REGION="us-east-1"
 
 JOB_ID=$(python3 -c "import uuid; print(uuid.uuid4())")
@@ -37,7 +37,7 @@ echo "=========================================="
 echo "Job ID: $JOB_ID"
 echo ""
 echo "Monitor logs:"
-echo "aws logs tail /ecs/nutrition-video-analysis-dev-video-processor --follow --region $REGION | grep $JOB_ID"
+echo "aws logs tail /ecs/food-detection-v2-worker --follow --region $REGION | grep $JOB_ID"
 echo ""
 echo "Check results:"
 echo "aws s3 ls s3://nutrition-video-analysis-dev-results-dbenpoj2/results/$JOB_ID/ --region $REGION"

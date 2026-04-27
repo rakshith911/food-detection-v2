@@ -1,7 +1,10 @@
 import type { AnalysisEntry } from '../store/slices/historySlice';
 
-// Same endpoint used by NutritionAnalysisAPI — the actual deployed API Gateway
-const API_BASE = 'https://qx3i66fa87.execute-api.us-east-1.amazonaws.com/v1';
+// Same v2 endpoint used by NutritionAnalysisAPI. The API Gateway stage is named
+// "v1", but the Gateway itself is food-detection-v2-api.
+const API_BASE =
+  (typeof process !== 'undefined' && process.env?.EXPO_PUBLIC_NUTRITION_API_URL) ||
+  'https://c89txc5qr6.execute-api.us-east-1.amazonaws.com/v1';
 
 // Convert email to a safe S3 key segment
 function toUserKey(email: string): string {

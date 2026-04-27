@@ -8,7 +8,7 @@ Write-Host "=== Local Docker Build and Push to ECR ===" -ForegroundColor Cyan
 # Configuration
 $REGION = "us-east-1"
 $ACCOUNT_ID = (aws sts get-caller-identity --query Account --output text)
-$ECR_REPO = "$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/nutrition-video-analysis-dev-video-processor"
+$ECR_REPO = "$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/food-detection-v2-worker"
 $IMAGE_TAG = Get-Date -Format "yyyyMMdd-HHmmss"
 $DOCKER_DIR = "d:\Nutrition5k\food-detection\FoodAI\nutrition-video-analysis\terraform\docker"
 
@@ -70,4 +70,4 @@ Write-Host "  ${ECR_REPO}:latest" -ForegroundColor Cyan
 Write-Host "  ${ECR_REPO}:${IMAGE_TAG}" -ForegroundColor Cyan
 
 Write-Host "`nNext step: Force ECS to deploy new image" -ForegroundColor Yellow
-Write-Host "Run: aws ecs update-service --cluster nutrition-video-analysis-dev-cluster --service nutrition-video-analysis-dev-service --force-new-deployment --region $REGION" -ForegroundColor Gray
+Write-Host "Run: aws ecs update-service --cluster food-detection-v2-cluster --service nutrition-video-analysis-dev-service --force-new-deployment --region $REGION" -ForegroundColor Gray

@@ -3,7 +3,7 @@ set -e
 
 # Configuration
 REGION="us-east-1"
-ECR_REPOSITORY="185329004895.dkr.ecr.us-east-1.amazonaws.com/nutrition-video-analysis-dev-video-processor"
+ECR_REPOSITORY="185329004895.dkr.ecr.us-east-1.amazonaws.com/food-detection-v2-worker"
 S3_BUCKET="nutrition-video-analysis-dev-videos-60ppnqfp"
 
 echo "Starting Docker build and push on EC2..."

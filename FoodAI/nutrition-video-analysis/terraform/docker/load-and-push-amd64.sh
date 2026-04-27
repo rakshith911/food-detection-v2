@@ -8,7 +8,7 @@ echo "==========================================="
 
 # Configuration
 S3_BUCKET="nutrition-video-analysis-dev-videos-60ppnqfp"
-ECR_REPO="185329004895.dkr.ecr.us-east-1.amazonaws.com/nutrition-video-analysis-dev-video-processor"
+ECR_REPO="185329004895.dkr.ecr.us-east-1.amazonaws.com/food-detection-v2-worker"
 IMAGE_TAG="latest"
 REGION="us-east-1"
 
@@ -38,4 +38,4 @@ echo "==========================================="
 echo "Image: ${ECR_REPO}:${IMAGE_TAG}"
 echo ""
 echo "Next: Force ECS service update:"
-echo "aws ecs update-service --cluster nutrition-video-analysis-dev-cluster --service nutrition-video-analysis-dev-video-processor --force-new-deployment --region ${REGION}"
+echo "aws ecs update-service --cluster food-detection-v2-cluster --service food-detection-v2-worker --force-new-deployment --region ${REGION}"

@@ -2,7 +2,7 @@
 set -e
 
 # Test script to verify segmented images integration
-API_BASE_URL="https://qx3i66fa87.execute-api.us-east-1.amazonaws.com/v1"
+API_BASE_URL="https://c89txc5qr6.execute-api.us-east-1.amazonaws.com/v1"
 IMAGE_PATH="/Users/leo/FoodProject/food-detection/unhealthy-fast-food-delivery-menu-featuring-assorted-burgers-cheeseburgers-nuggets-french-fries-soda-high-calorie-low-356045884.jpg-2.jpg"
 REGION="us-east-1"
 

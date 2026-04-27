@@ -101,11 +101,26 @@ resource "aws_codebuild_project" "docker_build" {
       name  = "ECR_REPO_NAME"
       value = aws_ecr_repository.video_processor.name
     }
+
+    environment_variable {
+      name  = "ECS_CLUSTER"
+      value = "food-detection-v2-cluster"
+    }
+
+    environment_variable {
+      name  = "ECS_SERVICE"
+      value = "food-detection-v2-worker"
+    }
+
+    environment_variable {
+      name  = "ECS_TASK_FAMILY"
+      value = "food-detection-v2-worker"
+    }
   }
 
   source {
     type            = "GITHUB"
-    location        = "https://github.com/rakshith911/food_detection.git"
+    location        = "https://github.com/rakshith911/food-detection-v2.git"
     git_clone_depth = 1
     buildspec       = "FoodAI/nutrition-video-analysis/terraform/docker/buildspec.yml"
   }

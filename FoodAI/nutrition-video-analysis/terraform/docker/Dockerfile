@@ -17,7 +17,6 @@ ENV TMPDIR=/tmp
 ENV TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor_app
 ENV USER=appuser
 ENV LOGNAME=appuser
-ENV ZOEDEPTH_REPO_DIR=/app/vendor/ZoeDepth
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -69,11 +68,6 @@ RUN mkdir -p /usr/local/lib/python3.10/site-packages/flash_attn && \
 RUN IMPORT_UTILS="/usr/local/lib/python3.10/site-packages/transformers/utils/import_utils.py" && \
     sed -i 's/PACKAGE_DISTRIBUTION_MAPPING\["flash_attn"\]/PACKAGE_DISTRIBUTION_MAPPING.get("flash_attn", [])/g' "$IMPORT_UTILS" && \
     python -c "from transformers import AutoModel, AutoProcessor; print('✅ transformers imports OK after flash_attn patch')"
-
-# Install ZoeDepth source package from the official repository so the packaged
-# local checkpoint in PRODUCTION can be loaded in the same runtime.
-RUN git clone --depth 1 https://github.com/isl-org/ZoeDepth.git /app/vendor/ZoeDepth && \
-    python -c "import sys; sys.path.insert(0, '/app/vendor/ZoeDepth'); import zoedepth; print('✅ zoedepth imported successfully')"
 
 # Copy worker script
 COPY worker.py .

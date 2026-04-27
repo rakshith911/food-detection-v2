@@ -10,7 +10,7 @@ echo "=========================================="
 
 # Configuration
 REGION="us-east-1"
-ECR_REPOSITORY="185329004895.dkr.ecr.us-east-1.amazonaws.com/nutrition-video-analysis-dev-video-processor"
+ECR_REPOSITORY="185329004895.dkr.ecr.us-east-1.amazonaws.com/food-detection-v2-worker"
 IMAGE_TAG="gpu-test"
 
 # Step 1: Verify GPU is available

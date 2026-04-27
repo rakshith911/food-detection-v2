@@ -9,20 +9,16 @@ REGION="us-east-1"
 LAMBDA_DIR="lambda_code/results_handler"
 ZIP_FILE="results_handler.zip"
 
-echo "🔍 Finding Lambda function name..."
-LAMBDA_NAME=$(aws lambda list-functions \
-  --region $REGION \
-  --query 'Functions[?contains(FunctionName, `nutrition`) && contains(FunctionName, `results`)].FunctionName' \
-  --output text | head -1)
+LAMBDA_NAME="food-detection-v2-results-handler"
 
 if [ -z "$LAMBDA_NAME" ]; then
-  echo "❌ Error: Could not find results handler Lambda function"
-  echo "Available functions:"
-  aws lambda list-functions --region $REGION --query 'Functions[?contains(FunctionName, `nutrition`)].FunctionName' --output table
+  echo "❌ Error: Could not find v2 results handler Lambda function: $LAMBDA_NAME"
+  echo "Available v2 functions:"
+  aws lambda list-functions --region $REGION --query 'Functions[?contains(FunctionName, `food-detection-v2`)].FunctionName' --output table
   exit 1
 fi
 
-echo "✅ Found Lambda function: $LAMBDA_NAME"
+echo "✅ Using Lambda function: $LAMBDA_NAME"
 echo ""
 
 echo "📦 Creating deployment package..."

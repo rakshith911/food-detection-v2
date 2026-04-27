@@ -18,11 +18,11 @@ aws ecr get-login-password --region us-east-1 | docker login --username AWS --pa
 
 # Build AMD64 image
 echo "=== Building AMD64 image ==="
-docker build --platform linux/amd64 -f terraform/docker/Dockerfile -t 185329004895.dkr.ecr.us-east-1.amazonaws.com/nutrition-video-analysis-dev-video-processor:latest .
+docker build --platform linux/amd64 -f terraform/docker/Dockerfile -t 185329004895.dkr.ecr.us-east-1.amazonaws.com/food-detection-v2-worker:latest .
 
 # Push to ECR
 echo "=== Pushing to ECR ==="
-docker push 185329004895.dkr.ecr.us-east-1.amazonaws.com/nutrition-video-analysis-dev-video-processor:latest
+docker push 185329004895.dkr.ecr.us-east-1.amazonaws.com/food-detection-v2-worker:latest
 
 # Write completion marker
 echo "Build completed at $(date)" > /tmp/build-complete.txt

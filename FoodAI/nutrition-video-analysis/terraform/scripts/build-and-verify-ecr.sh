@@ -5,7 +5,7 @@ set -e
 
 REGION="${AWS_REGION:-us-east-1}"
 PROJECT_NAME="${CODEBUILD_PROJECT_NAME:-nutrition-video-analysis-dev-docker-build}"
-ECR_REPO_NAME="${ECR_REPO_NAME:-nutrition-video-analysis-dev-video-processor}"
+ECR_REPO_NAME="${ECR_REPO_NAME:-food-detection-v2-worker}"
 
 echo "=============================================="
 echo "1. Starting CodeBuild (builds from GitHub, pushes to ECR)"
@@ -42,5 +42,5 @@ echo "Repository: $ECR_URI"
 aws ecr describe-images --repository-name "$ECR_REPO_NAME" --region "$REGION" --query 'imageDetails | sort_by(@, &imagePushedAt) | [-1].{pushed:imagePushedAt,tags:imageTags}' --output table
 echo ""
 echo "Latest image in ECR is updated. To deploy to ECS, run:"
-echo "  aws ecs update-service --cluster nutrition-video-analysis-dev-cluster --service nutrition-video-analysis-dev-video-processor --force-new-deployment --region $REGION"
+echo "  aws ecs update-service --cluster food-detection-v2-cluster --service food-detection-v2-worker --force-new-deployment --region $REGION"
 echo ""

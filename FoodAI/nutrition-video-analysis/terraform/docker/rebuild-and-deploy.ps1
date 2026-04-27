@@ -8,7 +8,7 @@ Write-Host ""
 
 # Configuration
 $REGION = "us-east-1"
-$REPO_NAME = "nutrition-video-analysis-dev-video-processor"
+$REPO_NAME = "food-detection-v2-worker"
 
 # Step 1: Get AWS Account ID
 Write-Host "[1/8] Getting AWS Account ID..." -ForegroundColor Yellow
@@ -88,8 +88,8 @@ Write-Host ""
 # Step 8: Force ECS deployment
 Write-Host "[8/8] Forcing ECS to use new image..." -ForegroundColor Yellow
 aws ecs update-service `
-    --cluster nutrition-video-analysis-dev-cluster `
-    --service nutrition-video-analysis-dev-video-processor `
+    --cluster food-detection-v2-cluster `
+    --service food-detection-v2-worker `
     --force-new-deployment `
     --region $REGION | Out-Null
 
@@ -106,13 +106,13 @@ Write-Host "============================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Cyan
 Write-Host "1. Monitor ECS logs:" -ForegroundColor White
-Write-Host "   aws logs tail /aws/ecs/nutrition-video-analysis-dev-video-processor --follow --region $REGION" -ForegroundColor Gray
+Write-Host "   aws logs tail /aws/ecs/food-detection-v2-worker --follow --region $REGION" -ForegroundColor Gray
 Write-Host ""
 Write-Host "2. Check ECS task status:" -ForegroundColor White
 Write-Host "   cd ../terraform" -ForegroundColor Gray
 Write-Host "   powershell -ExecutionPolicy Bypass -File check-processing.ps1" -ForegroundColor Gray
 Write-Host ""
 Write-Host "3. Test with your video:" -ForegroundColor White
-Write-Host "   curl -X POST 'https://y7z615hzm3.execute-api.us-east-1.amazonaws.com/v1/api/upload' \" -ForegroundColor Gray
+Write-Host "   curl -X POST 'https://c89txc5qr6.execute-api.us-east-1.amazonaws.com/v1/api/upload' \" -ForegroundColor Gray
 Write-Host "     -F 'file=@D:/Nutrition5k/smart_tracked_WhatsApp Video 2025-09-10 at 05.16.56_9874c762.mp4'" -ForegroundColor Gray
 Write-Host ""

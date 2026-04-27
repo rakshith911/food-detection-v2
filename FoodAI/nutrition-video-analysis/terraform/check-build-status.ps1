@@ -14,13 +14,13 @@ if ($LASTEXITCODE -eq 0) {
 
     Write-Host "`n=== Next Step: Update ECS Service ===" -ForegroundColor Cyan
     Write-Host "Run this command to force ECS to use the new Docker image:" -ForegroundColor Yellow
-    Write-Host "aws ecs update-service --cluster nutrition-video-analysis-dev-cluster --service nutrition-video-analysis-dev-video-processor --force-new-deployment --region us-east-1" -ForegroundColor White
+    Write-Host "aws ecs update-service --cluster food-detection-v2-cluster --service food-detection-v2-worker --force-new-deployment --region us-east-1" -ForegroundColor White
 } else {
     Write-Host "Build not yet completed" -ForegroundColor Yellow
 
     # Check ECR for new image
     Write-Host "`nChecking ECR for recent image pushes..." -ForegroundColor Yellow
-    aws ecr describe-images --repository-name nutrition-video-analysis-dev-video-processor --region us-east-1 --query 'sort_by(imageDetails,& imagePushedAt)[-1].{Pushed:imagePushedAt,Tags:imageTags[0]}' --output table
+    aws ecr describe-images --repository-name food-detection-v2-worker --region us-east-1 --query 'sort_by(imageDetails,& imagePushedAt)[-1].{Pushed:imagePushedAt,Tags:imageTags[0]}' --output table
 
     Write-Host "`nBuild is still in progress. Wait a few minutes and check again." -ForegroundColor Yellow
 }

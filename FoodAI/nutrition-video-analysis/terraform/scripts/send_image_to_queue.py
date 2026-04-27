@@ -14,7 +14,7 @@ from pathlib import Path
 
 DEFAULT_IMAGE = "/Users/leo/FoodProject/food-detection/gemini_test.jpeg"
 # Default API (same as test_segmented_images_integration.sh); override with API_BASE_URL env
-DEFAULT_API_BASE = "https://qx3i66fa87.execute-api.us-east-1.amazonaws.com/v1"
+DEFAULT_API_BASE = "https://c89txc5qr6.execute-api.us-east-1.amazonaws.com/v1"
 
 
 def main():

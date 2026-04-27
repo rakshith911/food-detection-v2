@@ -34,6 +34,23 @@ function VideoThumbnail({ videoUri, style }: { videoUri: string; style: any }) {
   );
 }
 
+function formatMealTime(timestamp?: string | number | null): string {
+  if (!timestamp) return '';
+  let date = new Date(timestamp);
+  if (typeof timestamp === 'string' && isNaN(date.getTime())) {
+    const numericTimestamp = Number(timestamp);
+    if (!isNaN(numericTimestamp) && numericTimestamp > 0) {
+      date = new Date(numericTimestamp);
+    }
+  }
+  if (isNaN(date.getTime())) return '';
+  return date.toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
+}
+
 // Image component that falls back to S3 presigned URL when the local file is unavailable (e.g. after reinstall)
 function HistoryCardImage({
   imageUri,
@@ -63,7 +80,7 @@ function HistoryCardImage({
         }
       } catch {}
     }
-    onImageError();
+    onImageError?.();
   }, [jobId, onImageError]);
 
   return (
@@ -368,6 +385,7 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
       : totalCalories === 0
       ? '-'
       : `${totalCalories} Kcal`;
+    const mealTime = formatMealTime(item.timestamp);
     const translateX = getSwipePosition(item.id);
 
     return (
@@ -435,7 +453,7 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
             {isPendingOrAnalyzing ? (
               <ActivityIndicator size="small" color="#7BA21B" />
             ) : (
-              <Group2065Icon width={18} height={18} />
+              <Text style={styles.cardTime}>{mealTime}</Text>
             )}
           </View>
         </TouchableOpacity>
@@ -540,11 +558,6 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
     day: 'numeric',
     year: 'numeric',
   });
-  const lastLoginTime = new Date().toLocaleTimeString('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
-  });
 
   // Handle right swipe to navigate to TutorialScreen
   const handleRightSwipeStateChange = (event: any) => {
@@ -603,7 +616,6 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
       <AppHeader
         displayName={displayName}
         lastLoginDate={lastLoginDate}
-        lastLoginTime={lastLoginTime}
         onProfilePress={() => nav.navigate('Profile')}
       />
 
@@ -761,6 +773,14 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#6B7280',
   },
+  cardTime: {
+    minWidth: 58,
+    marginLeft: 10,
+    textAlign: 'right',
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#6B7280',
+  },
   captureButton: {
     height: 56, // Fixed height
     width: '100%', // Fixed width
@@ -794,4 +814,3 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 });
-

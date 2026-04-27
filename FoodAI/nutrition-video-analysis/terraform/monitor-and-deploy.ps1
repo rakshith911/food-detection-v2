@@ -22,7 +22,7 @@ while ($attempt -lt $maxAttempts -and -not $buildComplete) {
         aws s3 cp s3://nutrition-video-analysis-dev-videos-dbenpoj2/docker-images/build-complete.txt - --region us-east-1
 
         Write-Host "`n=== Forcing ECS to Deploy New Image ===" -ForegroundColor Cyan
-        aws ecs update-service --cluster nutrition-video-analysis-dev-cluster --service nutrition-video-analysis-dev-video-processor --force-new-deployment --region us-east-1 --query 'service.{serviceName:serviceName,desiredCount:desiredCount,runningCount:runningCount,deployments:deployments[0].status}' --output json
+        aws ecs update-service --cluster food-detection-v2-cluster --service food-detection-v2-worker --force-new-deployment --region us-east-1 --query 'service.{serviceName:serviceName,desiredCount:desiredCount,runningCount:runningCount,deployments:deployments[0].status}' --output json
 
         if ($LASTEXITCODE -eq 0) {
             Write-Host "`nECS service update initiated successfully!" -ForegroundColor Green
@@ -30,20 +30,20 @@ while ($attempt -lt $maxAttempts -and -not $buildComplete) {
             Start-Sleep -Seconds 60
 
             Write-Host "`n=== Checking ECS Service Status ===" -ForegroundColor Cyan
-            aws ecs describe-services --cluster nutrition-video-analysis-dev-cluster --services nutrition-video-analysis-dev-video-processor --region us-east-1 --query 'services[0].{runningCount:runningCount,desiredCount:desiredCount,deployments:deployments[*].{status:status,runningCount:runningCount,desiredCount:desiredCount}}' --output json
+            aws ecs describe-services --cluster food-detection-v2-cluster --services food-detection-v2-worker --region us-east-1 --query 'services[0].{runningCount:runningCount,desiredCount:desiredCount,deployments:deployments[*].{status:status,runningCount:runningCount,desiredCount:desiredCount}}' --output json
 
             Write-Host "`n=== Checking SQS Queue ===" -ForegroundColor Cyan
-            aws sqs get-queue-attributes --queue-url https://sqs.us-east-1.amazonaws.com/185329004895/nutrition-video-analysis-dev-video-processing --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible --region us-east-1 --output json
+            aws sqs get-queue-attributes --queue-url https://sqs.us-east-1.amazonaws.com/185329004895/food-detection-v2-jobs --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible --region us-east-1 --output json
 
             Write-Host "`n=== Checking Job Status ===" -ForegroundColor Cyan
-            curl -s https://y7z615hzm3.execute-api.us-east-1.amazonaws.com/v1/api/status/4d0f67dd-5d58-4e80-8986-9df0e99efeb6
+            curl -s https://c89txc5qr6.execute-api.us-east-1.amazonaws.com/v1/api/status/4d0f67dd-5d58-4e80-8986-9df0e99efeb6
 
             Write-Host "`n`n=== Summary ===" -ForegroundColor Green
             Write-Host "1. Docker image built with correct worker.py" -ForegroundColor White
             Write-Host "2. ECS service forced to deploy new image" -ForegroundColor White
             Write-Host "3. Worker should start processing SQS messages" -ForegroundColor White
             Write-Host "`nMonitor job progress with:" -ForegroundColor Yellow
-            Write-Host "curl https://y7z615hzm3.execute-api.us-east-1.amazonaws.com/v1/api/status/4d0f67dd-5d58-4e80-8986-9df0e99efeb6" -ForegroundColor White
+            Write-Host "curl https://c89txc5qr6.execute-api.us-east-1.amazonaws.com/v1/api/status/4d0f67dd-5d58-4e80-8986-9df0e99efeb6" -ForegroundColor White
         } else {
             Write-Host "`nFailed to update ECS service" -ForegroundColor Red
         }
@@ -54,7 +54,7 @@ while ($attempt -lt $maxAttempts -and -not $buildComplete) {
     if ($attempt % 5 -eq 0) {
         # Every 5th attempt, check ECR for new image
         Write-Host "Checking ECR for new image..." -ForegroundColor Yellow
-        aws ecr describe-images --repository-name nutrition-video-analysis-dev-video-processor --region us-east-1 --query 'sort_by(imageDetails,& imagePushedAt)[-1].{Pushed:imagePushedAt,Digest:imageDigest}' --output json
+        aws ecr describe-images --repository-name food-detection-v2-worker --region us-east-1 --query 'sort_by(imageDetails,& imagePushedAt)[-1].{Pushed:imagePushedAt,Digest:imageDigest}' --output json
     }
 
     if ($attempt -lt $maxAttempts) {

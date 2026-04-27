@@ -69,26 +69,12 @@ export default function MealDetailScreen() {
     : (user?.email?.split('@')[0] || 'User');
   const displayName = userName.charAt(0).toUpperCase() + userName.slice(1);
   
-  // Get current date for last login (mock)
-  const lastLoginDate = new Date().toLocaleDateString('en-US', {
-    month: 'long',
-    day: 'numeric',
-    year: 'numeric',
-  });
-  const lastLoginTime = new Date().toLocaleTimeString('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
-  });
-
   if (!item) {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
         <StatusBar barStyle="dark-content" />
         <AppHeader
           displayName={displayName}
-          lastLoginDate={lastLoginDate}
-          lastLoginTime={lastLoginTime}
           onProfilePress={() => navigation.navigate('Profile')}
         />
         <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
@@ -276,55 +262,6 @@ export default function MealDetailScreen() {
   const inputRefs = useRef<{ [rowId: string]: { name?: TextInput; weight?: TextInput; calories?: TextInput } }>({});
   // Refs for row containers to enable scrolling to specific rows
   const rowRefs = useRef<{ [rowId: string]: View | null }>({});
-
-  // Format capture date and time from item.timestamp (same approach as login time)
-  const captureDate = item?.timestamp 
-    ? (() => {
-        try {
-          // Try parsing the timestamp - handle ISO strings, locale strings, and numbers
-          let date: Date;
-          if (typeof item.timestamp === 'string') {
-            // Try ISO string first (standard format)
-            date = new Date(item.timestamp);
-            // If that fails, try parsing as number (timestamp in milliseconds)
-            if (isNaN(date.getTime())) {
-              const numValue = Number(item.timestamp);
-              if (!isNaN(numValue) && numValue > 0) {
-                date = new Date(numValue);
-              }
-            }
-          } else if (typeof item.timestamp === 'number') {
-            date = new Date(item.timestamp);
-          } else {
-            return null;
-          }
-          
-          if (isNaN(date.getTime())) {
-            return null;
-          }
-          
-          return date;
-        } catch (error) {
-          return null;
-        }
-      })()
-    : null;
-  
-  const captureDateText = captureDate
-    ? captureDate.toLocaleDateString('en-US', {
-        month: 'long',
-        day: 'numeric',
-        year: 'numeric',
-      })
-    : null;
-
-  const captureTimeText = captureDate
-    ? captureDate.toLocaleTimeString('en-US', {
-        hour: 'numeric',
-        minute: '2-digit',
-        hour12: true,
-      })
-    : null;
 
   // Track keyboard visibility
   useEffect(() => {
@@ -772,8 +709,6 @@ export default function MealDetailScreen() {
           <View style={{ flex: 1 }}>
             <AppHeader
               displayName={displayName}
-              lastLoginDate={lastLoginDate}
-              lastLoginTime={lastLoginTime}
               onProfilePress={() => {
                 try {
                   navigation.navigate('Profile');
@@ -1084,13 +1019,6 @@ export default function MealDetailScreen() {
               </View>
               <Text style={styles.addButtonText}>Add Base Ingredient</Text>
             </TouchableOpacity>
-            <View style={styles.captureInfo}>
-              <Text style={styles.captureValue}>
-                {captureDateText && captureTimeText
-                  ? `${captureDateText}, ${captureTimeText}`
-                  : 'Unavailable'}
-              </Text>
-            </View>
           </View>
         </View>
       </View>
@@ -1286,20 +1214,6 @@ const styles = StyleSheet.create({
   },
   mealActions: {
     alignItems: 'flex-end',
-  },
-  captureInfo: {
-    alignItems: 'flex-end',
-    marginTop: 4,
-  },
-  captureLabel: {
-    fontSize: 10,
-    color: '#9CA3AF',
-    textTransform: 'uppercase',
-  },
-  captureValue: {
-    fontSize: 11,
-    color: '#6B7280',
-    fontWeight: '400',
   },
   tableContainer: {
     paddingHorizontal: 16,

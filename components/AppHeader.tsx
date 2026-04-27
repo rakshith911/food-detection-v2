@@ -4,8 +4,8 @@ import ProfileIcon from './ProfileIcon';
 
 interface AppHeaderProps {
   displayName: string;
-  lastLoginDate: string;
-  lastLoginTime: string;
+  lastLoginDate?: string;
+  lastLoginTime?: string;
   onProfilePress?: () => void;
   profileIconColor?: string;
   containerStyle?: StyleProp<ViewStyle>;
@@ -32,9 +32,11 @@ export default function AppHeader({
           <Text style={styles.greeting} numberOfLines={1}>
             Hello {displayName}!
           </Text>
-          <Text style={styles.subText} numberOfLines={1}>
-            Last Login: {lastLoginDate}, {lastLoginTime}
-          </Text>
+          {lastLoginDate ? (
+            <Text style={styles.subText} numberOfLines={1}>
+              Last Login: {lastLoginTime ? `${lastLoginDate}, ${lastLoginTime}` : lastLoginDate}
+            </Text>
+          ) : null}
         </View>
       </View>
     </View>
@@ -79,4 +81,3 @@ const styles = StyleSheet.create({
     color: '#6B7280',
   },
 });
-

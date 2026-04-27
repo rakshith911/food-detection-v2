@@ -70,7 +70,6 @@ SQS_VIDEO_QUEUE_URL = os.environ.get('SQS_VIDEO_QUEUE_URL')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 DEVICE = os.environ.get('DEVICE', 'cpu')
 USE_PRODUCTION_IMAGE_PIPELINE = os.environ.get('USE_PRODUCTION_IMAGE_PIPELINE', 'true')
-ZOEDEPTH_REPO_DIR = os.environ.get('ZOEDEPTH_REPO_DIR')
 PRODUCTION_ASSETS_PREFIX = os.environ.get('PRODUCTION_ASSETS_PREFIX', 'production_assets/model_assets')
 
 # Processing settings
@@ -81,7 +80,6 @@ MESSAGE_VISIBILITY_TIMEOUT_SECONDS = int(os.environ.get('MESSAGE_VISIBILITY_TIME
 VISIBILITY_HEARTBEAT_INTERVAL_SECONDS = int(os.environ.get('VISIBILITY_HEARTBEAT_INTERVAL_SECONDS', '240'))
 
 print(f"🚀 Worker env: DEVICE={DEVICE} USE_PRODUCTION_IMAGE_PIPELINE={USE_PRODUCTION_IMAGE_PIPELINE}")
-print(f"🚀 Worker env: ZOEDEPTH_REPO_DIR={ZOEDEPTH_REPO_DIR}")
 print(f"🚀 Worker env: PRODUCTION_ASSETS_PREFIX={PRODUCTION_ASSETS_PREFIX}")
 
 
@@ -532,10 +530,21 @@ def process_message(message: dict, pipeline=None):
             # expire before the stored URL would be used anyway.
             output_dir = f"/app/data/outputs/production_{job_id}"
             image_assets = {
-                "sam3_segmentation": f"{output_dir}/sam3_segmentation.png",
-                "zoedepth_colored": f"{output_dir}/zoedepth_colored.png",
                 "rgb": f"{output_dir}/rgb.png",
             }
+            full_results = results.get("full_results", {}) if isinstance(results, dict) else {}
+            gemini_depth_assets = (
+                full_results.get("production_debug", {}).get("gemini_depth_assets")
+                or full_results.get("production_debug", {}).get("depth_outputs", {}).get("gemini_metric_depth")
+                or {}
+            )
+            if gemini_depth_assets.get("full_depth_path"):
+                image_assets["gemini_depth_full"] = gemini_depth_assets["full_depth_path"]
+            for ingredient_asset in gemini_depth_assets.get("ingredients") or []:
+                asset_path = ingredient_asset.get("path")
+                slug = ingredient_asset.get("slug") or ingredient_asset.get("name") or "ingredient"
+                if asset_path:
+                    image_assets[f"gemini_depth_ingredient_{slug}"] = asset_path
             uploaded_keys = []
             for asset_name, local_path in image_assets.items():
                 if os.path.exists(local_path):
@@ -631,8 +640,7 @@ def process_message(message: dict, pipeline=None):
         )
 
         deterministic_errors = (
-            "TRELLIS geometric volume anchor is missing or invalid",
-            "Volume estimation did not return a positive total_dish_volume_ml",
+            "Gemini metric-depth volume estimation did not return a positive total_volume_ml",
         )
         if any(msg in str(e) for msg in deterministic_errors):
             print(f"Deterministic failure for job {job_id}; deleting SQS message to avoid endless retries")
@@ -741,66 +749,7 @@ def download_models_from_s3():
         except Exception as e:
             print(f"  ✗ Failed to download {s3_key}: {e}")
     
-    print("Model download complete!")
-
-    download_production_assets_from_s3()
-
-
-def download_production_assets_from_s3():
-    """Download SAM3/ZoeDepth/MiDaS production assets from S3."""
-    if not S3_MODELS_BUCKET:
-        print("S3_MODELS_BUCKET not set, skipping production asset download")
-        return
-
-    prefix = (PRODUCTION_ASSETS_PREFIX or "").strip().strip("/")
-    if not prefix:
-        print("PRODUCTION_ASSETS_PREFIX not set, skipping production asset download")
-        return
-
-    local_root = "/app/PRODUCTION/model_assets"
-    os.makedirs(local_root, exist_ok=True)
-
-    print(f"Syncing production assets from s3://{S3_MODELS_BUCKET}/{prefix}/ ...")
-    paginator = s3.get_paginator("list_objects_v2")
-    found_any = False
-
-    for page in paginator.paginate(Bucket=S3_MODELS_BUCKET, Prefix=f"{prefix}/"):
-        for item in page.get("Contents", []):
-            s3_key = item["Key"]
-            if s3_key.endswith("/"):
-                continue
-            found_any = True
-            relative_key = s3_key[len(prefix) + 1:]
-            local_path = os.path.join(local_root, relative_key)
-            os.makedirs(os.path.dirname(local_path), exist_ok=True)
-            if os.path.exists(local_path):
-                print(f"  ✓ {relative_key} already exists")
-                continue
-            try:
-                print(f"  Downloading {s3_key}...")
-                s3.download_file(S3_MODELS_BUCKET, s3_key, local_path)
-                print(f"  ✓ Downloaded {relative_key}")
-            except Exception as e:
-                print(f"  ✗ Failed to download {s3_key}: {e}")
-
-    if not found_any:
-        print(
-            f"⚠️ No production assets found at s3://{S3_MODELS_BUCKET}/{prefix}/ "
-            "- SAM3/ZoeDepth image pipeline will not be available"
-        )
-        return
-
-    expected = [
-        "/app/PRODUCTION/model_assets/sam3_foodseg_final/config.json",
-        "/app/PRODUCTION/model_assets/sam3_foodseg_final/model.safetensors",
-        "/app/PRODUCTION/model_assets/zoedepth/ZoeD_M12_N.pt",
-        "/app/PRODUCTION/model_assets/midas_repo/hubconf.py",
-    ]
-    missing = [path for path in expected if not os.path.exists(path)]
-    if missing:
-        print(f"⚠️ Production assets downloaded but missing expected files: {missing}")
-    else:
-        print("✅ Production assets ready for SAM3/ZoeDepth image pipeline")
+    print("Model download complete! Production asset sync skipped (Gemini metric-depth mode).")
 
 
 if __name__ == '__main__':

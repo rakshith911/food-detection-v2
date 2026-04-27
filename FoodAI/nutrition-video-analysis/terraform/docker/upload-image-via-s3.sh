@@ -7,7 +7,7 @@ echo "Uploading Docker image to ECR via S3"
 echo "=========================================="
 
 # Configuration
-ECR_REPO="185329004895.dkr.ecr.us-east-1.amazonaws.com/nutrition-video-analysis-dev-video-processor"
+ECR_REPO="185329004895.dkr.ecr.us-east-1.amazonaws.com/food-detection-v2-worker"
 IMAGE_TAG="latest"
 LOCAL_IMAGE="${ECR_REPO}:${IMAGE_TAG}"
 S3_BUCKET="nutrition-video-analysis-dev-videos-60ppnqfp"

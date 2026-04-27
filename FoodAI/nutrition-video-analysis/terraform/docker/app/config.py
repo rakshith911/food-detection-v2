@@ -48,11 +48,6 @@ class Settings(BaseSettings):
     SAM2_CHECKPOINT: str = "checkpoints/sam2.1_hiera_base_plus.pt"
     SAM2_CONFIG: str = "configs/sam2.1/sam2.1_hiera_b+.yaml"
     PRODUCTION_ROOT: Path = _DOCKER_PRODUCTION_ROOT if Path("/app").exists() else _LOCAL_PRODUCTION_ROOT
-    SAM3_MODEL_DIR: Path = PRODUCTION_ROOT / "model_assets" / "sam3_foodseg_final"
-    ZOEDEPTH_CHECKPOINT: Path = PRODUCTION_ROOT / "model_assets" / "zoedepth" / "ZoeD_M12_N.pt"
-    MIDAS_REPO_DIR: Path = PRODUCTION_ROOT / "model_assets" / "midas_repo"
-    ZOE_FX: float = 615.0
-    ZOE_FY: float = 615.0
     # Use Gemini for detection (image/video understanding) instead of Florence-2 when True
     USE_GEMINI_DETECTION: bool = True  # Set False to use Florence-2 for object detection
     # When True and media is video, call Gemini video API once for the whole clip; when False, use Gemini image per frame
@@ -115,7 +110,7 @@ class Settings(BaseSettings):
     TRELLIS_OUTPUT_PREFIX: str = "v2/trellis/outputs"
     TRELLIS_AWS_REGION: str = "us-east-1"
     TRELLIS_TASK_TIMEOUT_S: int = 1800  # 30-min hard timeout per GPU task
-    TRELLIS_PREVIEW_SECONDS: int = 4
+    TRELLIS_PREVIEW_SECONDS: int = 8
     TRELLIS_PREVIEW_FPS: int = 15
 
     # External APIs
@@ -184,9 +179,6 @@ class Settings(BaseSettings):
             self.GEMINI_DENSITY_CACHE_PATH = unified_data / "gemini_density_cache.json"
         else:
             self.PRODUCTION_ROOT = _DOCKER_PRODUCTION_ROOT
-        self.SAM3_MODEL_DIR = self.PRODUCTION_ROOT / "model_assets" / "sam3_foodseg_final"
-        self.ZOEDEPTH_CHECKPOINT = self.PRODUCTION_ROOT / "model_assets" / "zoedepth" / "ZoeD_M12_N.pt"
-        self.MIDAS_REPO_DIR = self.PRODUCTION_ROOT / "model_assets" / "midas_repo"
         return self
 
     @model_validator(mode="after")

@@ -11,7 +11,7 @@ echo "==========================================="
 
 # Configuration
 S3_BUCKET="nutrition-video-analysis-dev-videos-60ppnqfp"
-ECR_REPO="185329004895.dkr.ecr.us-east-1.amazonaws.com/nutrition-video-analysis-dev-video-processor"
+ECR_REPO="185329004895.dkr.ecr.us-east-1.amazonaws.com/food-detection-v2-worker"
 IMAGE_TAG="latest"
 REGION="us-east-1"
 
@@ -52,7 +52,7 @@ echo "Image: ${ECR_REPO}:${IMAGE_TAG}"
 echo ""
 echo "Next steps:"
 echo "1. Verify image in ECR:"
-echo "   aws ecr describe-images --repository-name nutrition-video-analysis-dev-video-processor --region ${REGION}"
+echo "   aws ecr describe-images --repository-name food-detection-v2-worker --region ${REGION}"
 echo ""
 echo "2. Force ECS service update to use new image:"
-echo "   aws ecs update-service --cluster nutrition-video-analysis-dev-cluster --service nutrition-video-analysis-dev-video-processor --force-new-deployment --region ${REGION}"
+echo "   aws ecs update-service --cluster food-detection-v2-cluster --service food-detection-v2-worker --force-new-deployment --region ${REGION}"

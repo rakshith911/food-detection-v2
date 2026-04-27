@@ -41,11 +41,11 @@ aws ecr get-login-password --region us-east-1 | sudo docker login --username AWS
 
 # Build Docker image
 echo "Building Docker image..."
-sudo docker build --platform linux/amd64 -f Dockerfile -t 185329004895.dkr.ecr.us-east-1.amazonaws.com/nutrition-video-analysis-dev-video-processor:latest .
+sudo docker build --platform linux/amd64 -f Dockerfile -t 185329004895.dkr.ecr.us-east-1.amazonaws.com/food-detection-v2-worker:latest .
 
 # Push to ECR
 echo "Pushing to ECR..."
-sudo docker push 185329004895.dkr.ecr.us-east-1.amazonaws.com/nutrition-video-analysis-dev-video-processor:latest
+sudo docker push 185329004895.dkr.ecr.us-east-1.amazonaws.com/food-detection-v2-worker:latest
 
 echo "Docker build and push completed successfully!"
 echo "Build completed at: \$(date)" > /home/ec2-user/build-complete.txt
@@ -123,5 +123,5 @@ Write-Host "aws s3 ls s3://nutrition-video-analysis-dev-videos-60ppnqfp/docker-i
 
 Write-Host "`n=== Next Steps ===" -ForegroundColor Cyan
 Write-Host "1. Wait for Docker build to complete (10-15 minutes)" -ForegroundColor White
-Write-Host "2. Once complete, force ECS to update: aws ecs update-service --cluster nutrition-video-analysis-dev-cluster --service nutrition-video-analysis-dev-video-processor --force-new-deployment --region $REGION" -ForegroundColor White
+Write-Host "2. Once complete, force ECS to update: aws ecs update-service --cluster food-detection-v2-cluster --service food-detection-v2-worker --force-new-deployment --region $REGION" -ForegroundColor White
 Write-Host "3. Terminate this instance to save costs: aws ec2 terminate-instances --instance-ids $instanceId --region $REGION" -ForegroundColor White

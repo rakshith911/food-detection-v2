@@ -4,14 +4,14 @@ $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";"
 Write-Host "=== Checking ECS Task Status ===" -ForegroundColor Cyan
 
 # Get the task ARN
-$taskArn = aws ecs list-tasks --cluster nutrition-video-analysis-dev-cluster --service-name nutrition-video-analysis-dev-video-processor --region us-east-1 --query 'taskArns[0]' --output text
+$taskArn = aws ecs list-tasks --cluster food-detection-v2-cluster --service-name food-detection-v2-worker --region us-east-1 --query 'taskArns[0]' --output text
 
 if ($taskArn) {
     Write-Host "`nTask ARN: $taskArn" -ForegroundColor Yellow
 
     # Get task details
     Write-Host "`nTask Details:" -ForegroundColor Cyan
-    aws ecs describe-tasks --cluster nutrition-video-analysis-dev-cluster --tasks $taskArn --region us-east-1 --query 'tasks[0].{lastStatus:lastStatus,healthStatus:healthStatus,desiredStatus:desiredStatus,containers:containers[0].{name:name,lastStatus:lastStatus,healthStatus:healthStatus,exitCode:exitCode}}' --output json
+    aws ecs describe-tasks --cluster food-detection-v2-cluster --tasks $taskArn --region us-east-1 --query 'tasks[0].{lastStatus:lastStatus,healthStatus:healthStatus,desiredStatus:desiredStatus,containers:containers[0].{name:name,lastStatus:lastStatus,healthStatus:healthStatus,exitCode:exitCode}}' --output json
 
     # Get CloudWatch logs
     Write-Host "`n=== Recent CloudWatch Logs ===" -ForegroundColor Cyan

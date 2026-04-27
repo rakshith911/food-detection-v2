@@ -31,7 +31,6 @@ ENV TMPDIR=/tmp
 ENV TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor_app
 ENV USER=appuser
 ENV LOGNAME=appuser
-ENV ZOEDEPTH_REPO_DIR=/app/vendor/ZoeDepth
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -87,11 +86,6 @@ RUN pip install --no-cache-dir --force-reinstall "git+https://github.com/hugging
 # Install flash-attn if possible (optional, may fail)
 RUN pip install --no-cache-dir flash-attn==2.3.6 || echo "⚠️ flash-attn installation failed, continuing without it (eager attention will be used)"
 
-# Install ZoeDepth source package from the official repository so the packaged
-# local checkpoint in PRODUCTION can be loaded in the same runtime.
-RUN git clone --depth 1 https://github.com/isl-org/ZoeDepth.git /app/vendor/ZoeDepth && \
-    python3 -c "import sys; sys.path.insert(0, '/app/vendor/ZoeDepth'); import zoedepth; print('✅ zoedepth imported successfully')"
-
 # Copy worker script
 COPY worker.py .
 
@@ -117,9 +111,6 @@ RUN ls -la /app/ && \
     test -f /app/worker.py && \
     test -f /app/nutrition_rag_system.py && \
     echo "All required files present"
-
-RUN python3 -c "from transformers import Sam3Model, Sam3Processor; print('✅ SAM3 classes available in transformers')" && \
-    python3 -c "import zoedepth; print('✅ ZoeDepth package available')"
 
 # Verify CUDA is available
 RUN python3 -c "import torch; print(f'✅ PyTorch version: {torch.__version__}'); print(f'✅ CUDA available: {torch.cuda.is_available()}'); print(f'✅ CUDA version: {torch.version.cuda if torch.cuda.is_available() else \"N/A\"}'); print(f'✅ GPU count: {torch.cuda.device_count() if torch.cuda.is_available() else 0}')"

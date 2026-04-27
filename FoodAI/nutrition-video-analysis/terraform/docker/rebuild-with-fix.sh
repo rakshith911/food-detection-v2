@@ -23,16 +23,16 @@ echo "=== Logging into ECR ==="
 aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 185329004895.dkr.ecr.us-east-1.amazonaws.com
 
 echo "=== Building Docker image ==="
-docker build -t nutrition-video-analysis-dev-video-processor .
+docker build -t food-detection-v2-worker .
 
 echo "=== Tagging image ==="
-docker tag nutrition-video-analysis-dev-video-processor:latest 185329004895.dkr.ecr.us-east-1.amazonaws.com/nutrition-video-analysis-dev-video-processor:latest
+docker tag food-detection-v2-worker:latest 185329004895.dkr.ecr.us-east-1.amazonaws.com/food-detection-v2-worker:latest
 
 echo "=== Pushing to ECR ==="
-docker push 185329004895.dkr.ecr.us-east-1.amazonaws.com/nutrition-video-analysis-dev-video-processor:latest
+docker push 185329004895.dkr.ecr.us-east-1.amazonaws.com/food-detection-v2-worker:latest
 
 echo "=== Forcing ECS redeployment ==="
-aws ecs update-service --cluster nutrition-video-analysis-dev-cluster --service nutrition-video-analysis-dev-video-processor --force-new-deployment --region us-east-1
+aws ecs update-service --cluster food-detection-v2-cluster --service food-detection-v2-worker --force-new-deployment --region us-east-1
 
 echo "=== DONE! ==="
 echo "New Docker image pushed. ECS will redeploy in 2-3 minutes."

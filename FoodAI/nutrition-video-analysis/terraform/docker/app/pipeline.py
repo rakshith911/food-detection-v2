@@ -47,6 +47,10 @@ class NutritionVideoPipeline:
         **_GEMINI_GEN_CONFIG,
         "max_output_tokens": 4096,
     }
+    _GEMINI_DEPTH_IMAGE_MODEL = os.environ.get(
+        "GEMINI_DEPTH_IMAGE_MODEL",
+        "gemini-3.1-flash-image-preview",
+    )
 
     @staticmethod
     def _get_s3_client():
@@ -112,6 +116,111 @@ class NutritionVideoPipeline:
             if candidate and candidate not in deduped:
                 deduped.append(candidate)
         return deduped
+
+    @staticmethod
+    def _slugify_asset_name(value: str) -> str:
+        slug = re.sub(r"[^a-zA-Z0-9]+", "_", (value or "").strip().lower()).strip("_")
+        return slug or "ingredient"
+
+    def _parse_json_object_or_array(self, response_text: str, expected: str = "object"):
+        text = (response_text or "").strip()
+        if "```json" in text:
+            start = text.find("```json") + 7
+            end = text.find("```", start)
+            text = text[start:end].strip() if end >= 0 else text[start:].strip()
+        elif "```" in text:
+            start = text.find("```") + 3
+            end = text.find("```", start)
+            text = text[start:end].strip() if end >= 0 else text[start:].strip()
+
+        if expected == "array":
+            start = text.find("[")
+            end = text.rfind("]") + 1
+        else:
+            start = text.find("{")
+            end = text.rfind("}") + 1
+        if start < 0 or end <= start:
+            raise json.JSONDecodeError("No JSON payload found", text, 0)
+        return json.loads(text[start:end])
+
+    def _pil_to_inline_part(self, image: Image.Image, mime_type: str = "image/jpeg", quality: int = 90):
+        from google.genai import types
+
+        buf = io.BytesIO()
+        fmt = "PNG" if mime_type == "image/png" else "JPEG"
+        save_kwargs = {}
+        if fmt == "JPEG":
+            save_kwargs["quality"] = quality
+        image.convert("RGB").save(buf, format=fmt, **save_kwargs)
+        return types.Part(inline_data=types.Blob(mime_type=mime_type, data=buf.getvalue()))
+
+    def _gemini_generate_image(self, image_pil: Image.Image, prompt: str, job_id: str, stage: str) -> tuple[Image.Image, str]:
+        from google import genai as genai_new
+        from google.genai import types
+
+        client = genai_new.Client(api_key=self.config.GEMINI_API_KEY)
+        start_time = time.monotonic()
+        try:
+            response = client.models.generate_content(
+                model=self._GEMINI_DEPTH_IMAGE_MODEL,
+                contents=types.Content(parts=[
+                    self._pil_to_inline_part(image_pil),
+                    types.Part(text=prompt),
+                ]),
+                config=types.GenerateContentConfig(response_modalities=["IMAGE", "TEXT"]),
+            )
+        except Exception as exc:
+            latency_s = time.monotonic() - start_time
+            is_rate_limit = "429" in str(exc) or "rate" in str(exc).lower() or "quota" in str(exc).lower()
+            logger.warning(
+                "[%s] Gemini image generation failed stage=%s model=%s latency=%.2fs rate_limited=%s error=%s",
+                job_id,
+                stage,
+                self._GEMINI_DEPTH_IMAGE_MODEL,
+                latency_s,
+                is_rate_limit,
+                exc,
+            )
+            raise
+        latency_s = time.monotonic() - start_time
+
+        response_text_parts = []
+        image_bytes = None
+        image_mime = "image/png"
+        for part in response.candidates[0].content.parts:
+            if getattr(part, "inline_data", None) and part.inline_data and part.inline_data.data:
+                image_bytes = part.inline_data.data
+                image_mime = part.inline_data.mime_type or image_mime
+            elif getattr(part, "text", None):
+                response_text_parts.append(part.text)
+        if not image_bytes:
+            logger.warning(
+                "[%s] Gemini image generation returned no image stage=%s model=%s latency=%.2fs",
+                job_id,
+                stage,
+                self._GEMINI_DEPTH_IMAGE_MODEL,
+                latency_s,
+            )
+            raise RuntimeError(f"Gemini depth image generation returned no image for {stage}")
+
+        logger.info(
+            "[%s] Gemini image generation complete stage=%s model=%s latency=%.2fs mime=%s bytes=%d",
+            job_id,
+            stage,
+            self._GEMINI_DEPTH_IMAGE_MODEL,
+            latency_s,
+            image_mime,
+            len(image_bytes),
+        )
+        self._record_gemini_output(
+            stage=stage,
+            job_id=job_id,
+            model_name=self._GEMINI_DEPTH_IMAGE_MODEL,
+            prompt=prompt,
+            response_text="\n".join(response_text_parts),
+            metadata={"image_mime": image_mime, "image_bytes": len(image_bytes), "latency_s": round(latency_s, 3)},
+        )
+        return Image.open(io.BytesIO(image_bytes)).convert("RGB"), image_mime
 
     @staticmethod
     def _attach_grounding_metadata(nutrition: dict, rag, food_name: str, density_source: str, calorie_source: str) -> dict:
@@ -314,29 +423,19 @@ class NutritionVideoPipeline:
         if getattr(self.config, "USE_PRODUCTION_IMAGE_PIPELINE", True):
             logger.info(
                 f"[{job_id}] Attempting production image pipeline "
-                f"(Gemini labels -> TRELLIS -> Gemini volume)"
+                f"(Gemini labels -> Gemini metric depth -> Gemini volume -> TRELLIS preview)"
             )
             return self._run_production_image_pipeline(image_path, job_id, user_context=user_context)
 
     def process_video(self, video_path: Path, job_id: str, user_context: dict = None) -> Dict:
         """
-        Process a video using the same production pipeline as images.
-
-        Flow:
-          1. Load ALL frames from the video (up to VIDEO_MAX_DURATION_SECONDS).
-          2. Pick the sharpest frame from the middle-third as the representative frame.
-          3. Save it as a temp JPEG and run _run_production_image_pipeline on it —
-             the image pipeline is completely untouched.
-          4. Extract detected food names from the result and run SAM3 on ~15 evenly-spaced
-             keyframes across the video.
-          5. Propagate keyframe masks to every frame (nearest-keyframe assignment — the
-             meal is static so this is accurate).
-          6. Render the full SAM3-segmented overlay video and upload to S3.
-          7. Return the image-pipeline result structure with media_type="video".
+        Process a video through the same Gemini metric-depth production pipeline
+        as images, using the sharpest middle-third frame as the representative
+        meal view. TRELLIS remains preview-only and is never used for volume.
         """
         import tempfile
 
-        logger.info(f"[{job_id}] Starting video processing (SAM3 pipeline): {video_path.name}")
+        logger.info(f"[{job_id}] Starting video processing (Gemini metric-depth representative frame): {video_path.name}")
 
         # Reset per-job state
         self.florence_detections = []
@@ -374,68 +473,11 @@ class NutritionVideoPipeline:
                 except Exception:
                     pass
 
-            # ── Step 4: Run SAM3 on keyframes for segmented video ─────────────
-            # Extract food labels from the image pipeline result
-            visible_items = (
-                image_result.get("production_debug", {}).get("visible_items") or []
-            )
-            food_labels = [item["name"] for item in visible_items if item.get("name")]
-            vessel = image_result.get("production_debug", {}).get("gemini_pass_1", {}).get("plate_or_bowl")
-            segmentation_prompts = list(dict.fromkeys(
-                food_labels
-                + ([vessel["name"]] if vessel and vessel.get("name") else [])
-            ))
-
-            sam3_per_keyframe: Dict[int, Dict[str, Any]] = {}
-            if segmentation_prompts:
-                n_total = len(all_frames)
-                # ~15 keyframes evenly spaced; always include the representative frame
-                n_keyframes = min(15, n_total)
-                step = max(1, n_total // n_keyframes)
-                keyframe_indices = list(range(0, n_total, step))
-                if rep_idx not in keyframe_indices:
-                    keyframe_indices.append(rep_idx)
-                keyframe_indices = sorted(set(keyframe_indices))
-
-                sam3_model, sam3_processor = self.models.sam3
-                from app.production_models import run_sam3_image
-                for kf_idx in keyframe_indices:
-                    kf_pil = Image.fromarray(all_frames[kf_idx])
-                    masks = run_sam3_image(
-                        sam3_model, sam3_processor,
-                        kf_pil, segmentation_prompts,
-                        device=self.device,
-                    )
-                    sam3_per_keyframe[kf_idx] = masks
-                    logger.info(
-                        f"[{job_id}] SAM3 keyframe {kf_idx}: "
-                        + ", ".join(f"{p}={'ok' if (masks.get(p) or {}).get('mask') is not None else 'no-mask'}"
-                                    for p in segmentation_prompts)
-                    )
-            else:
-                logger.warning(f"[{job_id}] No segmentation prompts — skipping SAM3 keyframes")
-
-            # ── Step 5: Generate segmented overlay video ───────────────────────
-            try:
-                self._generate_segmented_video_from_sam3(
-                    video_path=video_path,
-                    all_frames=all_frames,
-                    sam3_per_keyframe=sam3_per_keyframe,
-                    segmentation_prompts=segmentation_prompts,
-                    fps=fps,
-                    video_rotation=video_rotation,
-                    job_id=job_id,
-                )
-            except Exception as e:
-                logger.warning(f"[{job_id}] Segmented video generation failed (non-fatal): {e}", exc_info=True)
-
-            # ── Step 6: Return result (image pipeline structure + video metadata) ─
             image_result["media_type"] = "video"
             image_result["media_name"] = video_path.name
             image_result["num_frames_processed"] = len(all_frames)
-            image_result["pipeline_runtime"]["video_pipeline"] = "sam3_production"
+            image_result["pipeline_runtime"]["video_pipeline"] = "gemini_metric_depth_representative_frame"
             image_result["pipeline_runtime"]["representative_frame_idx"] = rep_idx
-            image_result["pipeline_runtime"]["num_keyframes_segmented"] = len(sam3_per_keyframe)
 
             logger.info(f"[{job_id}] ✓ Video processing completed successfully")
             return image_result
@@ -444,7 +486,7 @@ class NutritionVideoPipeline:
             logger.error(f"[{job_id}] Video pipeline failed: {e}", exc_info=True)
             raise
 
-    # ── Video helpers (SAM3 pipeline) ─────────────────────────────────────────
+    # ── Video helpers ────────────────────────────────────────────────────────
 
     def _load_all_video_frames(
         self, video_path: Path, job_id: str
@@ -576,154 +618,6 @@ class NutritionVideoPipeline:
                 best_score = score
                 best_idx = i
         return best_idx
-
-    def _generate_segmented_video_from_sam3(
-        self,
-        video_path: Path,
-        all_frames: List[np.ndarray],
-        sam3_per_keyframe: Dict[int, Dict[str, Any]],
-        segmentation_prompts: List[str],
-        fps: float,
-        video_rotation: int,
-        job_id: str,
-    ) -> None:
-        """
-        Render a segmented overlay video using pre-computed SAM3 masks.
-
-        For each frame in all_frames the mask from the nearest keyframe is used
-        (nearest-keyframe propagation).  The meal is static so this is accurate
-        and fast.  Output is H.264 MP4, physically rotated via ffmpeg to match
-        the original video orientation, and uploaded to S3.
-        """
-        import cv2 as _cv2
-
-        if not sam3_per_keyframe or not all_frames:
-            logger.info(f"[{job_id}] No SAM3 keyframe data — skipping segmented video")
-            return
-
-        keyframe_indices = sorted(sam3_per_keyframe.keys())
-
-        _PALETTE_BGR = [
-            (0, 200, 255),   # yellow
-            (0, 255, 100),   # green
-            (255,  80,  80), # blue
-            ( 80,  80, 255), # red
-            (255,   0, 200), # magenta
-            (  0, 220, 180), # lime
-            (200,   0, 255), # purple
-            (  0, 180, 255), # orange
-        ]
-        label_colors: Dict[str, tuple] = {
-            prompt: _PALETTE_BGR[i % len(_PALETTE_BGR)]
-            for i, prompt in enumerate(segmentation_prompts)
-        }
-
-        h, w = all_frames[0].shape[:2]
-        overlay_dir = self.config.OUTPUT_DIR / job_id / "masks_overlay"
-        overlay_dir.mkdir(parents=True, exist_ok=True)
-        out_video_path = overlay_dir / "segmented_overlay_video.mp4"
-
-        render_fps = min(fps, 30.0)
-        fourcc = _cv2.VideoWriter_fourcc(*'mp4v')
-        writer = _cv2.VideoWriter(str(out_video_path), fourcc, render_fps, (w, h))
-        if not writer.isOpened():
-            logger.warning(f"[{job_id}] Could not open VideoWriter: {out_video_path}")
-            return
-
-        font = _cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.55
-        font_thickness = 1
-
-        def _nearest_keyframe(frame_idx: int) -> int:
-            return min(keyframe_indices, key=lambda k: abs(k - frame_idx))
-
-        for frame_idx, frame_rgb in enumerate(all_frames):
-            frame_bgr = _cv2.cvtColor(frame_rgb, _cv2.COLOR_RGB2BGR)
-            overlay = frame_bgr.copy()
-
-            kf = _nearest_keyframe(frame_idx)
-            masks_for_frame = sam3_per_keyframe.get(kf, {})
-
-            for prompt in segmentation_prompts:
-                entry = masks_for_frame.get(prompt) or {}
-                mask = entry.get("mask")
-                if mask is None:
-                    continue
-                # Resize mask to frame dimensions if needed
-                if mask.shape != (h, w):
-                    mask = _cv2.resize(
-                        mask.astype(np.uint8), (w, h),
-                        interpolation=_cv2.INTER_NEAREST,
-                    ).astype(bool)
-
-                color = label_colors.get(prompt, (128, 128, 128))
-                color_layer = np.zeros_like(frame_bgr, dtype=np.uint8)
-                color_layer[:] = color
-                blended = _cv2.addWeighted(overlay, 0.25, color_layer, 0.75, 0)
-                overlay[mask] = blended[mask]
-
-                contours, _ = _cv2.findContours(
-                    mask.astype(np.uint8), _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE
-                )
-                _cv2.drawContours(overlay, contours, -1, color, 2)
-
-                ys, xs = np.where(mask)
-                if len(xs) > 0:
-                    cx, cy = int(np.mean(xs)), int(np.mean(ys))
-                    (tw, th), _ = _cv2.getTextSize(prompt, font, font_scale, font_thickness)
-                    pad = 4
-                    px1 = max(0, cx - tw // 2 - pad)
-                    py1 = max(0, cy - th // 2 - pad)
-                    px2 = min(w, cx + tw // 2 + pad)
-                    py2 = min(h, cy + th // 2 + pad)
-                    _cv2.rectangle(overlay, (px1, py1), (px2, py2), (255, 255, 255), -1)
-                    _cv2.putText(overlay, prompt, (px1 + pad, py2 - pad),
-                                 font, font_scale, (0, 0, 0), font_thickness, _cv2.LINE_AA)
-
-            writer.write(overlay)
-
-        writer.release()
-        logger.info(f"[{job_id}] Wrote SAM3 segmented overlay video ({len(all_frames)} frames): {out_video_path}")
-
-        # Re-encode to H.264 with physical rotation correction
-        _tmp = out_video_path.with_suffix('.raw.mp4')
-        try:
-            out_video_path.rename(_tmp)
-            _vf = []
-            if video_rotation == 90:
-                _vf = ['-vf', 'transpose=2']
-            elif video_rotation in (270, -90):
-                _vf = ['-vf', 'transpose=1']
-            elif video_rotation == 180:
-                _vf = ['-vf', 'transpose=2,transpose=2']
-            subprocess.run(
-                ['ffmpeg', '-y', '-i', str(_tmp),
-                 *_vf,
-                 '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
-                 str(out_video_path)],
-                check=True, capture_output=True,
-            )
-            _tmp.unlink()
-            logger.info(f"[{job_id}] Re-encoded overlay video to H.264 (rotation={video_rotation}°)")
-        except Exception as enc_err:
-            logger.warning(f"[{job_id}] FFmpeg H.264 re-encode failed: {enc_err} — using mp4v")
-            if _tmp.exists():
-                _tmp.rename(out_video_path)
-
-        # Upload to S3
-        if S3_RESULTS_BUCKET and UPLOAD_SEGMENTED_IMAGES and out_video_path.exists():
-            try:
-                global s3_client
-                if s3_client is None:
-                    s3_client = boto3.client('s3')
-                s3_key = f"segmented_images/{job_id}/segmented_overlay_video.mp4"
-                s3_client.upload_file(
-                    str(out_video_path), S3_RESULTS_BUCKET, s3_key,
-                    ExtraArgs={'ContentType': 'video/mp4'},
-                )
-                logger.info(f"[{job_id}] Uploaded SAM3 segmented video → s3://{S3_RESULTS_BUCKET}/{s3_key}")
-            except Exception as e:
-                logger.warning(f"[{job_id}] Failed to upload segmented video: {e}")
 
     def _gemini_first_pass_image(self, image_pil, job_id: str, user_context: dict = None) -> dict:
         try:
@@ -1648,7 +1542,6 @@ class NutritionVideoPipeline:
             "variant_volume_ml": self._round_optional(variant_total_volume, 1) if variant_items else None,
             "variant_contribution_kcal": self._round_optional(variant_total_kcal, 1) if variant_items else None,
             "variant_confidence": round(variant_confidence, 4) if variant_items else None,
-            "sam3_segmentation": debug_assets.get("sam3_segmentation_path"),
             "depth_map": debug_assets.get("calibrated_depth_visual_path") or debug_assets.get("raw_depth_visual_path"),
             "masked_depth_map": debug_assets.get("dish_masked_depth_path"),
         }
@@ -1700,11 +1593,10 @@ class NutritionVideoPipeline:
                 "weighted_components": overall_confidence.get("weighted_components") or {},
             },
             "assets": {
-                "sam3_segmentation": debug_assets.get("sam3_segmentation_path"),
                 "depth_map": debug_assets.get("calibrated_depth_visual_path") or debug_assets.get("raw_depth_visual_path"),
                 "masked_depth_map": debug_assets.get("dish_masked_depth_path"),
                 "rgb": debug_assets.get("rgb_path"),
-                "zoedepth_colored": debug_assets.get("zoedepth_colored_path"),
+                "gemini_depth_full": (debug_assets.get("gemini_depth_assets") or {}).get("full_depth_path"),
             },
             "context": {
                 "visible_ingredients": first_pass.get("visible_ingredients") or [],
@@ -1736,18 +1628,16 @@ class NutritionVideoPipeline:
         self,
         first_pass: dict,
         visible_items: list[dict],
-        sam3_results: dict,
         calibration: dict,
         volume_map: dict,
         questionnaire_verification: list[dict],
         nutrition_results: dict,
     ) -> dict:
         weights = {
-            "detection": 0.20,
-            "segmentation": 0.15,
+            "detection": 0.25,
             "calibration": 0.20,
-            "volume": 0.25,
-            "nutrition_lookup": 0.20,
+            "volume": 0.30,
+            "nutrition_lookup": 0.25,
         }
 
         detection_values = [
@@ -1756,17 +1646,14 @@ class NutritionVideoPipeline:
         ]
         detection_confidence = self._safe_average(detection_values, default=0.0)
 
-        segmentation_values = []
-        for item in visible_items:
-            sam_entry = sam3_results.get(item["name"]) or {}
-            score = sam_entry.get("score")
-            if score is not None:
-                segmentation_values.append(float(score))
-        segmentation_confidence = self._safe_average(segmentation_values, default=0.0)
-
         calibration_method = (calibration.get("method") or "").strip().lower()
         calibration_reference_conf = float(calibration.get("confidence") or 0.0)
-        if calibration_method == "gemini_reference":
+        if calibration_method == "gemini_metric_depth":
+            calibration_confidence = self._safe_average(
+                [calibration_reference_conf, 0.85],
+                default=0.75,
+            )
+        elif calibration_method == "gemini_reference":
             calibration_confidence = self._safe_average(
                 [calibration_reference_conf, 0.9],
                 default=0.75,
@@ -1797,7 +1684,6 @@ class NutritionVideoPipeline:
 
         weighted_components = {
             "detection": detection_confidence * weights["detection"],
-            "segmentation": segmentation_confidence * weights["segmentation"],
             "calibration": calibration_confidence * weights["calibration"],
             "volume": volume_confidence * weights["volume"],
             "nutrition_lookup": nutrition_lookup_confidence * weights["nutrition_lookup"],
@@ -1815,11 +1701,6 @@ class NutritionVideoPipeline:
                     "confidence": round(detection_confidence, 4),
                     "count": len(detection_values),
                     "values": [round(v, 4) for v in detection_values],
-                },
-                "segmentation": {
-                    "confidence": round(segmentation_confidence, 4),
-                    "count": len(segmentation_values),
-                    "values": [round(v, 4) for v in segmentation_values],
                 },
                 "calibration": {
                     "confidence": round(calibration_confidence, 4),
@@ -1850,548 +1731,208 @@ class NutritionVideoPipeline:
             },
         }
 
-    @staticmethod
-    def _mask_bbox(mask: np.ndarray) -> Optional[List[int]]:
-        if mask is None or mask.sum() == 0:
-            return None
-        ys, xs = np.where(mask)
-        if len(xs) == 0 or len(ys) == 0:
-            return None
-        return [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())]
-
-    @staticmethod
-    def _resize_mask_to_shape(mask: Optional[np.ndarray], target_shape: tuple[int, int]) -> Optional[np.ndarray]:
-        if mask is None:
-            return None
-        if mask.shape == target_shape:
-            return mask.astype(bool)
-
-        import cv2
-
-        resized = cv2.resize(
-            mask.astype(np.uint8),
-            (int(target_shape[1]), int(target_shape[0])),
-            interpolation=cv2.INTER_NEAREST,
-        )
-        return resized.astype(bool)
-
-    def _save_sam3_segmentation_overlay(
+    def _generate_gemini_metric_depth_assets(
         self,
-        image_rgb: np.ndarray,
-        sam3_results: dict,
-        out_path: Path,
-    ) -> None:
-        import cv2
-
-        palette = [
-            (255, 59, 48), (255, 149, 0), (255, 204, 0), (52, 199, 89),
-            (48, 176, 199), (0, 122, 255), (88, 86, 214), (255, 45, 85),
-            (162, 132, 194), (90, 200, 250), (255, 230, 167), (167, 235, 167),
-        ]
-
-        overlay = image_rgb.copy().astype(np.float32) / 255.0
-        label_info = []
-        h, w = image_rgb.shape[:2]
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.5
-        thickness = 1
-        pad = 4
-
-        for idx, (name, data) in enumerate(sam3_results.items()):
-            mask = self._resize_mask_to_shape(data.get("mask"), image_rgb.shape[:2])
-            if mask is None or mask.sum() == 0:
-                continue
-
-            color_rgb = np.array(palette[idx % len(palette)], dtype=np.float32) / 255.0
-            for channel in range(3):
-                overlay[:, :, channel] = np.where(
-                    mask,
-                    overlay[:, :, channel] * 0.35 + color_rgb[channel] * 0.65,
-                    overlay[:, :, channel],
-                )
-
-            mask_uint8 = mask.astype(np.uint8)
-            contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if contours:
-                contour_color_bgr = (
-                    int(palette[idx % len(palette)][2]),
-                    int(palette[idx % len(palette)][1]),
-                    int(palette[idx % len(palette)][0]),
-                )
-                temp_bgr = cv2.cvtColor((np.clip(overlay, 0, 1) * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
-                cv2.drawContours(temp_bgr, contours, -1, contour_color_bgr, 2)
-                overlay = cv2.cvtColor(temp_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-
-            ys, xs = np.where(mask)
-            if len(xs) == 0 or len(ys) == 0:
-                continue
-            cx, cy = int(np.mean(xs)), int(np.mean(ys))
-            display_label = name[:40]
-            (tw, th_text), baseline = cv2.getTextSize(display_label, font, font_scale, thickness)
-            tx = max(0, min(cx - tw // 2, w - tw - pad * 2))
-            ty = max(th_text + pad, min(cy + th_text // 2, h - baseline - pad))
-            label_info.append((display_label, tx, ty, tw, th_text, baseline))
-
-        result_bgr = cv2.cvtColor((np.clip(overlay, 0, 1) * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
-        for display_label, tx, ty, tw, th_text, baseline in label_info:
-            pill_x1 = max(0, tx - pad)
-            pill_y1 = max(0, ty - th_text - pad)
-            pill_x2 = min(w - 1, tx + tw + pad)
-            pill_y2 = min(h - 1, ty + baseline + pad)
-            cv2.rectangle(result_bgr, (pill_x1, pill_y1), (pill_x2, pill_y2), (255, 255, 255), -1)
-            cv2.putText(result_bgr, display_label, (tx, ty), font, font_scale, (0, 0, 0), thickness, cv2.LINE_AA)
-
-        Image.fromarray(cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)).save(out_path)
-
-    def _save_zoedepth_outputs(
-        self,
-        depth_map: np.ndarray,
-        color_path: Path,
-        raw_path: Path,
-    ) -> None:
-        from zoedepth.utils.misc import colorize, save_raw_16bit
-
-        colored = colorize(depth_map.astype(np.float32))
-        Image.fromarray(colored).save(color_path)
-        save_raw_16bit(depth_map.astype(np.float32), str(raw_path))
-
-    def _render_depth_image(self, depth_map: np.ndarray, mask: Optional[np.ndarray] = None) -> Image.Image:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-
-        valid = depth_map[np.isfinite(depth_map) & (depth_map > 0)]
-        if valid.size == 0:
-            normalized = np.zeros_like(depth_map, dtype=np.float32)
-        else:
-            d_min = float(np.nanpercentile(valid, 5))
-            d_max = float(np.nanpercentile(valid, 95))
-            if d_max - d_min < 1e-6:
-                normalized = np.zeros_like(depth_map, dtype=np.float32)
-            else:
-                normalized = np.clip((depth_map - d_min) / (d_max - d_min), 0.0, 1.0)
-
-        rgba = (plt.get_cmap("viridis")(normalized) * 255).astype(np.uint8)
-        rgb = rgba[:, :, :3]
-        if mask is not None:
-            mask = self._resize_mask_to_shape(mask, depth_map.shape[:2])
-            output = np.zeros_like(rgb)
-            output[mask.astype(bool)] = rgb[mask.astype(bool)]
-            rgb = output
-        return Image.fromarray(rgb)
-
-    def _build_production_dish_mask(
-        self,
+        image_pil: Image.Image,
         visible_items: list[dict],
-        sam3_results: dict,
-        target_shape: tuple[int, ...],
+        first_pass: dict,
         job_id: str,
-    ) -> np.ndarray:
-        target_hw = tuple(target_shape[:2])
-        ingredient_masks = [
-            self._resize_mask_to_shape((sam3_results.get(item["name"]) or {}).get("mask"), target_hw)
-            for item in visible_items
-            if (sam3_results.get(item["name"]) or {}).get("mask") is not None
-        ]
-        ingredient_masks = [mask for mask in ingredient_masks if mask is not None and mask.any()]
-        if ingredient_masks:
-            return np.any(np.stack([mask.astype(bool) for mask in ingredient_masks], axis=0), axis=0)
-
-        fallback_masks = []
-        for name, entry in sam3_results.items():
-            resized = self._resize_mask_to_shape(entry.get("mask"), target_hw)
-            if resized is None or not resized.any():
-                continue
-            fallback_masks.append(resized.astype(bool))
-
-        if fallback_masks:
-            logger.warning(
-                f"[{job_id}] SAM3 returned no ingredient-specific masks; "
-                f"falling back to union of {len(fallback_masks)} available SAM3 mask(s)"
-            )
-            return np.any(np.stack(fallback_masks, axis=0), axis=0)
-
-        raise RuntimeError("Production image pipeline produced no usable SAM3 masks")
-
-    def _save_production_debug_assets(
-        self,
-        job_id: str,
-        image_rgb: np.ndarray,
-        sam3_results: dict,
-        raw_depth: np.ndarray,
-        calibrated_depth: np.ndarray,
-        dish_mask: np.ndarray,
     ) -> dict:
         output_dir = self.config.OUTPUT_DIR / f"production_{job_id}"
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        Image.fromarray(image_rgb).save(output_dir / "rgb.png")
-
-        self._save_sam3_segmentation_overlay(
-            image_rgb=image_rgb,
-            sam3_results=sam3_results,
-            out_path=output_dir / "sam3_segmentation.png",
+        labels = [item["name"] for item in visible_items if item.get("name")]
+        total_start = time.monotonic()
+        logger.info(
+            "[%s] Gemini metric-depth asset generation start labels=%d model=%s",
+            job_id,
+            len(labels),
+            self._GEMINI_DEPTH_IMAGE_MODEL,
         )
-
-        self._save_zoedepth_outputs(
-            depth_map=raw_depth,
-            color_path=output_dir / "zoedepth_colored.png",
-            raw_path=output_dir / "zoedepth_raw.png",
+        full_prompt = (
+            "Generate a food-only colored metric depth map for this dish.\n\n"
+            "Output requirements:\n"
+            "- Same aspect ratio and framing as the input image.\n"
+            "- Show ONLY edible food; table, background, plate, tray, utensils, and container must be pure black.\n"
+            "- Use one fixed global depth gradient across the entire dish: RED = highest/top/closest food surface, "
+            "YELLOW/GREEN = mid height, BLUE = lowest/base/farthest food surface.\n"
+            "- Keep the gradient smooth and physically plausible, with crisp food silhouettes.\n"
+            "- No text, no labels, no legend, no arrows, no UI, no annotations.\n"
+            f"- Visible ingredient labels for guidance: {json.dumps(labels)}.\n"
         )
+        full_image, full_mime = self._gemini_generate_image(
+            image_pil=image_pil,
+            prompt=full_prompt,
+            job_id=job_id,
+            stage="gemini_metric_depth_full_image",
+        )
+        full_path = output_dir / "gemini_depth_full.png"
+        full_image.save(full_path)
 
-        raw_depth_image = self._render_depth_image(raw_depth)
-        raw_depth_image.save(output_dir / "zoe_depth_raw_visual.png")
-
-        calibrated_depth_image = self._render_depth_image(calibrated_depth)
-        calibrated_depth_image.save(output_dir / "zoe_depth_calibrated_visual.png")
-
-        masked_depth_image = self._render_depth_image(calibrated_depth, mask=dish_mask)
-        masked_depth_image.save(output_dir / "dish_masked_depth.png")
-
-        masks_summary = {}
-        for name, entry in sam3_results.items():
-            mask = entry.get("mask")
-            masks_summary[name] = {
-                "score": float(entry.get("score") or 0.0),
-                "mask_pixels": int(mask.sum()) if mask is not None else 0,
-                "bbox": self._mask_bbox(mask) if mask is not None else None,
-            }
-            if mask is not None:
-                Image.fromarray((mask.astype(np.uint8) * 255)).save(output_dir / f"{self._normalize_ingredient_name(name).replace(' ', '_')}_mask.png")
-
-        np.save(output_dir / "zoe_depth_raw.npy", raw_depth.astype(np.float32))
-        np.save(output_dir / "zoe_depth_calibrated.npy", calibrated_depth.astype(np.float32))
-        np.save(output_dir / "dish_mask.npy", dish_mask.astype(np.uint8))
-
-        return {
-            "output_dir": str(output_dir),
-            "rgb_path": str(output_dir / "rgb.png"),
-            "sam3_segmentation_path": str(output_dir / "sam3_segmentation.png"),
-            "zoedepth_colored_path": str(output_dir / "zoedepth_colored.png"),
-            "zoedepth_raw_path": str(output_dir / "zoedepth_raw.png"),
-            "raw_depth_visual_path": str(output_dir / "zoe_depth_raw_visual.png"),
-            "calibrated_depth_visual_path": str(output_dir / "zoe_depth_calibrated_visual.png"),
-            "dish_masked_depth_path": str(output_dir / "dish_masked_depth.png"),
-            "masks": masks_summary,
-        }
-
-    def _calibrate_zoe_depth_from_reference(self, raw_depth: np.ndarray, sam3_results: dict, first_pass: dict) -> tuple[np.ndarray, dict]:
-        scale = 1.0
-        calibration = {
-            "method": "raw_zoe",
-            "scale": 1.0,
-            "reference_name": None,
-            "reference_depth_raw_m": None,
-            "reference_geom_depth_m": None,
-        }
-
-        candidates = []
-        vessel = first_pass.get("plate_or_bowl")
-        if vessel and vessel.get("diameter_cm"):
-            candidates.append({
-                "name": vessel.get("name") or vessel.get("vessel_type") or "plate_or_bowl",
-                "known_size_cm": vessel.get("diameter_cm"),
-                "confidence": float(vessel.get("confidence") or 0.0),
-            })
-        for ref in first_pass.get("reference_objects") or []:
-            width_cm = ref.get("width_cm")
-            height_cm = ref.get("height_cm")
-            if width_cm or height_cm:
-                candidates.append({
-                    "name": ref.get("name") or "reference_object",
-                    "known_width_cm": float(width_cm) if width_cm else None,
-                    "known_height_cm": float(height_cm) if height_cm else None,
-                    "known_size_cm": float(width_cm or height_cm),
-                    "confidence": float(ref.get("confidence") or 0.0),
-                })
-
-        candidates.sort(key=lambda x: x["confidence"], reverse=True)
-
-        for candidate in candidates:
-            mask = (sam3_results.get(candidate["name"]) or {}).get("mask")
-            mask = self._resize_mask_to_shape(mask, raw_depth.shape)
-            bbox = self._mask_bbox(mask) if mask is not None else None
-            if mask is None or bbox is None:
+        ingredient_assets = []
+        for item in visible_items:
+            label = item.get("name")
+            if not label:
                 continue
-            x1, y1, x2, y2 = bbox
-            pixel_width = x2 - x1
-            pixel_height = y2 - y1
-            if pixel_width <= 0 or pixel_height <= 0:
-                continue
-
-            geom_depth_candidates = []
-            known_width_cm = candidate.get("known_width_cm")
-            known_height_cm = candidate.get("known_height_cm")
-            if known_width_cm:
-                geom_depth_candidates.append((float(known_width_cm) / 100.0) * self.config.ZOE_FX / float(pixel_width))
-            if known_height_cm:
-                geom_depth_candidates.append((float(known_height_cm) / 100.0) * self.config.ZOE_FY / float(pixel_height))
-            if not geom_depth_candidates and candidate.get("known_size_cm"):
-                pixel_size = max(pixel_width, pixel_height)
-                geom_depth_candidates.append(
-                    (float(candidate["known_size_cm"]) / 100.0) * self.config.ZOE_FX / float(pixel_size)
+            slug = self._slugify_asset_name(label)
+            prompt = (
+                f"Generate an isolated food-only colored metric depth map for ONLY this ingredient: {label}.\n\n"
+                "Use the same camera framing and aspect ratio as the input image. Keep this ingredient in its original location.\n"
+                "CRITICAL: The output must contain ONLY pixels belonging to this ingredient. Do not show the plate, tray, "
+                "parchment, container, table, shadows, other ingredients, dish outline, ghost silhouettes, or context shapes.\n"
+                "Every pixel that is not this exact ingredient must be pure black (#000000).\n"
+                "Use the same fixed global height gradient: RED = highest/top/closest surface, YELLOW/GREEN = mid height, "
+                "BLUE = lowest/base/farthest surface. No text, no labels, no legend, no annotations."
+            )
+            try:
+                time.sleep(2)
+                ingredient_image, ingredient_mime = self._gemini_generate_image(
+                    image_pil=image_pil,
+                    prompt=prompt,
+                    job_id=job_id,
+                    stage="gemini_metric_depth_ingredient_image",
                 )
-            if not geom_depth_candidates:
-                continue
+                path = output_dir / f"gemini_depth_{slug}.png"
+                ingredient_image.save(path)
+                ingredient_assets.append({
+                    "name": label,
+                    "slug": slug,
+                    "path": str(path),
+                    "mime_type": ingredient_mime,
+                })
+            except Exception as exc:
+                is_rate_limit = "429" in str(exc) or "rate" in str(exc).lower() or "quota" in str(exc).lower()
+                logger.warning(
+                    "[%s] Gemini ingredient depth image failed ingredient='%s' rate_limited=%s error=%s",
+                    job_id,
+                    label,
+                    is_rate_limit,
+                    exc,
+                )
 
-            geom_depth_m = float(np.median(np.asarray(geom_depth_candidates, dtype=np.float32)))
-            ref_pixels = raw_depth[mask.astype(bool)]
-            ref_pixels = ref_pixels[np.isfinite(ref_pixels) & (ref_pixels > 0.01)]
-            if ref_pixels.size < 20:
-                continue
-            raw_ref_depth_m = float(np.median(ref_pixels))
-            if raw_ref_depth_m <= 0:
-                continue
-            scale = geom_depth_m / raw_ref_depth_m
-            calibration = {
-                "method": "gemini_reference",
-                "scale": scale,
-                "reference_name": candidate["name"],
-                "reference_depth_raw_m": raw_ref_depth_m,
-                "reference_geom_depth_m": geom_depth_m,
-                "reference_size_cm": float(candidate["known_size_cm"]),
-                "reference_width_cm": known_width_cm,
-                "reference_height_cm": known_height_cm,
-                "bbox": bbox,
-                "confidence": float(candidate["confidence"]),
-                # pixels_per_cm derived from reference object size in pixels vs cm
-                # Used by pass 2 to pre-compute ingredient areas before sending to Gemini
-                "pixels_per_cm": pixel_width / float(candidate["known_size_cm"]),
-            }
-            break
+        latency_s = time.monotonic() - total_start
+        logger.info(
+            "[%s] Gemini metric-depth asset generation complete latency=%.2fs full_depth=1 ingredient_depths=%d/%d",
+            job_id,
+            latency_s,
+            len(ingredient_assets),
+            len(labels),
+        )
+        return {
+            "method": "gemini_metric_depth",
+            "model": self._GEMINI_DEPTH_IMAGE_MODEL,
+            "full_depth_path": str(full_path),
+            "full_depth_mime_type": full_mime,
+            "latency_s": round(latency_s, 3),
+            "color_scale": {
+                "top_highest": "red",
+                "middle": "yellow_green",
+                "bottom_lowest": "blue",
+                "background": "black",
+            },
+            "ingredients": ingredient_assets,
+        }
 
-        return (raw_depth * scale).astype(np.float32), calibration
-
-    def _estimate_volume_from_raw_depth_with_gemini(
+    def _estimate_gemini_metric_depth_volumes(
         self,
         image_rgb: np.ndarray,
+        full_depth_image: Image.Image,
         visible_items: list[dict],
         first_pass: dict,
+        depth_assets: dict,
         job_id: str,
         user_context: dict = None,
-        calibrated_depth_image: Image.Image = None,
-        calibrated_depth_np: np.ndarray = None,
-        sam3_results: dict = None,
-        calibration: dict = None,
-        glb_s3_key: str = None,
-        mp4_s3_key: str = None,
-        trellis_volume_ml: float = None,
-        trellis_metadata: dict = None,
-        # Legacy params kept for call-site compatibility — no longer used
-        raw_depth_image: Image.Image = None,
-        masked_depth_image: Image.Image = None,
     ) -> dict:
-        """Estimate per-ingredient volumes using RGB + TRELLIS MP4 preview when available.
+        import google.generativeai as genai
+        genai.configure(api_key=self.config.GEMINI_API_KEY)
 
-        The current production image path is TRELLIS-first and does not rely on SAM3/ZoeDepth.
-        The legacy depth params are kept only for call-site compatibility.
-        """
-        try:
-            import google.generativeai as genai
-            genai.configure(api_key=self.config.GEMINI_API_KEY)
-        except Exception as e:
-            logger.warning(f"[{job_id}] Gemini volume pass init failed: {e}")
-            return {}
-
-        labels = [item["name"] for item in visible_items]
-        if not labels:
-            return {}
-
-        # ── Build scale context line ──
+        labels = [item["name"] for item in visible_items if item.get("name")]
         vessel = first_pass.get("plate_or_bowl") or {}
-        if vessel.get("diameter_cm"):
-            scale_note = (
-                f"A {vessel.get('vessel_type') or 'dish'} is present with estimated diameter "
-                f"{float(vessel['diameter_cm']):.1f} cm."
-            )
-        else:
-            scale_note = "No reliable vessel dimension detected; use the 3-D model for scale."
-
-        trellis_metadata = trellis_metadata or {}
-        trellis_guidance = {}
-        if trellis_metadata:
-            trellis_guidance["mesh_metadata"] = trellis_metadata
-        if trellis_volume_ml is not None and trellis_volume_ml > 0:
-            trellis_guidance["scaled_food_volume_ml_candidate"] = round(float(trellis_volume_ml), 2)
-        if vessel.get("diameter_cm"):
-            trellis_guidance["vessel_diameter_cm"] = round(float(vessel["diameter_cm"]), 2)
-        if labels:
-            trellis_guidance["ingredient_labels"] = labels
-
-        anchor_block = (
-            f"Visible ingredients: {json.dumps(labels)}.\n\n"
+        refs = first_pass.get("reference_objects") or []
+        scale_context = {
+            "plate_or_bowl": vessel,
+            "reference_objects": refs,
+            "notes": first_pass.get("notes") or "",
+        }
+        prompt = (
+            "You are a food volume estimation system. You are given the original RGB food photo and a generated "
+            "food-only metric depth map for the same image. The depth map uses a fixed global scale: red is the "
+            "highest/top food surface, yellow/green is mid height, blue is the lowest/base food surface, and black is non-food.\n\n"
+            f"Dish: {first_pass.get('meal_name') or 'unknown'}\n"
+            f"Scale/context hints: {json.dumps(scale_context, ensure_ascii=True)}\n"
+            f"Ingredient names to use exactly: {json.dumps(labels, ensure_ascii=True)}\n\n"
+            "First estimate total visible dish volume. Then allocate that total across the visible ingredients using the RGB image "
+            "and the depth map together. Estimate only visible edible food; do not add hidden or extra items here.\n\n"
+            "Return ONLY valid JSON with this exact shape:\n"
+            "{"
+            "\"total_volume_ml\": number, "
+            "\"total_confidence\": number, "
+            "\"assumptions\": str, "
+            "\"ingredients\": ["
+            "{\"name\": str, \"volume_ml\": number, \"height_cm\": number|null, \"confidence\": number, \"reason\": str}"
+            "]"
+            "}\n"
+            "Rules: every ingredient name listed above must appear exactly once; all volumes must be > 0; confidence is 0..1."
         )
+        prompt += self._build_user_context_suffix(user_context)
 
-        # ── Build content list (GLB v2 path or depth-image v1 path) ──
-        model_name = self._flash_model_name()
-        gm = genai.GenerativeModel(model_name, generation_config=self._GEMINI_GEN_CONFIG)
-        original_pil = Image.fromarray(image_rgb)
-
-        glb_file_ref = None
-        # Prefer the TRELLIS MP4 preview because Gemini can reason over video directly.
-        _trellis_s3_key = mp4_s3_key or None
-        _trellis_suffix = ".mp4"
-        _trellis_mime = "video/mp4"
-        if _trellis_s3_key:
-            import boto3, tempfile, os
-            try:
-                s3 = boto3.client("s3", region_name=self.config.TRELLIS_AWS_REGION)
-                with tempfile.NamedTemporaryFile(suffix=_trellis_suffix, delete=False) as tmp:
-                    tmp_path = tmp.name
-                s3.download_file(self.config.TRELLIS_OUTPUT_BUCKET, _trellis_s3_key, tmp_path)
-                glb_file_ref = genai.upload_file(tmp_path, mime_type=_trellis_mime)
-                logger.info("[%s] Uploaded TRELLIS preview to Gemini Files API: %s", job_id, glb_file_ref.name)
-                # Video files require processing; poll until ACTIVE
-                import time as _time
-                for _ in range(30):
-                    glb_file_ref = genai.get_file(glb_file_ref.name)
-                    if glb_file_ref.state.name == "ACTIVE":
-                        break
-                    if glb_file_ref.state.name == "FAILED":
-                        raise RuntimeError(f"Gemini file processing failed: {glb_file_ref.name}")
-                    _time.sleep(5)
-                else:
-                    raise RuntimeError(f"Gemini file not ACTIVE after 150s: {glb_file_ref.name}")
-            except Exception as e:
-                logger.warning("[%s] TRELLIS preview upload to Gemini failed, falling back to image-only volume reasoning: %s", job_id, e)
-                glb_file_ref = None
-            finally:
-                try:
-                    os.unlink(tmp_path)
-                except Exception:
-                    pass
-
-        if glb_file_ref:
-            prompt = (
-                "You are a food volume estimation system.\n"
-                "You are given TWO inputs for the same dish:\n"
-                "  Input 1: the original RGB photo.\n"
-                "  Input 2: a 360° preview video of the 3-D mesh reconstructed from the photo.\n\n"
-                f"{scale_note}\n\n"
-                + anchor_block +
-                "You also have TRELLIS-derived geometric metadata in JSON form below. Treat it as supporting evidence about "
-                "dish scale, height, footprint, and a candidate total food volume.\n"
-                f"TRELLIS metadata JSON: {json.dumps(trellis_guidance, ensure_ascii=True, sort_keys=True)}\n\n"
-                "Use the RGB photo for ingredient identity and texture. Use the video and metadata to reason about geometry, "
-                "layering, hidden portions, and coverage.\n\n"
-                f"Ingredient names to use (copy EXACTLY): {json.dumps(labels)}\n"
-                "\nReturn ONLY valid JSON — an array with one entry per ingredient:\n"
-                "[{\"name\": \"rice\", \"volume_ml\": 180, \"height_cm\": 2.1, \"shape_factor\": 0.60, \"confidence\": 0.85}, ...]\n\n"
-                "Rules:\n"
-                "- Every ingredient in the list above must appear in the output with its exact name.\n"
-                "- volume_ml must be > 0.\n"
-                "- confidence between 0 and 1.\n"
-                "- Also include a 'total_dish_volume_ml' key at the top level of the JSON object.\n"
-                "- Return a JSON object: {\"ingredients\": [...], \"total_dish_volume_ml\": <number>}\n"
-                "- Infer hidden/base portions when strongly supported by layering cues. Example: rice or salad under toppings may extend beyond the visible area.\n"
-                "- Use sauce/condiment coverage cues to avoid double-counting. Covered ingredients still retain their own volume.\n"
-                "- If the TRELLIS candidate total volume looks plausible, keep your total close to it while using the RGB image to decide ingredient ratios.\n"
-            )
-            prompt += self._build_user_context_suffix(user_context)
-            content = [prompt, original_pil, glb_file_ref]
-        else:
-            anchor_block += "Estimate the volume in ml for each ingredient using the RGB photo and TRELLIS metadata.\n"
-            prompt = (
-                "You are a food volume estimation system.\n"
-                "You are given the original RGB photo of a dish.\n\n"
-                f"{scale_note}\n\n"
-                + anchor_block +
-                f"TRELLIS metadata JSON: {json.dumps(trellis_guidance, ensure_ascii=True, sort_keys=True)}\n\n"
-                f"\nIngredient names to use (copy these EXACTLY into the output — do not rename, translate, or reword them): {json.dumps(labels)}\n"
-                "\nReturn ONLY valid JSON — an array with one entry per ingredient, using the exact names above:\n"
-                "[{\"name\": \"rice\", \"volume_ml\": 180, \"height_cm\": 2.1, \"shape_factor\": 0.60, \"confidence\": 0.85}, ...]\n\n"
-                "Rules:\n"
-                "- Every ingredient in the list above must appear in the output with its exact name.\n"
-                "- volume_ml must be > 0.\n"
-                "- confidence between 0 and 1.\n"
-                "- Use TRELLIS metadata as geometry/scale context if available.\n"
-                "- Infer hidden/base portions only when strongly supported by the plating structure in the RGB image.\n"
-                "- Keep sauce/condiment volume separate from the ingredients it covers.\n"
-            )
-            prompt += self._build_user_context_suffix(user_context)
-            content = [prompt, original_pil]
-
+        gm = genai.GenerativeModel(self._flash_model_name(), generation_config=self._GEMINI_GEN_CONFIG)
+        start_time = time.monotonic()
         try:
-            response = gm.generate_content(
-                content,
-                request_options={"timeout": 120},
+            response = gm.generate_content([prompt, Image.fromarray(image_rgb), full_depth_image], request_options={"timeout": 120})
+        except Exception as exc:
+            latency_s = time.monotonic() - start_time
+            is_rate_limit = "429" in str(exc) or "rate" in str(exc).lower() or "quota" in str(exc).lower()
+            logger.warning(
+                "[%s] Gemini metric-depth volume estimation failed model=%s latency=%.2fs rate_limited=%s error=%s",
+                job_id,
+                self._flash_model_name(),
+                latency_s,
+                is_rate_limit,
+                exc,
             )
-        except Exception as e:
-            logger.warning("[%s] Gemini volume estimation failed (%s)", job_id, e)
             raise
+        latency_s = time.monotonic() - start_time
         response_text = response.text or ""
-
-        if "```json" in response_text:
-            s = response_text.find("```json") + 7
-            e_idx = response_text.find("```", s)
-            json_str = response_text[s:e_idx].strip()
-        elif "```" in response_text:
-            s = response_text.find("```") + 3
-            e_idx = response_text.find("```", s)
-            json_str = response_text[s:e_idx].strip()
-        elif response_text.lstrip().startswith("{"):
-            s = response_text.find("{")
-            e_idx = response_text.rfind("}") + 1
-            json_str = response_text[s:e_idx]
-        else:
-            s = response_text.find("[")
-            e_idx = response_text.rfind("]") + 1
-            json_str = response_text[s:e_idx]
-
-        try:
-            data = json.loads(json_str)
-        except json.JSONDecodeError:
-            logger.warning("[%s] Gemini volume estimation returned invalid JSON — returning empty map", job_id)
-            return {}
-
-        # v2 path: {"ingredients": [...], "total_dish_volume_ml": <n>}
-        total_dish_volume_ml = None
-        if isinstance(data, dict):
-            total_dish_volume_ml = data.get("total_dish_volume_ml")
-            data = data.get("ingredients") or []
-
+        parsed = self._parse_json_object_or_array(response_text, expected="object")
+        logger.info(
+            "[%s] Gemini metric-depth volume estimation complete model=%s latency=%.2fs total_volume_ml=%.1f ingredients=%d",
+            job_id,
+            self._flash_model_name(),
+            latency_s,
+            float(parsed.get("total_volume_ml") or 0.0),
+            len(parsed.get("ingredients") or []),
+        )
         self._record_gemini_output(
-            stage="production_image_volume_estimation",
+            stage="gemini_metric_depth_volume_estimation",
             job_id=job_id,
-            model_name=model_name,
+            model_name=self._flash_model_name(),
             prompt=prompt,
             response_text=response_text,
-            parsed_output=data,
-            metadata={"visible_ingredients": labels, "trellis_metadata": trellis_guidance},
+            parsed_output=parsed,
+            metadata={"visible_ingredients": labels, "depth_assets": depth_assets, "latency_s": round(latency_s, 3)},
         )
 
         volume_map = {}
-        for entry in data:
+        for entry in parsed.get("ingredients") or []:
             name = (entry.get("name") or "").strip().lower()
             if not name:
                 continue
             volume_map[name] = {
                 "volume_ml": float(entry.get("volume_ml") or 0.0),
                 "confidence": float(entry.get("confidence") or 0.0),
+                "height_cm": entry.get("height_cm"),
+                "reason": entry.get("reason"),
+                "method": "gemini_metric_depth",
             }
-        if total_dish_volume_ml is not None:
-            volume_map["_total_dish"] = {"volume_ml": float(total_dish_volume_ml), "confidence": 1.0}
 
-        # ── TRELLIS geometric volume anchor ──
-        # If we have a mathematically-derived total food volume from the 3-D mesh,
-        # rescale all per-ingredient Gemini estimates proportionally so they sum to
-        # the geometric total. Gemini's per-ingredient RATIOS are trusted; the 3-D
-        # mesh provides the accurate SCALE.
-        if trellis_volume_ml is not None and trellis_volume_ml > 0:
-            ingredient_keys = [k for k in volume_map if k != "_total_dish"]
-            gemini_total = sum(volume_map[k]["volume_ml"] for k in ingredient_keys)
-            if gemini_total > 0:
-                scale = trellis_volume_ml / gemini_total
-                for k in ingredient_keys:
-                    volume_map[k]["volume_ml"] = round(volume_map[k]["volume_ml"] * scale, 1)
-                volume_map["_total_dish"] = {"volume_ml": round(trellis_volume_ml, 1), "confidence": 1.0}
-                logger.info(
-                    "[%s] Rescaled Gemini volumes with TRELLIS anchor: gemini_total=%.1f → trellis=%.1f (scale=%.3f)",
-                    job_id, gemini_total, trellis_volume_ml, scale,
-                )
-
-        logger.info(f"[{job_id}] Volume estimates: { {k: v['volume_ml'] for k, v in volume_map.items()} }")
-        return volume_map
+        return {
+            "total_volume_ml": float(parsed.get("total_volume_ml") or 0.0),
+            "total_confidence": float(parsed.get("total_confidence") or 0.0),
+            "assumptions": parsed.get("assumptions") or "",
+            "volume_map": volume_map,
+            "raw_response": parsed,
+        }
 
     def _estimate_questionnaire_item_nutrition(self, verified_items: list[dict], job_id: str) -> list[dict]:
         if not verified_items or not self.config.GEMINI_API_KEY:
@@ -2502,9 +2043,27 @@ class NutritionVideoPipeline:
             }
             for item in visible_items
         ]
+        depth_context = (
+            "Image 1 is the original RGB photo. Image 2 is the generated metric depth map "
+            "(red/bright = closer to camera = taller/thicker, blue/dark = farther = flatter).\n"
+            "Use BOTH images together to identify hidden content and genuinely high-calorie extras.\n\n"
+            if calibrated_depth_image is not None
+            else "Use the original RGB photo to identify hidden content and genuinely high-calorie extras.\n\n"
+        )
+        hidden_evidence_rule = (
+            "- ONLY include hidden items that have DIRECT visual evidence in the depth map: a distinct elevated layer "
+            "beneath visible food, a pocket, or a wrap/roll shape that implies enclosed content.\n"
+            if calibrated_depth_image is not None
+            else "- ONLY include hidden items that have DIRECT visual evidence in the image: a visible pocket, enclosed wrap/roll shape, or a distinct covered layer implied by the presentation.\n"
+        )
+        double_portion_rule = (
+            "  - Use depth map to detect stacked or piled calorie-dense items\n"
+            if calibrated_depth_image is not None
+            else "  - Use visible stacking, overflow, or distinct extra layers to detect piled calorie-dense items\n"
+        )
         prompt = (
             "You are a food nutrition analysis expert reviewing an image-only dish analysis.\n"
-            "Use the original RGB photo to identify hidden content and genuinely high-calorie extras.\n\n"
+            + depth_context +
             "Return ONLY valid JSON as an array. Each entry must be:\n"
             "[{\"name\": str, \"type\": \"hidden\"|\"extra\", \"reason\": str, \"confidence\": number, "
             "\"volume_ml\": number, \"is_incremental\": true|false}]\n\n"
@@ -2520,7 +2079,7 @@ class NutritionVideoPipeline:
             "buried underneath, inside, or covered by other ingredients.\n"
             "Examples: rice under curry, noodles buried under toppings, bread inside a wrap, gravy under meat.\n"
             "Rules:\n"
-            "- ONLY include hidden items that have DIRECT visual evidence in the image: a visible pocket, enclosed wrap/roll shape, or a distinct covered layer implied by the presentation.\n"
+            + hidden_evidence_rule +
             "- Do NOT infer hidden items from cuisine type or recipe knowledge alone. "
             "A falafel bowl does not imply pita bread. A rice bowl does not imply noodles. "
             "There must be real visual evidence that cannot be explained by visible ingredients alone.\n"
@@ -2554,7 +2113,7 @@ class NutritionVideoPipeline:
             "Double / Excess Portions (calorie-dense items only):\n"
             "  - Portion is visually 2x or more of a normal single serving\n"
             "  - Multiple pieces when dish is normally one (e.g. 3 chicken thighs)\n"
-            "  - Use visible stacking, overflow, or distinct extra layers to detect piled calorie-dense items\n"
+            + double_portion_rule +
             "  - Apply this ONLY to calorie-dense foods: meat, rice, pasta, cheese, fried items\n\n"
             "CRITICAL — DO NOT flag as extra:\n"
             "  - Vegetables with low calorie density: lettuce, cucumber, tomato, spinach, peppers, onion, "
@@ -2582,7 +2141,7 @@ class NutritionVideoPipeline:
         try:
             import concurrent.futures as _cf
             with _cf.ThreadPoolExecutor(max_workers=1) as _tex:
-                _content = [prompt, image_pil]
+                _content = [prompt, image_pil, calibrated_depth_image] if calibrated_depth_image is not None else [prompt, image_pil]
                 _fut = _tex.submit(model.generate_content, _content)
             response = _fut.result(timeout=45)
         except Exception as exc:
@@ -2705,7 +2264,6 @@ class NutritionVideoPipeline:
         inferred_items: list[dict],
         questionnaire_items: list[dict],
         image_rgb: np.ndarray,
-        sam3_results: dict,
         job_id: str,
     ) -> dict:
         item_components = {}
@@ -2734,10 +2292,6 @@ class NutritionVideoPipeline:
                 logger.warning("[%s] No volume found for '%s' — skipping item", job_id, label)
                 continue
 
-            crop_image = self._extract_mask_crop(
-                image_rgb,
-                self._resize_mask_to_shape((sam3_results.get(label) or {}).get("mask"), image_rgb.shape[:2]),
-            )
             nutrition = self._build_volume_nutrition_component(
                 label=label,
                 role_tag="base",
@@ -2745,7 +2299,7 @@ class NutritionVideoPipeline:
                 volume_ml=volume_ml,
                 volume_confidence=volume_confidence,
                 origin="visible_base",
-                crop_image=crop_image,
+                crop_image=None,
                 job_id=job_id,
                 meal_context=meal_context,
             )
@@ -2927,15 +2481,11 @@ class NutritionVideoPipeline:
             [item["name"] for item in visible_items],
         )
 
-        sam3_results: dict = {}
-        calibration: dict = {"method": "trellis"}
+        calibration: dict = {"method": "gemini_metric_depth", "calibrated": True}
 
         # ── TRELLIS (v2): generate GLB + MP4 after first pass ──
         trellis_glb_s3_key = None
         trellis_mp4_s3_key = None
-        _trellis_food_vol_units = None
-        _trellis_vessel_diam_units = None
-        _trellis_metadata = {}
         if getattr(self.config, "ENABLE_TRELLIS", False):
             try:
                 logger.info("[%s] Starting TRELLIS generation for %s", job_id, image_path.name)
@@ -2956,75 +2506,36 @@ class NutritionVideoPipeline:
                     if _mp4_local:
                         _mp4_key = f"{self.config.TRELLIS_OUTPUT_PREFIX}/{job_id}/{_stem}.mp4"
                         trellis_mp4_s3_key = _mp4_key
-                    _trellis_food_vol_units = _trellis_results[_stem].get("food_volume_units")
-                    _trellis_vessel_diam_units = _trellis_results[_stem].get("vessel_diameter_units")
-                    _trellis_metadata = _trellis_results[_stem].get("mesh_metadata") or {}
                 logger.info(
-                    "[%s] TRELLIS done — glb=%s mp4=%s food_vol_units=%s metadata=%s",
+                    "[%s] TRELLIS preview done — glb=%s mp4=%s",
                     job_id,
                     trellis_glb_s3_key,
                     trellis_mp4_s3_key,
-                    _trellis_food_vol_units,
-                    json.dumps(_trellis_metadata, sort_keys=True),
                 )
             except Exception as _trellis_err:
                 logger.warning("[%s] TRELLIS generation failed (non-fatal): %s", job_id, _trellis_err)
 
-        # ── TRELLIS geometric volume (signed-tetrahedra mesh → real-world cm³) ──
-        # Uses Gemini first-pass vessel diameter for scale calibration.
-        # food_volume_units × (vessel_cm / vessel_units)³ = food volume in cm³ ≈ ml
-        trellis_volume_ml = None
-        trellis_volume_valid = False
-        try:
-            import math as _math
-            _vessel = first_pass.get("plate_or_bowl") or {}
-            _vessel_cm = float(_vessel.get("diameter_cm") or 0)
-            if _vessel_cm > 0 and _trellis_food_vol_units and _trellis_vessel_diam_units and _trellis_vessel_diam_units > 0:
-                _k = _vessel_cm / float(_trellis_vessel_diam_units)  # cm per mesh unit
-                trellis_volume_ml = float(_trellis_food_vol_units) * (_k ** 3)
-                trellis_volume_valid = bool(_trellis_metadata.get("volume_candidate_valid"))
-                logger.info(
-                    "[%s] TRELLIS geometric volume: %.1f ml  (k=%.2f cm/unit, vessel=%.1f cm, valid=%s)",
-                    job_id, trellis_volume_ml, _k, _vessel_cm, trellis_volume_valid,
-                )
-        except Exception as _tv_err:
-            logger.warning("[%s] TRELLIS volume scaling failed: %s", job_id, _tv_err)
-
-        if getattr(self.config, "ENABLE_TRELLIS", False) and not (
-            trellis_volume_valid and trellis_volume_ml is not None and trellis_volume_ml > 0
-        ):
-            logger.error(
-                "[%s] Rejecting image volume result: trellis_volume_ml=%s valid=%s metadata=%s",
-                job_id,
-                trellis_volume_ml,
-                trellis_volume_valid,
-                json.dumps(_trellis_metadata, sort_keys=True),
-            )
-            raise RuntimeError(
-                "TRELLIS geometric volume anchor is missing or invalid; refusing Gemini-only fallback for image volume estimation"
-            )
-
-        logger.info(
-            "[%s] Calling Gemini volume estimation with TRELLIS anchor %.3f ml and metadata keys=%s",
-            job_id,
-            float(trellis_volume_ml or 0.0),
-            sorted(_trellis_metadata.keys()),
-        )
-        volume_map = self._estimate_volume_from_raw_depth_with_gemini(
-            image_rgb=img_rgb,
+        logger.info("[%s] Starting Gemini metric-depth volume path; TRELLIS output is display-only", job_id)
+        depth_assets = self._generate_gemini_metric_depth_assets(
+            image_pil=pil_image,
             visible_items=visible_items,
             first_pass=first_pass,
             job_id=job_id,
-            user_context=user_context,
-            glb_s3_key=trellis_glb_s3_key,
-            mp4_s3_key=trellis_mp4_s3_key,
-            trellis_volume_ml=trellis_volume_ml,
-            trellis_metadata=_trellis_metadata,
         )
-        total_dish_entry = volume_map.get("_total_dish") or {}
-        total_dish_volume_ml = float(total_dish_entry.get("volume_ml") or 0.0)
-        if total_dish_volume_ml <= 0:
-            raise RuntimeError("Volume estimation did not return a positive total_dish_volume_ml")
+        full_depth_image = Image.open(depth_assets["full_depth_path"]).convert("RGB")
+        volume_estimate = self._estimate_gemini_metric_depth_volumes(
+            image_rgb=img_rgb,
+            full_depth_image=full_depth_image,
+            visible_items=visible_items,
+            first_pass=first_pass,
+            depth_assets=depth_assets,
+            job_id=job_id,
+            user_context=user_context,
+        )
+        volume_map = volume_estimate.get("volume_map") or {}
+        if float(volume_estimate.get("total_volume_ml") or 0.0) <= 0:
+            raise RuntimeError("Gemini metric-depth volume estimation did not return a positive total_volume_ml")
+        calibration["confidence"] = volume_estimate.get("total_confidence")
 
         verified_questionnaire = self._verify_questionnaire_items_with_gemini(
             {
@@ -3055,7 +2566,7 @@ class NutritionVideoPipeline:
             visible_items=visible_items,
             volume_map=volume_map,
             image_pil=pil_image,
-            calibrated_depth_image=None,
+            calibrated_depth_image=full_depth_image,
             job_id=job_id,
             user_context=user_context,
         )
@@ -3068,19 +2579,24 @@ class NutritionVideoPipeline:
             inferred_items=inferred_nonvisible_items,
             questionnaire_items=questionnaire_nutrition,
             image_rgb=img_rgb,
-            sam3_results=sam3_results,
             job_id=job_id,
         )
         logger.info("[%s] Nutrition analysis phase complete", job_id)
         overall_confidence = self._calculate_overall_confidence(
             first_pass=first_pass,
             visible_items=visible_items,
-            sam3_results={},
             calibration=calibration,
             volume_map=volume_map,
             questionnaire_verification=self.last_questionnaire_verification,
             nutrition_results=nutrition_results,
         )
+        debug_assets = {
+            "output_dir": str(self.config.OUTPUT_DIR / f"production_{job_id}"),
+            "rgb_path": str(self.config.OUTPUT_DIR / f"production_{job_id}" / "rgb.png"),
+            "gemini_depth_assets": depth_assets,
+            "masks": {},
+        }
+        Image.fromarray(img_rgb).save(Path(debug_assets["rgb_path"]))
         analysis_report = self._build_export_report(
             job_id=job_id,
             media_name=image_path.name,
@@ -3088,7 +2604,11 @@ class NutritionVideoPipeline:
             first_pass=first_pass,
             nutrition_results=nutrition_results,
             overall_confidence=overall_confidence,
-            debug_assets={},
+            debug_assets={
+                **debug_assets,
+                "calibrated_depth_visual_path": depth_assets.get("full_depth_path"),
+                "dish_masked_depth_path": depth_assets.get("full_depth_path"),
+            },
             calibration=calibration,
         )
 
@@ -3121,7 +2641,9 @@ class NutritionVideoPipeline:
             "analysis_report": analysis_report,
             "questionnaire_verification": self.last_questionnaire_verification,
             "pipeline_runtime": {
-                "image_pipeline": "trellis_v2",
+                "image_pipeline": "gemini_metric_depth",
+                "trellis_usage": "preview_only",
+                "gemini_depth_image_model": self._GEMINI_DEPTH_IMAGE_MODEL,
                 "device": self.device,
             },
             "production_debug": {
@@ -3133,13 +2655,21 @@ class NutritionVideoPipeline:
                 "cooking_method": first_pass.get("cooking_method"),
                 "cooking_method_confidence": float(first_pass.get("cooking_method_confidence") or 0.0),
                 "visible_items": visible_items,
+                "depth_outputs": {
+                    "assets": debug_assets,
+                    "gemini_metric_depth": depth_assets,
+                },
+                "gemini_depth_assets": depth_assets,
                 "gemini_pass_2_volume": volume_map,
+                "gemini_metric_depth_volume": volume_estimate,
                 "gemini_pass_3_inferred_items": inferred_nonvisible_items,
                 "questionnaire_items": questionnaire_nutrition,
                 "overall_confidence": overall_confidence,
                 "gemini_outputs": self.gemini_outputs,
                 "runtime": {
-                    "image_pipeline": "trellis_v2",
+                    "image_pipeline": "gemini_metric_depth",
+                    "trellis_usage": "preview_only",
+                    "gemini_depth_image_model": self._GEMINI_DEPTH_IMAGE_MODEL,
                     "device": self.device,
                 },
             },

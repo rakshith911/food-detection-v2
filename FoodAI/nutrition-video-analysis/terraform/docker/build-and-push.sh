@@ -6,7 +6,7 @@ set -e
 # Configuration
 AWS_REGION="${AWS_REGION:-us-east-1}"
 AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-185329004895}"
-ECR_REPO="nutrition-video-analysis-dev-video-processor"
+ECR_REPO="food-detection-v2-worker"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
 
 ECR_URL="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
@@ -44,4 +44,4 @@ echo "Successfully pushed: ${FULL_IMAGE}"
 echo "=========================================="
 echo ""
 echo "To update ECS service, run:"
-echo "  aws ecs update-service --cluster nutrition-video-analysis-dev-cluster --service nutrition-video-analysis-dev-video-processor --force-new-deployment"
+echo "  aws ecs update-service --cluster food-detection-v2-cluster --service food-detection-v2-worker --force-new-deployment"

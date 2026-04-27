@@ -2,7 +2,7 @@
     "containerDefinitions": [
         {
             "name": "video-processor",
-            "image": "185329004895.dkr.ecr.us-east-1.amazonaws.com/nutrition-video-analysis-dev-video-processor:latest",
+            "image": "185329004895.dkr.ecr.us-east-1.amazonaws.com/food-detection-v2-worker:latest",
             "cpu": 0,
             "portMappings": [],
             "essential": true,
@@ -29,11 +29,11 @@
                 },
                 {
                     "name": "SQS_VIDEO_QUEUE_URL",
-                    "value": "https://sqs.us-east-1.amazonaws.com/185329004895/nutrition-video-analysis-dev-video-processing"
+                    "value": "https://sqs.us-east-1.amazonaws.com/185329004895/food-detection-v2-jobs"
                 },
                 {
                     "name": "DYNAMODB_JOBS_TABLE",
-                    "value": "nutrition-video-analysis-dev-jobs"
+                    "value": "food-detection-v2-jobs"
                 },
                 {
                     "name": "DEBUG",
@@ -55,7 +55,7 @@
             "logConfiguration": {
                 "logDriver": "awslogs",
                 "options": {
-                    "awslogs-group": "/ecs/nutrition-video-analysis-dev-video-processor",
+                    "awslogs-group": "/ecs/food-detection-v2-worker",
                     "awslogs-region": "us-east-1",
                     "awslogs-stream-prefix": "ecs"
                 }
@@ -73,7 +73,7 @@
             "systemControls": []
         }
     ],
-    "family": "nutrition-video-analysis-dev-video-processor",
+    "family": "food-detection-v2-worker",
     "taskRoleArn": "arn:aws:iam::185329004895:role/nutrition-video-analysis-dev-ecs-task-20251207194437704600000002",
     "executionRoleArn": "arn:aws:iam::185329004895:role/nutrition-video-analysis-dev-ecs-exec-20251207194438790300000005",
     "networkMode": "awsvpc",
