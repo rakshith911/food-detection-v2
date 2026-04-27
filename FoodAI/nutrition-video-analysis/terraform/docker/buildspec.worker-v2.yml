@@ -30,6 +30,9 @@ phases:
           docker push $ECR_REPO:latest
           printf '{"repository":"%s","image_tag":"%s","image_uri":"%s"}\n' "$ECR_REPO" "$IMAGE_TAG" "$ECR_REPO:$IMAGE_TAG" > worker-v2-image.json
           cat worker-v2-image.json
+          echo "Setting ECS desired count to 1 so service is ready when max capacity is enabled..."
+          aws ecs update-service --cluster food-detection-v2-cluster --service food-detection-v2-worker --desired-count 1 --force-new-deployment --region $REGION
+          echo "ECS service updated."
         else
           echo "Worker image was not built; skipping push."
           printf '{"repository":"%s","image_tag":"","image_uri":"","status":"build_failed"}\n' "$ECR_REPO" > worker-v2-image.json
