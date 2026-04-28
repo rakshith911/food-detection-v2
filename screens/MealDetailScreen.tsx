@@ -1051,64 +1051,32 @@ export default function MealDetailScreen() {
 
         {/* Meal Info */}
         <View style={styles.mealInfo}>
-          {/* Row 1: meal name */}
-          <View ref={mealNameContainerRef}>
-            {editingMealName ? (
-              <TextInput
-                style={[styles.mealNameInput, styles.inputFocused]}
-                value={mealName}
-                onChangeText={(value) => setMealName(toSentenceCase(value))}
-                onBlur={() => setEditingMealName(false)}
-                onFocus={() => scrollToInput()}
-                placeholder="Meal name"
-                placeholderTextColor="#D1D5DB"
-                autoFocus
-              />
-            ) : (
-              <TouchableOpacity onPress={() => {
-                if (selectedDepthIngredient) {
-                  setSelectedDepthIngredient(null);
-                } else {
-                  setEditingMealName(true);
-                }
-              }}>
-                <Text style={styles.mealName}>{toSentenceCase(mealName)}</Text>
-              </TouchableOpacity>
-            )}
-          </View>
-
-          {/* Row 2: [3 small buttons left] [kcal + Add Ingredient right] */}
-          <View style={styles.mealActionsRow}>
-            <View style={styles.mediaActionButtons}>
-              <TouchableOpacity
-                style={styles.mediaActionButton}
-                onPress={() => { setSelectedDepthIngredient(null); handleVideoPlay(); }}
-                activeOpacity={0.7}
-              >
-                <Ionicons name="cube-outline" size={10} color="#FFFFFF" />
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.mediaActionButton}
-                onPress={() => {
-                  setIsVideoPlaying(false);
-                  setSelectedDepthIngredient(selectedDepthIngredient === '__full__' ? null : '__full__');
-                }}
-                activeOpacity={0.7}
-              >
-                <Ionicons name="analytics-outline" size={10} color="#FFFFFF" />
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.mediaActionButton}
-                onPress={() => {
-                  setIsVideoPlaying(false);
-                  setSelectedDepthIngredient(selectedDepthIngredient === '__tagged__' ? null : '__tagged__');
-                }}
-                activeOpacity={0.7}
-              >
-                <Ionicons name="scan-outline" size={10} color="#FFFFFF" />
-              </TouchableOpacity>
+          {/* Row 1: meal name (wraps) | right: kcal above + Add Ingredient below */}
+          <View style={styles.mealHeader}>
+            <View ref={mealNameContainerRef} style={{ flex: 1, marginRight: 12 }}>
+              {editingMealName ? (
+                <TextInput
+                  style={[styles.mealNameInput, styles.inputFocused]}
+                  value={mealName}
+                  onChangeText={(value) => setMealName(toSentenceCase(value))}
+                  onBlur={() => setEditingMealName(false)}
+                  onFocus={() => scrollToInput()}
+                  placeholder="Meal name"
+                  placeholderTextColor="#D1D5DB"
+                  autoFocus
+                />
+              ) : (
+                <TouchableOpacity onPress={() => {
+                  if (selectedDepthIngredient) {
+                    setSelectedDepthIngredient(null);
+                  } else {
+                    setEditingMealName(true);
+                  }
+                }}>
+                  <Text style={styles.mealName}>{toSentenceCase(mealName)}</Text>
+                </TouchableOpacity>
+              )}
             </View>
-
             <View style={styles.mealActionsRight}>
               <Text style={styles.mealCalories}>
                 {dishTables.every((table) => table.rows.length === 0) ? '-' : `${totalCalories} Kcal`}
@@ -1124,6 +1092,39 @@ export default function MealDetailScreen() {
                 <Text style={styles.addButtonText}>Add Ingredient</Text>
               </TouchableOpacity>
             </View>
+          </View>
+
+          {/* Row 2: 3 view buttons with separators */}
+          <View style={styles.mediaActionButtons}>
+            <TouchableOpacity
+              style={[styles.mediaActionButton, isVideoPlaying && styles.mediaActionButtonActive]}
+              onPress={() => { setSelectedDepthIngredient(null); handleVideoPlay(); }}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="cube-outline" size={10} color={isVideoPlaying ? '#FFFFFF' : '#6B7280'} />
+            </TouchableOpacity>
+            <View style={styles.buttonSeparator} />
+            <TouchableOpacity
+              style={[styles.mediaActionButton, selectedDepthIngredient === '__full__' && styles.mediaActionButtonActive]}
+              onPress={() => {
+                setIsVideoPlaying(false);
+                setSelectedDepthIngredient(selectedDepthIngredient === '__full__' ? null : '__full__');
+              }}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="analytics-outline" size={10} color={selectedDepthIngredient === '__full__' ? '#FFFFFF' : '#6B7280'} />
+            </TouchableOpacity>
+            <View style={styles.buttonSeparator} />
+            <TouchableOpacity
+              style={[styles.mediaActionButton, selectedDepthIngredient === '__tagged__' && styles.mediaActionButtonActive]}
+              onPress={() => {
+                setIsVideoPlaying(false);
+                setSelectedDepthIngredient(selectedDepthIngredient === '__tagged__' ? null : '__tagged__');
+              }}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="scan-outline" size={10} color={selectedDepthIngredient === '__tagged__' ? '#FFFFFF' : '#6B7280'} />
+            </TouchableOpacity>
           </View>
         </View>
 
@@ -1255,6 +1256,10 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#E5E7EB',
   },
+  mealHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
   mealName: {
     fontSize: 18,
     fontWeight: '700',
@@ -1311,27 +1316,32 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
   },
-  mealActionsRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    marginTop: 8,
-  },
   mealActionsRight: {
-    flex: 1,
     alignItems: 'flex-end',
     gap: 6,
   },
   mediaActionButtons: {
     flexDirection: 'row',
-    gap: 6,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    borderRadius: 9,
+    overflow: 'hidden',
+    alignSelf: 'flex-start',
   },
   mediaActionButton: {
-    width: 17,
-    height: 17,
-    borderRadius: 9,
-    backgroundColor: '#7BA21B',
+    width: 34,
+    height: 28,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: '#F9FAFB',
+  },
+  mediaActionButtonActive: {
+    backgroundColor: '#7BA21B',
+  },
+  buttonSeparator: {
+    width: 1,
+    backgroundColor: '#E5E7EB',
   },
   tableContainer: {
     paddingHorizontal: 16,
