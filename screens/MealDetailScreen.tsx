@@ -1077,55 +1077,53 @@ export default function MealDetailScreen() {
             )}
           </View>
 
-          {/* Row 2: [3 view buttons] [kcal flex] [Add Ingredient] */}
+          {/* Row 2: [3 small buttons left] [kcal + Add Ingredient right] */}
           <View style={styles.mealActionsRow}>
             <View style={styles.mediaActionButtons}>
-              {/* 3D TRELLIS button */}
               <TouchableOpacity
-                style={[styles.mediaActionButton, isVideoPlaying && styles.mediaActionButtonActive]}
+                style={styles.mediaActionButton}
                 onPress={() => { setSelectedDepthIngredient(null); handleVideoPlay(); }}
                 activeOpacity={0.7}
               >
-                <Ionicons name="cube-outline" size={18} color={isVideoPlaying ? '#FFFFFF' : '#6B7280'} />
+                <Ionicons name="cube-outline" size={10} color="#FFFFFF" />
               </TouchableOpacity>
-              {/* Metric depth map button */}
               <TouchableOpacity
-                style={[styles.mediaActionButton, selectedDepthIngredient === '__full__' && styles.mediaActionButtonActive]}
+                style={styles.mediaActionButton}
                 onPress={() => {
                   setIsVideoPlaying(false);
                   setSelectedDepthIngredient(selectedDepthIngredient === '__full__' ? null : '__full__');
                 }}
                 activeOpacity={0.7}
               >
-                <Ionicons name="analytics-outline" size={18} color={selectedDepthIngredient === '__full__' ? '#FFFFFF' : '#6B7280'} />
+                <Ionicons name="analytics-outline" size={10} color="#FFFFFF" />
               </TouchableOpacity>
-              {/* Tagging overlay button */}
               <TouchableOpacity
-                style={[styles.mediaActionButton, selectedDepthIngredient === '__tagged__' && styles.mediaActionButtonActive]}
+                style={styles.mediaActionButton}
                 onPress={() => {
                   setIsVideoPlaying(false);
                   setSelectedDepthIngredient(selectedDepthIngredient === '__tagged__' ? null : '__tagged__');
                 }}
                 activeOpacity={0.7}
               >
-                <Ionicons name="scan-outline" size={18} color={selectedDepthIngredient === '__tagged__' ? '#FFFFFF' : '#6B7280'} />
+                <Ionicons name="scan-outline" size={10} color="#FFFFFF" />
               </TouchableOpacity>
             </View>
 
-            <Text style={styles.mealCalories}>
-              {dishTables.every((table) => table.rows.length === 0) ? '-' : `${totalCalories} Kcal`}
-            </Text>
-
-            <TouchableOpacity
-              style={[styles.addButton, !canAddBaseIngredient && styles.addButtonDisabled]}
-              onPress={() => canAddBaseIngredient && handleAddContent()}
-              activeOpacity={canAddBaseIngredient ? 0.8 : 1}
-            >
-              <View style={styles.addButtonIcon}>
-                <Text style={styles.addButtonIconText}>+</Text>
-              </View>
-              <Text style={styles.addButtonText}>Add Ingredient</Text>
-            </TouchableOpacity>
+            <View style={styles.mealActionsRight}>
+              <Text style={styles.mealCalories}>
+                {dishTables.every((table) => table.rows.length === 0) ? '-' : `${totalCalories} Kcal`}
+              </Text>
+              <TouchableOpacity
+                style={[styles.addButton, !canAddBaseIngredient && styles.addButtonDisabled]}
+                onPress={() => canAddBaseIngredient && handleAddContent()}
+                activeOpacity={canAddBaseIngredient ? 0.8 : 1}
+              >
+                <View style={styles.addButtonIcon}>
+                  <Text style={styles.addButtonIconText}>+</Text>
+                </View>
+                <Text style={styles.addButtonText}>Add Ingredient</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
 
@@ -1276,11 +1274,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFFFFF',
   },
   mealCalories: {
-    flex: 1,
     fontSize: 16,
     fontWeight: '600',
     color: '#6B7280',
-    textAlign: 'center',
   },
   addButton: {
     flexDirection: 'row',
@@ -1317,27 +1313,25 @@ const styles = StyleSheet.create({
   },
   mealActionsRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 10,
-    gap: 8,
+    alignItems: 'flex-end',
+    marginTop: 8,
+  },
+  mealActionsRight: {
+    flex: 1,
+    alignItems: 'flex-end',
+    gap: 6,
   },
   mediaActionButtons: {
     flexDirection: 'row',
     gap: 6,
   },
   mediaActionButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 8,
-    backgroundColor: '#F3F4F6',
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
+    width: 17,
+    height: 17,
+    borderRadius: 9,
+    backgroundColor: '#7BA21B',
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  mediaActionButtonActive: {
-    backgroundColor: '#7BA21B',
-    borderColor: '#7BA21B',
   },
   tableContainer: {
     paddingHorizontal: 16,
