@@ -183,11 +183,17 @@ export default function MealDetailScreen() {
     return { full, ingredients };
   }, [effectiveSegmentedImages?.overlay_urls, normalizeAssetName]);
 
+  const taggedOverlayUri = useMemo(() =>
+    effectiveSegmentedImages?.overlay_urls?.find((a: any) => a?.name === 'tagged')?.url || null,
+    [effectiveSegmentedImages?.overlay_urls]
+  );
+
   const selectedDepthUri = useMemo(() => {
     if (!selectedDepthIngredient) return null;
     if (selectedDepthIngredient === '__full__') return geminiDepthAssets.full;
+    if (selectedDepthIngredient === '__tagged__') return taggedOverlayUri;
     return geminiDepthAssets.ingredients[normalizeAssetName(selectedDepthIngredient)] || null;
-  }, [geminiDepthAssets, normalizeAssetName, selectedDepthIngredient]);
+  }, [geminiDepthAssets, normalizeAssetName, selectedDepthIngredient, taggedOverlayUri]);
 
   // Reset overlay state and loader when item changes
   useEffect(() => {
@@ -1045,8 +1051,8 @@ export default function MealDetailScreen() {
 
         {/* Meal Info */}
         <View style={styles.mealInfo}>
-        <View style={styles.mealHeader}>
-          <View ref={mealNameContainerRef} style={{ flex: 1 }}>
+          {/* Row 1: meal name */}
+          <View ref={mealNameContainerRef}>
             {editingMealName ? (
               <TextInput
                 style={[styles.mealNameInput, styles.inputFocused]}
@@ -1069,12 +1075,47 @@ export default function MealDetailScreen() {
                 <Text style={styles.mealName}>{toSentenceCase(mealName)}</Text>
               </TouchableOpacity>
             )}
+          </View>
+
+          {/* Row 2: [3 view buttons] [kcal flex] [Add Ingredient] */}
+          <View style={styles.mealActionsRow}>
+            <View style={styles.mediaActionButtons}>
+              {/* 3D TRELLIS button */}
+              <TouchableOpacity
+                style={[styles.mediaActionButton, isVideoPlaying && styles.mediaActionButtonActive]}
+                onPress={() => { setSelectedDepthIngredient(null); handleVideoPlay(); }}
+                activeOpacity={0.7}
+              >
+                <Ionicons name="cube-outline" size={18} color={isVideoPlaying ? '#FFFFFF' : '#6B7280'} />
+              </TouchableOpacity>
+              {/* Metric depth map button */}
+              <TouchableOpacity
+                style={[styles.mediaActionButton, selectedDepthIngredient === '__full__' && styles.mediaActionButtonActive]}
+                onPress={() => {
+                  setIsVideoPlaying(false);
+                  setSelectedDepthIngredient(selectedDepthIngredient === '__full__' ? null : '__full__');
+                }}
+                activeOpacity={0.7}
+              >
+                <Ionicons name="analytics-outline" size={18} color={selectedDepthIngredient === '__full__' ? '#FFFFFF' : '#6B7280'} />
+              </TouchableOpacity>
+              {/* Tagging overlay button */}
+              <TouchableOpacity
+                style={[styles.mediaActionButton, selectedDepthIngredient === '__tagged__' && styles.mediaActionButtonActive]}
+                onPress={() => {
+                  setIsVideoPlaying(false);
+                  setSelectedDepthIngredient(selectedDepthIngredient === '__tagged__' ? null : '__tagged__');
+                }}
+                activeOpacity={0.7}
+              >
+                <Ionicons name="scan-outline" size={18} color={selectedDepthIngredient === '__tagged__' ? '#FFFFFF' : '#6B7280'} />
+              </TouchableOpacity>
+            </View>
+
             <Text style={styles.mealCalories}>
               {dishTables.every((table) => table.rows.length === 0) ? '-' : `${totalCalories} Kcal`}
             </Text>
-          </View>
 
-          <View style={styles.mealActions}>
             <TouchableOpacity
               style={[styles.addButton, !canAddBaseIngredient && styles.addButtonDisabled]}
               onPress={() => canAddBaseIngredient && handleAddContent()}
@@ -1085,39 +1126,8 @@ export default function MealDetailScreen() {
               </View>
               <Text style={styles.addButtonText}>Add Ingredient</Text>
             </TouchableOpacity>
-            {(item.trellis_mp4_url || geminiDepthAssets.full) && (
-              <View style={styles.mediaActionButtons}>
-                {item.trellis_mp4_url && (
-                  <TouchableOpacity
-                    style={styles.mediaActionButton}
-                    onPress={() => {
-                      setSelectedDepthIngredient(null);
-                      handleVideoPlay();
-                    }}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons name={isVideoPlaying ? 'pause' : 'play'} size={10} color="#FFFFFF" />
-                  </TouchableOpacity>
-                )}
-                {geminiDepthAssets.full && (
-                  <TouchableOpacity
-                    style={styles.mediaActionButton}
-                    onPress={() => {
-                      setIsVideoPlaying(false);
-                      setSelectedDepthIngredient(
-                        selectedDepthIngredient === '__full__' ? null : '__full__'
-                      );
-                    }}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons name="layers" size={10} color="#FFFFFF" />
-                  </TouchableOpacity>
-                )}
-              </View>
-            )}
           </View>
         </View>
-      </View>
 
         {dishTables
           .filter((table) => table.key === 'base' || table.rows.length > 0)
@@ -1247,11 +1257,6 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#E5E7EB',
   },
-  mealHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
   mealName: {
     fontSize: 18,
     fontWeight: '700',
@@ -1271,9 +1276,11 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFFFFF',
   },
   mealCalories: {
+    flex: 1,
     fontSize: 16,
     fontWeight: '600',
     color: '#6B7280',
+    textAlign: 'center',
   },
   addButton: {
     flexDirection: 'row',
@@ -1308,21 +1315,29 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
   },
-  mealActions: {
-    alignItems: 'flex-end',
+  mealActionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 10,
+    gap: 8,
   },
   mediaActionButtons: {
     flexDirection: 'row',
     gap: 6,
-    marginTop: 6,
   },
   mediaActionButton: {
-    width: 17,
-    height: 17,
-    borderRadius: 9,
-    backgroundColor: '#7BA21B',
+    width: 40,
+    height: 40,
+    borderRadius: 8,
+    backgroundColor: '#F3F4F6',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  mediaActionButtonActive: {
+    backgroundColor: '#7BA21B',
+    borderColor: '#7BA21B',
   },
   tableContainer: {
     paddingHorizontal: 16,
