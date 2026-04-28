@@ -1928,6 +1928,26 @@ class NutritionRAG:
         matched_a = result_a[1] or ""
         matched_b = result_b[1] or ""
 
+        # Token-coverage pre-check: if branded (b) contains query-specific tokens
+        # that unified (a) is missing, prefer branded without running the cross-encoder.
+        # This catches e.g. "kalamata olives" where unified matches "Olives, black, ripe,
+        # canned" (missing "kalamata") while branded has the exact named variety.
+        normalized_q = self._normalize_food_name(food_name)
+        query_specific = {
+            t for t in self._tokenize_words(normalized_q, keep_generic=True)
+            if t not in self._GENERIC_WORDS and len(t) >= 4
+        }
+        if query_specific:
+            tokens_a = set(re.sub(r'[^a-z0-9 ]', ' ', matched_a.lower()).split())
+            tokens_b = set(re.sub(r'[^a-z0-9 ]', ' ', matched_b.lower()).split())
+            missing_in_a = query_specific - tokens_a
+            if missing_in_a and missing_in_a <= tokens_b:
+                logger.info(
+                    "[conflict] '%s': branded '%s' wins by token coverage (has %s that unified '%s' lacks)",
+                    food_name, matched_b, missing_in_a, matched_a,
+                )
+                return result_b
+
         try:
             scores = self._cross_encoder.predict(
                 [(food_name, matched_a), (food_name, matched_b)]
@@ -1956,6 +1976,7 @@ class NutritionRAG:
         field: str,
         top_k: int = 10,
         crop_image: Optional[Image.Image] = None,
+        meal_context: Optional[str] = None,
     ):
         """
         Search unified FAISS index, re-rank with cross-encoder.
@@ -1978,7 +1999,7 @@ class NutritionRAG:
         dish_query_tokens = self._dish_query_tokens(normalized)
         retrieved_candidates = self._apply_lexical_override(
             normalized,
-            self._retrieve_candidates(food_name, crop_image=crop_image, top_k=max(top_k, 50)),
+            self._retrieve_candidates(food_name, crop_image=crop_image, top_k=max(top_k, 50), meal_context=meal_context),
         )
 
         candidates = []
@@ -2624,7 +2645,7 @@ class NutritionRAG:
         # Run unified FAISS and branded lookup in parallel; pick best via CrossEncoder.
         with ThreadPoolExecutor(max_workers=2) as _ex:
             if self._use_unified:
-                _unified_fut = _ex.submit(self._lookup_unified, food_name, 'density_g_ml', top_k, crop_image)
+                _unified_fut = _ex.submit(self._lookup_unified, food_name, 'density_g_ml', top_k, crop_image, meal_context)
             else:
                 _unified_fut = _ex.submit(self._lookup_legacy_density, food_name)
             _branded_fut = _ex.submit(self._lookup_branded_fallback, food_name, 'density_g_ml')
@@ -2648,7 +2669,11 @@ class NutritionRAG:
         if density is not None:
             return float(density), matched, source, entry
 
-        density = self._gemini_lookup(food_name, 'density_g_ml', meal_context=meal_context)
+        try:
+            density = self._gemini_lookup(food_name, 'density_g_ml', meal_context=meal_context)
+        except Exception as _gem_exc:
+            logger.debug("[density] Gemini lookup failed for '%s': %s", food_name, _gem_exc)
+            density = None
         if density is not None:
             return density, food_name, "gemini_grounding", None
 
@@ -2663,7 +2688,7 @@ class NutritionRAG:
         # Run unified FAISS and branded lookup in parallel; pick best via CrossEncoder.
         with ThreadPoolExecutor(max_workers=2) as _ex:
             if self._use_unified:
-                _unified_fut = _ex.submit(self._lookup_unified, food_name, 'calories_per_100g', top_k, crop_image)
+                _unified_fut = _ex.submit(self._lookup_unified, food_name, 'calories_per_100g', top_k, crop_image, meal_context)
             else:
                 _unified_fut = _ex.submit(self._lookup_legacy_calories, food_name)
             _branded_fut = _ex.submit(self._lookup_branded_fallback, food_name, 'calories_per_100g')
@@ -2736,7 +2761,7 @@ class NutritionRAG:
         kcal_entry: Optional[dict] = None
         with ThreadPoolExecutor(max_workers=2) as _ex:
             if self._use_unified:
-                _kcal_unified_fut = _ex.submit(self._lookup_unified, food_name, 'calories_per_100g', 10, crop_image)
+                _kcal_unified_fut = _ex.submit(self._lookup_unified, food_name, 'calories_per_100g', 10, crop_image, meal_context)
             else:
                 _kcal_unified_fut = _ex.submit(self._lookup_legacy_calories, food_name)
             _kcal_branded_fut = _ex.submit(self._lookup_branded_fallback, food_name, 'calories_per_100g')
@@ -2779,8 +2804,11 @@ class NutritionRAG:
         density_matched: Optional[str] = None
         density_source: Optional[str] = None
 
+        # Try calorie-matched description first so density uses the same DB entry as calories
+        # (e.g. "Olives, kalamata" density comes from the same entry that gave the kcal value).
+        # Fall back to the raw food_name only if the matched description yields nothing.
         density_queries = list(dict.fromkeys(
-            q for q in [food_name, calorie_matched] if q and q.strip()
+            q for q in [calorie_matched, food_name] if q and q.strip()
         ))
 
         for dq in density_queries:
@@ -2795,6 +2823,32 @@ class NutritionRAG:
 
         if density is None:
             raise NutritionLookupError(food_name, ["density_g_ml"])
+
+        # ── Step 2b: tier consistency ─────────────────────────────────────────────
+        # If branded won kcal but density came from USDA/FAO (different tier), the
+        # two values describe different food forms and produce inaccurate estimates.
+        # Prefer a consistent USDA kcal+density pair when one is available.
+        # Wrapped in try/except: if USDA density lookup fails (e.g. Gemini error),
+        # we keep the original mixed result rather than propagating the error.
+        if (
+            "branded" in (calorie_source or "")
+            and "branded" not in (density_source or "")
+            and self._use_unified
+        ):
+            try:
+                _usda_kcal, _usda_cal_matched, _usda_cal_source, _ = _kcal_unified_fut.result()
+                if _usda_kcal is not None:
+                    _ud, _udm, _uds, _ = self._get_density_with_match(
+                        _usda_cal_matched, crop_image=crop_image, meal_context=meal_context
+                    )
+                    if _ud is not None and "branded" not in (_uds or ""):
+                        logger.info(
+                            "[consistency] '%s': reverting from branded kcal '%s' to USDA pair '%s' + '%s'",
+                            food_name, calorie_matched, _usda_cal_matched, _udm,
+                        )
+                        return _ud, float(_usda_kcal), _udm, _uds, _usda_cal_matched, _usda_cal_source
+            except Exception as _cons_exc:
+                logger.debug("[consistency] '%s': USDA consistency check failed (%s) — keeping original result", food_name, _cons_exc)
 
         return density, float(kcal_per_100g), density_matched, density_source, calorie_matched, calorie_source
 

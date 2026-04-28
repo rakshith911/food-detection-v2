@@ -105,6 +105,7 @@ export default function MealDetailScreen() {
   const [overlayImageUrl, setOverlayImageUrl] = useState<string | null>(null);
   const [showFullImageModal, setShowFullImageModal] = useState(false);
   const [fullImageUri, setFullImageUri] = useState<string | null>(null);
+  const [selectedDepthIngredient, setSelectedDepthIngredient] = useState<string | null>(null);
   // When segmented overlay URL fails to load (e.g. expired), refetch or show original image
   const [overlayLoadFailed, setOverlayLoadFailed] = useState(false);
   const [refreshedSegmentedImages, setRefreshedSegmentedImages] = useState<SegmentedImages | null>(null);
@@ -160,13 +161,41 @@ export default function MealDetailScreen() {
   // Use freshly fetched URLs when available, fall back to stored ones.
   // Stored URLs have 30-day expiry so they remain valid for normal usage patterns.
   const effectiveSegmentedImages = refreshedSegmentedImages ?? item?.segmented_images ?? null;
-  
+
+  const normalizeAssetName = useCallback((value?: string | null) => (
+    (value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+  ), []);
+
+  const geminiDepthAssets = useMemo(() => {
+    const overlays = effectiveSegmentedImages?.overlay_urls || [];
+    const full = overlays.find((asset: any) => asset?.name === 'gemini_depth_full')?.url || null;
+    const ingredients: Record<string, string> = {};
+    overlays.forEach((asset: any) => {
+      const name = asset?.name || '';
+      if (!name.startsWith('gemini_depth_ingredient_') || !asset?.url) return;
+      const slug = name.replace('gemini_depth_ingredient_', '');
+      ingredients[slug] = asset.url;
+      const displaySlug = normalizeAssetName(toDisplayFoodLabel(slug.replace(/_/g, ' ')));
+      if (displaySlug && displaySlug !== slug) {
+        ingredients[displaySlug] = asset.url;
+      }
+    });
+    return { full, ingredients };
+  }, [effectiveSegmentedImages?.overlay_urls, normalizeAssetName]);
+
+  const selectedDepthUri = useMemo(() => {
+    if (!selectedDepthIngredient) return null;
+    if (selectedDepthIngredient === '__full__') return geminiDepthAssets.full;
+    return geminiDepthAssets.ingredients[normalizeAssetName(selectedDepthIngredient)] || null;
+  }, [geminiDepthAssets, normalizeAssetName, selectedDepthIngredient]);
+
   // Reset overlay state and loader when item changes
   useEffect(() => {
     setOverlayLoadFailed(false);
     setRefreshedSegmentedImages(null);
     setMediaLoading(true);
     setVideoOverlayError(false);
+    setSelectedDepthIngredient(null);
     // Re-seed resolved URIs from the new item immediately so there's no blank frame
     setResolvedImageUri(item?.imageUri);
     setResolvedVideoUri(item?.videoUri);
@@ -516,11 +545,25 @@ export default function MealDetailScreen() {
 
         {table.rows.map((row) => {
           const isEditing = editingRowId === row.id;
+          const slug = normalizeAssetName(row.name);
+          const hasDepth = !!geminiDepthAssets.ingredients[slug];
+          const isSelectedDepthRow = selectedDepthIngredient != null && selectedDepthIngredient !== '__full__' && normalizeAssetName(selectedDepthIngredient) === slug;
+          const RowContainer: any = isEditing ? View : TouchableOpacity;
           return (
-            <View
+            <RowContainer
               key={row.id}
-              ref={(ref) => { rowRefs.current[row.id] = ref; }}
-              style={styles.tableRow}
+              ref={(ref: any) => { rowRefs.current[row.id] = ref; }}
+              style={[styles.tableRow, isSelectedDepthRow && styles.tableRowSelected]}
+              activeOpacity={hasDepth ? 0.85 : 1}
+              onPress={() => {
+                if (!row.name.trim() || !hasDepth) return;
+                if (isSelectedDepthRow) {
+                  setSelectedDepthIngredient(null);
+                } else {
+                  setIsVideoPlaying(false);
+                  setSelectedDepthIngredient(row.name);
+                }
+              }}
             >
               <View style={[styles.tableCell, { flex: 2 }]} pointerEvents="box-none">
                 {isEditing ? (
@@ -636,7 +679,7 @@ export default function MealDetailScreen() {
                   />
                 </TouchableOpacity>
               </View>
-            </View>
+            </RowContainer>
           );
         })}
 
@@ -740,9 +783,10 @@ export default function MealDetailScreen() {
               : null;
             // TRELLIS MP4: for image jobs, use trellis_mp4_url as the "overlay video" (same UI as video pipeline)
             const trellisMP4Url = item.trellis_mp4_url ?? null;
-            const displayUri = overlayUri || resolvedImageUri || null;
+            const depthUri = !overlayLoadFailed ? selectedDepthUri : null;
+            const displayUri = depthUri || overlayUri || resolvedImageUri || null;
             const videoThumbnailUri = resolvedImageUri || item.imageUri || overlayUri || null;
-            const showImageLoader = !isVideo && !trellisMP4Url && !!displayUri;
+            const showImageLoader = !isVideo && (!!depthUri || !trellisMP4Url) && !!displayUri;
             // Use resolvedVideoUri directly — it is pre-initialised to item?.videoUri so
             // the player always has a URI while the presigned URL fetch is in-flight.
             const originalVideoUri = resolvedVideoUri ?? null;
@@ -835,6 +879,22 @@ export default function MealDetailScreen() {
                 </TouchableOpacity>
               )}
             </>
+          ) : depthUri ? (
+            // Ingredient depth map selected — tap to deselect and return to normal view
+            <TouchableOpacity
+              style={styles.mediaTouchable}
+              activeOpacity={1}
+              onPress={() => { setSelectedDepthIngredient(null); }}
+            >
+              <OptimizedImage
+                source={{ uri: depthUri }}
+                style={styles.media}
+                resizeMode="cover"
+                cachePolicy="memory-disk"
+                priority="high"
+                onImageLoad={() => setMediaLoading(false)}
+              />
+            </TouchableOpacity>
           ) : trellisMP4Url ? (
             // Image job with TRELLIS MP4 — same play/pause UI as the video pipeline
             <>
@@ -999,7 +1059,13 @@ export default function MealDetailScreen() {
                 autoFocus
               />
             ) : (
-              <TouchableOpacity onPress={() => setEditingMealName(true)}>
+              <TouchableOpacity onPress={() => {
+                if (selectedDepthIngredient) {
+                  setSelectedDepthIngredient(null);
+                } else {
+                  setEditingMealName(true);
+                }
+              }}>
                 <Text style={styles.mealName}>{toSentenceCase(mealName)}</Text>
               </TouchableOpacity>
             )}
@@ -1017,8 +1083,38 @@ export default function MealDetailScreen() {
               <View style={styles.addButtonIcon}>
                 <Text style={styles.addButtonIconText}>+</Text>
               </View>
-              <Text style={styles.addButtonText}>Add Base Ingredient</Text>
+              <Text style={styles.addButtonText}>Add Ingredient</Text>
             </TouchableOpacity>
+            {(item.trellis_mp4_url || geminiDepthAssets.full) && (
+              <View style={styles.mediaActionButtons}>
+                {item.trellis_mp4_url && (
+                  <TouchableOpacity
+                    style={styles.mediaActionButton}
+                    onPress={() => {
+                      setSelectedDepthIngredient(null);
+                      handleVideoPlay();
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons name={isVideoPlaying ? 'pause' : 'play'} size={10} color="#FFFFFF" />
+                  </TouchableOpacity>
+                )}
+                {geminiDepthAssets.full && (
+                  <TouchableOpacity
+                    style={styles.mediaActionButton}
+                    onPress={() => {
+                      setIsVideoPlaying(false);
+                      setSelectedDepthIngredient(
+                        selectedDepthIngredient === '__full__' ? null : '__full__'
+                      );
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons name="layers" size={10} color="#FFFFFF" />
+                  </TouchableOpacity>
+                )}
+              </View>
+            )}
           </View>
         </View>
       </View>
@@ -1215,6 +1311,19 @@ const styles = StyleSheet.create({
   mealActions: {
     alignItems: 'flex-end',
   },
+  mediaActionButtons: {
+    flexDirection: 'row',
+    gap: 6,
+    marginTop: 6,
+  },
+  mediaActionButton: {
+    width: 17,
+    height: 17,
+    borderRadius: 9,
+    backgroundColor: '#7BA21B',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   tableContainer: {
     paddingHorizontal: 16,
     paddingTop: 16,
@@ -1244,6 +1353,9 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#F3F4F6',
     alignItems: 'center',
+  },
+  tableRowSelected: {
+    backgroundColor: '#F5F9EA',
   },
   tableCell: {
     paddingHorizontal: 8,

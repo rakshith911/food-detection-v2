@@ -44,6 +44,7 @@ export interface SegmentedImage {
   frame: string;
   url: string;
   key: string;
+  name?: string;
   type?: 'overlay' | 'mask';
   object_id?: string;
 }
