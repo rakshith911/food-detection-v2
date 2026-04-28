@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   StyleSheet,
   Text,
@@ -92,6 +92,25 @@ export default function FeedbackScreen() {
   const [mediaLoading, setMediaLoading] = useState(true);
 
   const effectiveSegmentedImages = refreshedSegmentedImages ?? item?.segmented_images;
+
+  const [selectedDepthIngredient, setSelectedDepthIngredient] = useState<string | null>(null);
+
+  const geminiDepthFull = useMemo(() =>
+    effectiveSegmentedImages?.overlay_urls?.find((a: any) => a?.name === 'gemini_depth_full')?.url || null,
+    [effectiveSegmentedImages?.overlay_urls]
+  );
+
+  const taggedOverlayUri = useMemo(() =>
+    effectiveSegmentedImages?.overlay_urls?.find((a: any) => a?.name === 'tagged')?.url || null,
+    [effectiveSegmentedImages?.overlay_urls]
+  );
+
+  const selectedDepthUri = useMemo(() => {
+    if (!selectedDepthIngredient) return null;
+    if (selectedDepthIngredient === '__full__') return geminiDepthFull;
+    if (selectedDepthIngredient === '__tagged__') return taggedOverlayUri;
+    return null;
+  }, [selectedDepthIngredient, geminiDepthFull, taggedOverlayUri]);
 
   useEffect(() => {
     setOverlayLoadFailed(false);
@@ -432,13 +451,13 @@ export default function FeedbackScreen() {
 
         {/* Meal Info */}
         <View style={styles.mealInfo}>
+          {/* Row 1: meal name (wraps) | right: kcal + Write Comments */}
           <View style={styles.mealHeader}>
-            <View style={{ flex: 1 }}>
+            <View style={{ flex: 1, marginRight: 12 }}>
               <Text style={styles.mealName}>{toSentenceCase(item.mealName || 'Burger')}</Text>
-              <Text style={styles.mealCalories}>{item.nutritionalInfo.calories} Kcal</Text>
             </View>
-
             <View style={styles.mealActions}>
+              <Text style={styles.mealCalories}>{item.nutritionalInfo.calories} Kcal</Text>
               <TouchableOpacity
                 style={styles.writeCommentButton}
                 onPress={() => {
@@ -459,6 +478,32 @@ export default function FeedbackScreen() {
                 </Text>
               </View>
             </View>
+          </View>
+          {/* Row 2: 3 view buttons with separators */}
+          <View style={styles.mediaActionButtons}>
+            <TouchableOpacity
+              style={[styles.mediaActionButton, isVideoPlaying && styles.mediaActionButtonActive]}
+              onPress={() => { setSelectedDepthIngredient(null); handleVideoPlay(); }}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="cube-outline" size={10} color={isVideoPlaying ? '#FFFFFF' : '#6B7280'} />
+            </TouchableOpacity>
+            <View style={styles.buttonSeparator} />
+            <TouchableOpacity
+              style={[styles.mediaActionButton, selectedDepthIngredient === '__full__' && styles.mediaActionButtonActive]}
+              onPress={() => { setIsVideoPlaying(false); setSelectedDepthIngredient(selectedDepthIngredient === '__full__' ? null : '__full__'); }}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="analytics-outline" size={10} color={selectedDepthIngredient === '__full__' ? '#FFFFFF' : '#6B7280'} />
+            </TouchableOpacity>
+            <View style={styles.buttonSeparator} />
+            <TouchableOpacity
+              style={[styles.mediaActionButton, selectedDepthIngredient === '__tagged__' && styles.mediaActionButtonActive]}
+              onPress={() => { setIsVideoPlaying(false); setSelectedDepthIngredient(selectedDepthIngredient === '__tagged__' ? null : '__tagged__'); }}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="scan-outline" size={10} color={selectedDepthIngredient === '__tagged__' ? '#FFFFFF' : '#6B7280'} />
+            </TouchableOpacity>
           </View>
         </View>
 
@@ -610,12 +655,20 @@ export default function FeedbackScreen() {
                 </>
               ) : (
                 (() => {
+                  const depthUri = !overlayLoadFailed ? selectedDepthUri : null;
                   const overlayUri = effectiveSegmentedImages?.overlay_urls?.[0]?.url;
-                  const displayUri = (!overlayLoadFailed && overlayUri) ? overlayUri : item.imageUri || null;
+                  const displayUri = depthUri || ((!overlayLoadFailed && overlayUri) ? overlayUri : item.imageUri || null);
                   const showImageLoader = !isVideo && !!displayUri;
                   if (displayUri) {
                     return (
-                      <TouchableOpacity activeOpacity={1} onPress={() => { setFullImageUri(displayUri); setShowFullImageModal(true); }} style={styles.mediaTouchable}>
+                      <TouchableOpacity
+                        activeOpacity={1}
+                        onPress={() => {
+                          if (depthUri) { setSelectedDepthIngredient(null); }
+                          else { setFullImageUri(displayUri); setShowFullImageModal(true); }
+                        }}
+                        style={styles.mediaTouchable}
+                      >
                         <OptimizedImage
                           source={{ uri: displayUri }}
                           style={styles.media}
@@ -843,8 +896,7 @@ const styles = StyleSheet.create({
   },
   mealHeader: {
     flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
+    alignItems: 'flex-start',
   },
   mealName: {
     fontSize: 18,
@@ -870,6 +922,29 @@ const styles = StyleSheet.create({
   },
   mealActions: {
     alignItems: 'flex-end',
+    gap: 6,
+  },
+  mediaActionButtons: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 8,
+    gap: 6,
+  },
+  mediaActionButton: {
+    width: 22,
+    height: 22,
+    borderRadius: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#F3F4F6',
+  },
+  mediaActionButtonActive: {
+    backgroundColor: '#7BA21B',
+  },
+  buttonSeparator: {
+    width: 1,
+    height: 14,
+    backgroundColor: '#D1D5DB',
   },
   captureInfo: {
     alignItems: 'flex-end',
