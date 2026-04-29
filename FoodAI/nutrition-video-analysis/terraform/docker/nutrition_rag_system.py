@@ -1306,12 +1306,6 @@ class NutritionRAG:
         if len(query_tokens) >= 2 and entry.get('source') == 'fao' and len(matched_tokens) <= 2:
             score -= 6.0
 
-        if {'yellow', 'rice'} <= query_tokens:
-            if {'yellow', 'rice'} <= matched_all_tokens:
-                score += 18.0
-            if 'no' in matched_all_tokens and 'fat' in matched_all_tokens:
-                score += 10.0
-
         score += cls._compatibility_adjustment(query_lower, matched_lower, field='calories_per_100g')
 
         return score
@@ -2161,10 +2155,7 @@ class NutritionRAG:
                 if not self._words_overlap(normalized, matched.lower()):
                     continue
                 if self._has_conflicting_form(normalized, matched.lower()):
-                    food_phrase = food_name.strip().lower()
-                    phrase_in_desc = len(food_phrase.split()) >= 2 and food_phrase in matched.lower()
-                    if not phrase_in_desc:
-                        continue
+                    continue
                 entry = self._usda_foods[idx]
                 kcal  = float(entry.get('calories_per_100g', 0))
                 return kcal, matched, f"usda_faiss(sim={sim:.2f})"
@@ -2734,11 +2725,9 @@ class NutritionRAG:
         """
         ZOE-pipeline-aligned resolution — always kcal-first, then density separately.
 
-        Step 1 — Find the best USDA/unified kcal match via CLIP-FAISS + cross-encoder.
-                 Dry/mix/packet USDA entries are intentionally NOT blocked here;
-                 the cross-encoder is the sole quality gate.  This lets "yellow rice"
-                 correctly reach "Yellow rice with seasoning, dry packet mix, unprepared"
-                 (343 kcal/100g) instead of falling back to a generic cooked-rice entry.
+        Step 1 — Find the best USDA/unified kcal match via FAISS + cross-encoder.
+                 Dry/mix/packet entries are blocked for plated-food queries unless
+                 the query itself asks for that form (for example "rice mix").
 
         Step 1a — If the winning kcal entry ALSO carries a reliable density reading,
                   reuse it immediately (nutritionally self-consistent, no second search).
@@ -2751,9 +2740,9 @@ class NutritionRAG:
                  This mirrors the ZOE pipeline's
                  `_lookup_density_from_queries(rag_result["description"], ingredient_name)`.
 
-        Note: _lookup_best_entry is NOT used as the primary path.  It can confuse
-        cross-entry matches (e.g. "yellow rice" → "Wild rice, cooked" because that
-        entry happens to have both fields) when the correct kcal entry has no density.
+        Note: _lookup_best_entry is NOT used as the primary path. It can confuse
+        cross-entry matches when a candidate happens to have both fields but is not
+        the best text match for the plated item.
 
         Returns (density, kcal_per_100g, density_matched, density_source, calorie_matched, calorie_source).
         """

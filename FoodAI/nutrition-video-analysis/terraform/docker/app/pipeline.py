@@ -2129,6 +2129,7 @@ class NutritionVideoPipeline:
             "An ingredient is NOT an extra just because it is visible. It is an extra only if the image strongly indicates an amount clearly ABOVE what is usual for that ingredient in this kind of dish.\n"
             "Think in terms of: 'more than usual', 'clearly excessive', 'separate added layer', 'overflowing topping', or 'distinct additional serving'.\n\n"
             "VISUALLY INSPECT for these specific signs before flagging as extra:\n\n"
+            "Use color/HSV-style visual checks as supporting evidence for high-calorie extras: look for distinct yellow/clear oily regions, saturated shiny pools, separated fat edges, or thick creamy/cheesy areas. Do not use color or shine alone; the high-calorie ingredient must be physically visible.\n\n"
             "Extra Oil / Fat / Ghee:\n"
             "  - Oil pooling on the plate or around the edges of food\n"
             "  - Oil drips or visible liquid fat separating from the dish\n"
@@ -2221,6 +2222,21 @@ class NutritionVideoPipeline:
             "separate added", "overflow", "additional serving", "distinct added", "double serving",
             "pooled", "puddle", "drip", "droplet",
         )
+        _HIDDEN_CONTEXT_ONLY_KEYWORDS = (
+            "usually", "commonly", "typical", "typically", "traditional", "traditionally",
+            "often", "almost universally", "universally", "recipe", "cuisine", "served with",
+            "served in", "generic", "standard", "normally", "likely contains", "would contain",
+        )
+        _HIDDEN_DIRECT_EVIDENCE_KEYWORDS = (
+            "visible", "visibly", "seen", "peeking", "edge", "edges", "around", "under",
+            "beneath", "below", "buried", "covered", "layer", "depth", "depth map",
+            "raised", "elevated", "pocket", "wrap", "roll", "enclosed", "surface",
+            "partially visible", "obscured",
+        )
+        _HIDDEN_STAPLE_TERMS_REQUIRING_EVIDENCE = (
+            "rice", "grain", "bread", "pita", "tortilla", "wrap", "naan", "flatbread",
+            "noodle", "noodles", "pasta",
+        )
 
         visible_names = {(item["name"] or "").strip().lower() for item in visible_items}
         inferred_items = []
@@ -2266,6 +2282,21 @@ class NutritionVideoPipeline:
                 if confidence < 0.85 or not any(keyword in reason_text for keyword in _OIL_EXTRA_KEYWORDS):
                     logger.info(
                         f"[{job_id}] Skipping oil extra '{name}' — insufficient explicit pooled/separated oil evidence"
+                    )
+                    continue
+
+            if item_type == "hidden":
+                has_direct_hidden_evidence = any(keyword in reason_text for keyword in _HIDDEN_DIRECT_EVIDENCE_KEYWORDS)
+                has_context_only_reason = any(keyword in reason_text for keyword in _HIDDEN_CONTEXT_ONLY_KEYWORDS)
+                requires_direct_evidence = any(term in normalized_name for term in _HIDDEN_STAPLE_TERMS_REQUIRING_EVIDENCE)
+                if has_context_only_reason and not has_direct_hidden_evidence:
+                    logger.info(
+                        f"[{job_id}] Skipping hidden item '{name}' — reason is cuisine/recipe context without direct visual evidence"
+                    )
+                    continue
+                if requires_direct_evidence and not has_direct_hidden_evidence:
+                    logger.info(
+                        f"[{job_id}] Skipping hidden staple '{name}' — no direct visual/depth evidence cited"
                     )
                     continue
 
