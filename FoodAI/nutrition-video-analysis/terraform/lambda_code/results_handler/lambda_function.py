@@ -126,7 +126,7 @@ def lambda_handler(event, context):
                     'Bucket': S3_RESULTS_BUCKET,
                     'Key': results_key
                 },
-                ExpiresIn=3600  # 1 hour
+                ExpiresIn=86400  # 24 hours
             )
             result['download_url'] = download_url
         except Exception:
@@ -149,7 +149,7 @@ def lambda_handler(event, context):
                 #   segmented_images/{job_id}/segmented_overlay_video.mp4
                 # Worker stores asset_keys in results["segmented_images"]; we read them here
                 # and generate presigned URLs so the frontend never touches stale ECS credentials.
-                presigned_expires = 3600  # 1 hour — same as download_url
+                presigned_expires = 86400  # 24 hours
                 overlay_urls = []
 
                 # Static image overlays — read asset_keys stored by the ECS worker

@@ -152,11 +152,6 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
     day: 'numeric',
     year: 'numeric',
   });
-  const lastLoginTime = new Date().toLocaleTimeString('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
-  });
 
   const handleBack = () => {
     if (step === 1) {
@@ -805,7 +800,7 @@ export default function PreviewScreen({ imageUri, videoUri, onBack, onAnalyze }:
       <AppHeader
         displayName={displayName}
         lastLoginDate={lastLoginDate}
-        lastLoginTime={lastLoginTime}
+
         onProfilePress={() => navigation.navigate('Profile' as never)}
       />
       {step === 1 && renderStep1()}

@@ -22,7 +22,8 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { PanGestureHandler, State } from 'react-native-gesture-handler';
 import { Video, ResizeMode } from 'expo-av';
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import CubeIcon from '../components/CubeIcon';
 import { useNavigation, useRoute, useFocusEffect } from '@react-navigation/native';
 import { useAppSelector, useAppDispatch } from '../store/hooks';
 import type { AnalysisEntry, DishContent, DishTableKey, DishTableSection, SegmentedImages } from '../store/slices/historySlice';
@@ -43,6 +44,7 @@ import {
 } from '../utils/mealTables';
 import { toDisplayFoodLabel, toSentenceCase } from '../utils/textCase';
 
+const TRELLIS_PREVIEW_LOOP_MS = 4000;
 
 export default function MealDetailScreen() {
   const navigation = useNavigation<any>();
@@ -56,18 +58,42 @@ export default function MealDetailScreen() {
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const overlayVideoRef = useRef<Video>(null);
   const originalVideoRef = useRef<Video>(null);
+  const fullScreenVideoRef = useRef<Video>(null);
   const screenSwipePosition = useRef(new Animated.Value(0)); // For screen-level swipe right gesture
+  const loopFadeAnim = useRef(new Animated.Value(0)).current;
+  const loopFadeStarted = useRef(false);
+  const fullScreenFadeAnim = useRef(new Animated.Value(0)).current;
+  const fullScreenFadeStarted = useRef(false);
 
   const handleVideoPlay = useCallback(() => {
     setIsVideoPlaying((prev) => !prev);
   }, []);
 
+  const loopTrellisPreviewAtFourSeconds = useCallback((status: any) => {
+    if (!status?.isLoaded) return;
+    if (status.positionMillis >= TRELLIS_PREVIEW_LOOP_MS - 350 && !loopFadeStarted.current) {
+      loopFadeStarted.current = true;
+      Animated.timing(loopFadeAnim, { toValue: 1, duration: 350, useNativeDriver: true }).start();
+    }
+    if (status.positionMillis >= TRELLIS_PREVIEW_LOOP_MS) {
+      overlayVideoRef.current?.setStatusAsync({ positionMillis: 0, shouldPlay: true });
+      loopFadeStarted.current = false;
+      Animated.timing(loopFadeAnim, { toValue: 0, duration: 350, useNativeDriver: true }).start();
+    }
+  }, [loopFadeAnim]);
+
   // Use business name as display name, fallback to email if business name not available
   // Only use businessName if it exists and is not empty
-  const userName = (businessProfile?.businessName && businessProfile.businessName.trim()) 
-    ? businessProfile.businessName 
+  const userName = (businessProfile?.businessName && businessProfile.businessName.trim())
+    ? businessProfile.businessName
     : (user?.email?.split('@')[0] || 'User');
   const displayName = userName.charAt(0).toUpperCase() + userName.slice(1);
+
+  const lastLoginDate = new Date().toLocaleDateString('en-US', {
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+  });
   
   if (!item) {
     return (
@@ -75,6 +101,8 @@ export default function MealDetailScreen() {
         <StatusBar barStyle="dark-content" />
         <AppHeader
           displayName={displayName}
+          lastLoginDate={lastLoginDate}
+
           onProfilePress={() => navigation.navigate('Profile')}
         />
         <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
@@ -103,12 +131,14 @@ export default function MealDetailScreen() {
   const [isSaving, setIsSaving] = useState(false);
   const [showSegmentationOverlay, setShowSegmentationOverlay] = useState(false);
   const [overlayImageUrl, setOverlayImageUrl] = useState<string | null>(null);
-  const [showFullImageModal, setShowFullImageModal] = useState(false);
-  const [fullImageUri, setFullImageUri] = useState<string | null>(null);
+  const [showFullMediaModal, setShowFullMediaModal] = useState(false);
+  const [fullMediaUri, setFullMediaUri] = useState<string | null>(null);
+  const [fullMediaType, setFullMediaType] = useState<'image' | 'video'>('image');
   const [selectedDepthIngredient, setSelectedDepthIngredient] = useState<string | null>(null);
   // When segmented overlay URL fails to load (e.g. expired), refetch or show original image
   const [overlayLoadFailed, setOverlayLoadFailed] = useState(false);
   const [refreshedSegmentedImages, setRefreshedSegmentedImages] = useState<SegmentedImages | null>(null);
+  const [refreshedTrellisMP4Url, setRefreshedTrellisMP4Url] = useState<string | null>(item?.trellis_mp4_url ?? null);
   const [refreshingOverlay, setRefreshingOverlay] = useState(false);
   const [mediaLoading, setMediaLoading] = useState(true);
   const [videoOverlayError, setVideoOverlayError] = useState(false);
@@ -199,6 +229,7 @@ export default function MealDetailScreen() {
   useEffect(() => {
     setOverlayLoadFailed(false);
     setRefreshedSegmentedImages(null);
+    setRefreshedTrellisMP4Url(item?.trellis_mp4_url ?? null);
     setMediaLoading(true);
     setVideoOverlayError(false);
     setSelectedDepthIngredient(null);
@@ -234,6 +265,7 @@ export default function MealDetailScreen() {
           setOverlayLoadFailed(false);
           setVideoOverlayError(false);
           setRefreshedSegmentedImages(fresh.segmented_images || null);
+          if (fresh?.trellis_mp4_url) setRefreshedTrellisMP4Url(fresh.trellis_mp4_url);
           await dispatch(updateAnalysis({
             userEmail: user.email,
             analysisId: item.id,
@@ -256,15 +288,19 @@ export default function MealDetailScreen() {
     if (item?.job_id && user?.email) {
       setRefreshingOverlay(true);
       try {
-        const fresh = await nutritionAnalysisAPI.getResults(item.job_id, true, false);
+        const fresh = await nutritionAnalysisAPI.getResults(item.job_id, true, true);
         if (fresh?.segmented_images?.overlay_urls?.length || fresh?.segmented_images?.video_overlay_url) {
           setOverlayLoadFailed(false);
           setVideoOverlayError(false);
           setRefreshedSegmentedImages(fresh.segmented_images || null);
+          if (fresh?.trellis_mp4_url) setRefreshedTrellisMP4Url(fresh.trellis_mp4_url);
           await dispatch(updateAnalysis({
             userEmail: user.email,
             analysisId: item.id,
-            updates: { segmented_images: fresh.segmented_images },
+            updates: {
+              segmented_images: fresh.segmented_images,
+              ...(fresh.trellis_mp4_url ? { trellis_mp4_url: fresh.trellis_mp4_url } : {}),
+            },
           })).unwrap();
         } else {
           setOverlayLoadFailed(true);
@@ -278,6 +314,13 @@ export default function MealDetailScreen() {
       setOverlayLoadFailed(true);
     }
   }, [item?.id, item?.job_id, user?.email, dispatch]);
+
+  const openFullScreenMedia = useCallback((uri: string | null | undefined, type: 'image' | 'video') => {
+    if (!uri) return;
+    setFullMediaUri(uri);
+    setFullMediaType(type);
+    setShowFullMediaModal(true);
+  }, []);
   
   const [dishTables, setDishTables] = useState<DishTableSection[]>(
     normalizeDishTablesForSave(hydrateDishTables(item?.dishTables, item?.dishContents))
@@ -758,6 +801,8 @@ export default function MealDetailScreen() {
           <View style={{ flex: 1 }}>
             <AppHeader
               displayName={displayName}
+              lastLoginDate={lastLoginDate}
+    
               onProfilePress={() => {
                 try {
                   navigation.navigate('Profile');
@@ -781,14 +826,15 @@ export default function MealDetailScreen() {
             nestedScrollEnabled={true}
           >
         {/* Media Preview */}
-        <View style={styles.mediaContainer}>
+        <View style={[styles.mediaContainer, (!!selectedDepthIngredient || !!refreshedTrellisMP4Url) && { backgroundColor: '#000000' }]}>
+          <View style={[styles.mediaBackdrop, (!!selectedDepthIngredient || !!refreshedTrellisMP4Url) && { backgroundColor: '#000000' }]} pointerEvents="none" />
           {(() => {
             const overlayUri = !overlayLoadFailed ? effectiveSegmentedImages?.overlay_urls?.[0]?.url : undefined;
             const videoOverlayUrl = (!overlayLoadFailed && !videoOverlayError)
               ? effectiveSegmentedImages?.video_overlay_url ?? null
               : null;
             // TRELLIS MP4: for image jobs, use trellis_mp4_url as the "overlay video" (same UI as video pipeline)
-            const trellisMP4Url = item.trellis_mp4_url ?? null;
+            const trellisMP4Url = refreshedTrellisMP4Url;
             const depthUri = !overlayLoadFailed ? selectedDepthUri : null;
             const displayUri = depthUri || overlayUri || resolvedImageUri || null;
             const videoThumbnailUri = resolvedImageUri || item.imageUri || overlayUri || null;
@@ -809,7 +855,7 @@ export default function MealDetailScreen() {
                   key={videoOverlayUrl}
                   source={{ uri: videoOverlayUrl }}
                   style={[styles.media, { position: 'absolute', top: 0, left: 0, opacity: isVideoPlaying ? 1 : 0 }]}
-                  resizeMode={ResizeMode.COVER}
+                  resizeMode={ResizeMode.CONTAIN}
                   isLooping={false}
                   isMuted={false}
                   shouldPlay={isVideoPlaying}
@@ -831,7 +877,7 @@ export default function MealDetailScreen() {
                   key={originalVideoUri}
                   source={{ uri: originalVideoUri }}
                   style={[styles.media, { opacity: (isVideoPlaying && videoOverlayUrl && !videoOverlayError) ? 0 : 1 }]}
-                  resizeMode={ResizeMode.COVER}
+                  resizeMode={ResizeMode.CONTAIN}
                   isLooping={false}
                   isMuted={true}
                   shouldPlay={isVideoPlaying && (!videoOverlayUrl || videoOverlayError)}
@@ -857,11 +903,16 @@ export default function MealDetailScreen() {
                 <OptimizedImage
                   source={{ uri: videoThumbnailUri }}
                   style={[styles.media, StyleSheet.absoluteFillObject]}
-                  resizeMode="cover"
+                  resizeMode="contain"
                   cachePolicy="memory-disk"
                   priority="normal"
                 />
               )}
+              <TouchableOpacity
+                style={styles.mediaTapTarget}
+                onPress={() => openFullScreenMedia(videoSource || originalVideoUri, 'video')}
+                activeOpacity={1}
+              />
               {!isVideoPlaying && (
                 <TouchableOpacity
                   style={styles.playButtonOverlay}
@@ -886,16 +937,16 @@ export default function MealDetailScreen() {
               )}
             </>
           ) : depthUri ? (
-            // Ingredient depth map selected — tap to deselect and return to normal view
+            // Ingredient depth map selected — tap to inspect full screen
             <TouchableOpacity
               style={styles.mediaTouchable}
               activeOpacity={1}
-              onPress={() => { setSelectedDepthIngredient(null); }}
+              onPress={() => openFullScreenMedia(depthUri, 'image')}
             >
               <OptimizedImage
                 source={{ uri: depthUri }}
-                style={styles.media}
-                resizeMode="cover"
+                style={[styles.media, { backgroundColor: '#000000' }]}
+                resizeMode="contain"
                 cachePolicy="memory-disk"
                 priority="high"
                 onImageLoad={() => setMediaLoading(false)}
@@ -908,13 +959,15 @@ export default function MealDetailScreen() {
                 ref={overlayVideoRef}
                 key={trellisMP4Url}
                 source={{ uri: trellisMP4Url }}
-                style={[styles.media, { position: 'absolute', top: 0, left: 0, opacity: isVideoPlaying ? 1 : 0 }]}
-                resizeMode={ResizeMode.COVER}
+                style={[styles.media, { backgroundColor: '#000000', position: 'absolute', top: 0, left: 0, opacity: isVideoPlaying ? 1 : 0 }]}
+                resizeMode={ResizeMode.CONTAIN}
                 isLooping
                 isMuted
                 shouldPlay={isVideoPlaying}
                 useNativeControls={false}
+                progressUpdateIntervalMillis={100}
                 onPlaybackStatusUpdate={(status) => {
+                  loopTrellisPreviewAtFourSeconds(status);
                   if (!status.isLoaded && (status as any).error) {
                     setVideoOverlayError(true);
                   }
@@ -923,13 +976,22 @@ export default function MealDetailScreen() {
               {videoThumbnailUri && (
                 <OptimizedImage
                   source={{ uri: videoThumbnailUri }}
-                  style={[styles.media, StyleSheet.absoluteFillObject, { opacity: isVideoPlaying ? 0 : 1 }]}
-                  resizeMode="cover"
+                  style={[styles.media, StyleSheet.absoluteFillObject, { backgroundColor: '#000000', opacity: isVideoPlaying ? 0 : 1 }]}
+                  resizeMode="contain"
                   cachePolicy="memory-disk"
                   priority="normal"
                   onImageLoad={() => setMediaLoading(false)}
                 />
               )}
+              <TouchableOpacity
+                style={styles.mediaTapTarget}
+                onPress={() => openFullScreenMedia(isVideoPlaying ? trellisMP4Url : videoThumbnailUri, isVideoPlaying ? 'video' : 'image')}
+                activeOpacity={1}
+              />
+              <Animated.View
+                style={[StyleSheet.absoluteFill, { backgroundColor: '#000000', opacity: loopFadeAnim, zIndex: 6 }]}
+                pointerEvents="none"
+              />
               <TouchableOpacity
                 style={styles.playButtonOverlay}
                 onPress={handleVideoPlay}
@@ -946,15 +1008,12 @@ export default function MealDetailScreen() {
               <TouchableOpacity
                 style={styles.mediaTouchable}
                 activeOpacity={1}
-                onPress={() => {
-                  setFullImageUri(displayUri);
-                  setShowFullImageModal(true);
-                }}
+                onPress={() => openFullScreenMedia(displayUri, 'image')}
               >
                 <OptimizedImage
                   source={{ uri: displayUri }}
                   style={styles.media}
-                  resizeMode="cover"
+                  resizeMode="contain"
                   cachePolicy="memory-disk"
                   priority="normal"
                   onImageLoad={() => setMediaLoading(false)}
@@ -1016,29 +1075,55 @@ export default function MealDetailScreen() {
           </View>
         </Modal>
 
-        {/* Full-screen image modal */}
+        {/* Full-screen media modal */}
         <Modal
-          visible={showFullImageModal}
+          visible={showFullMediaModal}
           transparent
           animationType="fade"
-          onRequestClose={() => setShowFullImageModal(false)}
+          onRequestClose={() => setShowFullMediaModal(false)}
         >
-          <TouchableOpacity
+          <View
             style={styles.fullImageModalBackdrop}
-            activeOpacity={1}
-            onPress={() => setShowFullImageModal(false)}
           >
-            <View style={styles.fullImageModalContent} pointerEvents="box-none">
+            <View style={styles.fullImageModalContent}>
               <TouchableOpacity
                 style={styles.fullImageCloseButton}
-                onPress={() => setShowFullImageModal(false)}
+                onPress={() => setShowFullMediaModal(false)}
                 hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
               >
                 <Ionicons name="close" size={28} color="#FFFFFF" />
               </TouchableOpacity>
-              {fullImageUri ? (
+              {fullMediaUri && fullMediaType === 'video' ? (
+                <>
+                  <Video
+                    ref={fullScreenVideoRef}
+                    source={{ uri: fullMediaUri }}
+                    style={styles.fullImage}
+                    resizeMode={ResizeMode.CONTAIN}
+                    shouldPlay
+                    useNativeControls
+                    isLooping={false}
+                    onPlaybackStatusUpdate={(status) => {
+                      if (!status.isLoaded) return;
+                      if (status.positionMillis >= TRELLIS_PREVIEW_LOOP_MS - 350 && !fullScreenFadeStarted.current) {
+                        fullScreenFadeStarted.current = true;
+                        Animated.timing(fullScreenFadeAnim, { toValue: 1, duration: 350, useNativeDriver: true }).start();
+                      }
+                      if (status.positionMillis >= TRELLIS_PREVIEW_LOOP_MS) {
+                        fullScreenVideoRef.current?.setStatusAsync({ positionMillis: 0, shouldPlay: true });
+                        fullScreenFadeStarted.current = false;
+                        Animated.timing(fullScreenFadeAnim, { toValue: 0, duration: 350, useNativeDriver: true }).start();
+                      }
+                    }}
+                  />
+                  <Animated.View
+                    style={[StyleSheet.absoluteFill, { backgroundColor: '#000000', opacity: fullScreenFadeAnim }]}
+                    pointerEvents="none"
+                  />
+                </>
+              ) : fullMediaUri ? (
                 <OptimizedImage
-                  source={{ uri: fullImageUri }}
+                  source={{ uri: fullMediaUri }}
                   style={styles.fullImage}
                   resizeMode="contain"
                   cachePolicy="memory-disk"
@@ -1046,7 +1131,7 @@ export default function MealDetailScreen() {
                 />
               ) : null}
             </View>
-          </TouchableOpacity>
+          </View>
         </Modal>
 
         {/* Meal Info */}
@@ -1101,7 +1186,7 @@ export default function MealDetailScreen() {
               onPress={() => { setSelectedDepthIngredient(null); handleVideoPlay(); }}
               activeOpacity={0.7}
             >
-              <Ionicons name="cube-outline" size={10} color={isVideoPlaying ? '#FFFFFF' : '#6B7280'} />
+              <CubeIcon size={18} color={isVideoPlaying ? '#FFFFFF' : '#7BA21B'} />
             </TouchableOpacity>
             <View style={styles.buttonSeparator} />
             <TouchableOpacity
@@ -1112,7 +1197,7 @@ export default function MealDetailScreen() {
               }}
               activeOpacity={0.7}
             >
-              <Ionicons name="analytics-outline" size={10} color={selectedDepthIngredient === '__full__' ? '#FFFFFF' : '#6B7280'} />
+              <MaterialCommunityIcons name="image-filter-hdr" size={18} color={selectedDepthIngredient === '__full__' ? '#FFFFFF' : '#6B7280'} />
             </TouchableOpacity>
             <View style={styles.buttonSeparator} />
             <TouchableOpacity
@@ -1123,7 +1208,7 @@ export default function MealDetailScreen() {
               }}
               activeOpacity={0.7}
             >
-              <Ionicons name="scan-outline" size={10} color={selectedDepthIngredient === '__tagged__' ? '#FFFFFF' : '#6B7280'} />
+              <MaterialCommunityIcons name="selection-ellipse" size={18} color={selectedDepthIngredient === '__tagged__' ? '#FFFFFF' : '#6B7280'} />
             </TouchableOpacity>
           </View>
         </View>
@@ -1185,14 +1270,14 @@ const styles = StyleSheet.create({
   mediaContainer: {
     width: '100%',
     height: 250,
-    backgroundColor: '#F3F4F6',
+    backgroundColor: '#111827',
     position: 'relative',
     justifyContent: 'center',
     alignItems: 'center',
     overflow: 'hidden',
   },
   mediaLoader: {
-    backgroundColor: '#F3F4F6',
+    backgroundColor: 'rgba(17, 24, 39, 0.36)',
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -1205,9 +1290,18 @@ const styles = StyleSheet.create({
   media: {
     width: '100%',
     height: '100%',
+    backgroundColor: '#111827',
+  },
+  mediaBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#111827',
   },
   placeholder: {
     backgroundColor: '#111827',
+  },
+  mediaTapTarget: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 4,
   },
   backButtonOverlay: {
     position: 'absolute',
@@ -1233,13 +1327,14 @@ const styles = StyleSheet.create({
   },
   playButtonOverlay: {
     position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
+    top: '50%',
+    left: '50%',
+    width: 64,
+    height: 64,
+    marginTop: -32,
+    marginLeft: -32,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.3)',
     zIndex: 5,
   },
   playButton: {
@@ -1327,8 +1422,8 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   mediaActionButton: {
-    width: 22,
-    height: 22,
+    width: 28,
+    height: 28,
     borderRadius: 6,
     alignItems: 'center',
     justifyContent: 'center',

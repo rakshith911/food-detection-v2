@@ -13,10 +13,12 @@ import {
   KeyboardAvoidingView,
   ActivityIndicator,
   Modal,
+  Animated,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Video, ResizeMode } from 'expo-av';
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import CubeIcon from '../components/CubeIcon';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useAppSelector, useAppDispatch } from '../store/hooks';
 import type { AnalysisEntry, SegmentedImages } from '../store/slices/historySlice';
@@ -28,6 +30,9 @@ import VectorBackButtonCircle from '../components/VectorBackButtonCircle';
 import AppHeader from '../components/AppHeader';
 import BottomButtonContainer from '../components/BottomButtonContainer';
 import { toSentenceCase } from '../utils/textCase';
+import { getImagePresignedUrl } from '../services/S3UserDataService';
+
+const TRELLIS_PREVIEW_LOOP_MS = 4000;
 
 interface StarRatingProps {
   rating: number;
@@ -64,10 +69,29 @@ export default function FeedbackScreen() {
   const item = (route.params as any)?.item as AnalysisEntry;
 
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
+  const trellisVideoRef = useRef<Video>(null);
+  const fullScreenVideoRef = useRef<Video>(null);
+  const loopFadeAnim = useRef(new Animated.Value(0)).current;
+  const loopFadeStarted = useRef(false);
+  const fullScreenFadeAnim = useRef(new Animated.Value(0)).current;
+  const fullScreenFadeStarted = useRef(false);
 
   const handleVideoPlay = useCallback(() => {
     setIsVideoPlaying((prev) => !prev);
   }, []);
+
+  const loopTrellisPreviewAtFourSeconds = useCallback((status: any) => {
+    if (!status?.isLoaded) return;
+    if (status.positionMillis >= TRELLIS_PREVIEW_LOOP_MS - 350 && !loopFadeStarted.current) {
+      loopFadeStarted.current = true;
+      Animated.timing(loopFadeAnim, { toValue: 1, duration: 350, useNativeDriver: true }).start();
+    }
+    if (status.positionMillis >= TRELLIS_PREVIEW_LOOP_MS) {
+      trellisVideoRef.current?.setStatusAsync({ positionMillis: 0, shouldPlay: true });
+      loopFadeStarted.current = false;
+      Animated.timing(loopFadeAnim, { toValue: 0, duration: 350, useNativeDriver: true }).start();
+    }
+  }, [loopFadeAnim]);
 
   // Initialize state from existing feedback if available
   const [ratings, setRatings] = useState(
@@ -84,12 +108,16 @@ export default function FeedbackScreen() {
   const [isCommentFocused, setIsCommentFocused] = useState(false);
   const commentInputRef = useRef<TextInput>(null);
   const scrollViewRef = useRef<ScrollView>(null);
-  const [showFullImageModal, setShowFullImageModal] = useState(false);
-  const [fullImageUri, setFullImageUri] = useState<string | null>(null);
+  const [showFullMediaModal, setShowFullMediaModal] = useState(false);
+  const [fullMediaUri, setFullMediaUri] = useState<string | null>(null);
+  const [fullMediaType, setFullMediaType] = useState<'image' | 'video'>('image');
   const [overlayLoadFailed, setOverlayLoadFailed] = useState(false);
   const [refreshedSegmentedImages, setRefreshedSegmentedImages] = useState<SegmentedImages | null>(null);
   const [refreshingOverlay, setRefreshingOverlay] = useState(false);
   const [mediaLoading, setMediaLoading] = useState(true);
+  const [refreshedTrellisMP4Url, setRefreshedTrellisMP4Url] = useState<string | null>(item?.trellis_mp4_url ?? null);
+  const [resolvedVideoUri, setResolvedVideoUri] = useState<string | undefined>(item?.videoUri);
+  const [resolvingVideoUri, setResolvingVideoUri] = useState<boolean>(!!item?.job_id && !!item?.videoUri);
 
   const effectiveSegmentedImages = refreshedSegmentedImages ?? item?.segmented_images;
 
@@ -116,31 +144,52 @@ export default function FeedbackScreen() {
     setOverlayLoadFailed(false);
     setRefreshedSegmentedImages(null);
     setMediaLoading(true);
+    setRefreshedTrellisMP4Url(item?.trellis_mp4_url ?? null);
+    setResolvedVideoUri(item?.videoUri);
   }, [item?.id]);
+
+  // Resolve video URI via presigned S3 URL (same as MealDetailScreen)
+  useEffect(() => {
+    if (!item?.job_id) { setResolvingVideoUri(false); return; }
+    setResolvingVideoUri(true);
+    getImagePresignedUrl(item.job_id)
+      .then(url => { setResolvedVideoUri(url || item?.videoUri); })
+      .catch(() => { setResolvedVideoUri(item?.videoUri); })
+      .finally(() => setResolvingVideoUri(false));
+  }, [item?.id, item?.job_id]);
 
   useEffect(() => {
     setMediaLoading(true);
   }, [effectiveSegmentedImages?.overlay_urls?.[0]?.url]);
 
-  // When we have job_id but no overlay URLs, fetch once so segmented images load
+  // Always re-fetch on open to get fresh presigned URLs (they expire in 1 hour)
   useEffect(() => {
-    if (!item?.job_id || !user?.email || effectiveSegmentedImages?.overlay_urls?.length || refreshingOverlay) return;
+    if (!item?.job_id || !user?.email || refreshingOverlay) return;
     let cancelled = false;
     (async () => {
       setRefreshingOverlay(true);
       try {
-        const fresh = await nutritionAnalysisAPI.getResults(item.job_id!, true, false);
+        const fresh = await nutritionAnalysisAPI.getResults(item.job_id!, true, true);
         if (cancelled) return;
-        if (fresh?.segmented_images?.overlay_urls?.length) {
+        if (fresh?.segmented_images?.overlay_urls?.length || fresh?.segmented_images?.video_overlay_url) {
           setRefreshedSegmentedImages(fresh.segmented_images);
+          setOverlayLoadFailed(false);
+        }
+        if (fresh?.trellis_mp4_url) {
+          setRefreshedTrellisMP4Url(fresh.trellis_mp4_url);
+        }
+        const updates: Record<string, any> = {};
+        if (fresh?.segmented_images) updates.segmented_images = fresh.segmented_images;
+        if (fresh?.trellis_mp4_url) updates.trellis_mp4_url = fresh.trellis_mp4_url;
+        if (Object.keys(updates).length) {
           await dispatch(updateAnalysis({
             userEmail: user.email,
             analysisId: item.id,
-            updates: { segmented_images: fresh.segmented_images },
+            updates,
           })).unwrap();
         }
       } catch {
-        if (!cancelled) setOverlayLoadFailed(true);
+        if (!cancelled && !effectiveSegmentedImages?.overlay_urls?.length) setOverlayLoadFailed(true);
       } finally {
         if (!cancelled) setRefreshingOverlay(false);
       }
@@ -152,13 +201,17 @@ export default function FeedbackScreen() {
     if (item?.job_id && user?.email) {
       setRefreshingOverlay(true);
       try {
-        const fresh = await nutritionAnalysisAPI.getResults(item.job_id, true, false);
+        const fresh = await nutritionAnalysisAPI.getResults(item.job_id, true, true);
         if (fresh?.segmented_images?.overlay_urls?.length) {
           setRefreshedSegmentedImages(fresh.segmented_images);
+          if (fresh?.trellis_mp4_url) setRefreshedTrellisMP4Url(fresh.trellis_mp4_url);
           await dispatch(updateAnalysis({
             userEmail: user.email,
             analysisId: item.id,
-            updates: { segmented_images: fresh.segmented_images },
+            updates: {
+              segmented_images: fresh.segmented_images,
+              ...(fresh.trellis_mp4_url ? { trellis_mp4_url: fresh.trellis_mp4_url } : {}),
+            },
           })).unwrap();
         } else {
           setOverlayLoadFailed(true);
@@ -172,6 +225,13 @@ export default function FeedbackScreen() {
       setOverlayLoadFailed(true);
     }
   }, [item?.id, item?.job_id, user?.email, dispatch]);
+
+  const openFullScreenMedia = useCallback((uri: string | null | undefined, type: 'image' | 'video') => {
+    if (!uri) return;
+    setFullMediaUri(uri);
+    setFullMediaType(type);
+    setShowFullMediaModal(true);
+  }, []);
 
   if (!item) {
     return (
@@ -197,11 +257,6 @@ export default function FeedbackScreen() {
     month: 'long',
     day: 'numeric',
     year: 'numeric',
-  });
-  const lastLoginTime = new Date().toLocaleTimeString('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
   });
 
   // Format capture date and time from item.timestamp
@@ -310,41 +365,61 @@ export default function FeedbackScreen() {
     <SafeAreaView style={styles.container} edges={['top']}>
       <StatusBar barStyle="dark-content" />
 
-      {/* Full-screen image modal */}
+      {/* Full-screen media modal */}
       <Modal
-        visible={showFullImageModal}
+        visible={showFullMediaModal}
         transparent
         animationType="fade"
-        onRequestClose={() => setShowFullImageModal(false)}
+        onRequestClose={() => setShowFullMediaModal(false)}
       >
-        <TouchableOpacity
+        <View
           style={styles.fullImageModalBackdrop}
-          activeOpacity={1}
-          onPress={() => setShowFullImageModal(false)}
         >
-          <View style={styles.fullImageModalContent} pointerEvents="box-none">
+          <View style={styles.fullImageModalContent}>
             <TouchableOpacity
               style={styles.fullImageCloseButton}
-              onPress={() => setShowFullImageModal(false)}
+              onPress={() => setShowFullMediaModal(false)}
               hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
             >
               <Ionicons name="close" size={28} color="#FFFFFF" />
             </TouchableOpacity>
-            {fullImageUri ? (
-              <TouchableOpacity
-                style={styles.fullImageWrapper}
-                activeOpacity={1}
-                onPress={() => {}}
-              >
-                <Image
-                  source={{ uri: fullImageUri }}
+            {fullMediaUri && fullMediaType === 'video' ? (
+              <>
+                <Video
+                  ref={fullScreenVideoRef}
+                  source={{ uri: fullMediaUri }}
                   style={styles.fullImage}
-                  resizeMode="contain"
+                  resizeMode={ResizeMode.CONTAIN}
+                  shouldPlay
+                  useNativeControls
+                  isLooping={false}
+                  onPlaybackStatusUpdate={(status) => {
+                    if (!status.isLoaded) return;
+                    if (status.positionMillis >= TRELLIS_PREVIEW_LOOP_MS - 350 && !fullScreenFadeStarted.current) {
+                      fullScreenFadeStarted.current = true;
+                      Animated.timing(fullScreenFadeAnim, { toValue: 1, duration: 350, useNativeDriver: true }).start();
+                    }
+                    if (status.positionMillis >= TRELLIS_PREVIEW_LOOP_MS) {
+                      fullScreenVideoRef.current?.setStatusAsync({ positionMillis: 0, shouldPlay: true });
+                      fullScreenFadeStarted.current = false;
+                      Animated.timing(fullScreenFadeAnim, { toValue: 0, duration: 350, useNativeDriver: true }).start();
+                    }
+                  }}
                 />
-              </TouchableOpacity>
+                <Animated.View
+                  style={[StyleSheet.absoluteFill, { backgroundColor: '#000000', opacity: fullScreenFadeAnim }]}
+                  pointerEvents="none"
+                />
+              </>
+            ) : fullMediaUri ? (
+              <Image
+                source={{ uri: fullMediaUri }}
+                style={styles.fullImage}
+                resizeMode="contain"
+              />
             ) : null}
           </View>
-        </TouchableOpacity>
+        </View>
       </Modal>
 
       {Platform.OS === 'ios' ? (
@@ -356,7 +431,7 @@ export default function FeedbackScreen() {
           <AppHeader
             displayName={displayName}
             lastLoginDate={lastLoginDate}
-            lastLoginTime={lastLoginTime}
+
             onProfilePress={() => navigation.navigate('Profile' as never)}
           />
           <ScrollView
@@ -374,12 +449,13 @@ export default function FeedbackScreen() {
           >
         {/* Media Preview */}
         <View style={styles.mediaContainer}>
-          {isVideo && item.videoUri ? (
+          <View style={styles.mediaBackdrop} pointerEvents="none" />
+          {isVideo && (resolvedVideoUri || resolvingVideoUri) ? (
             <>
               <Video
-                source={{ uri: item.videoUri }}
+                source={{ uri: resolvedVideoUri || item.videoUri || '' }}
                 style={styles.media}
-                resizeMode={ResizeMode.COVER}
+                resizeMode={ResizeMode.CONTAIN}
                 isLooping={false}
                 isMuted={false}
                 shouldPlay={isVideoPlaying}
@@ -388,7 +464,12 @@ export default function FeedbackScreen() {
                   if (status.isLoaded && status.didJustFinish) {
                     setIsVideoPlaying(false);
                   }
-                }}
+                  }}
+              />
+              <TouchableOpacity
+                style={styles.mediaTapTarget}
+                onPress={() => openFullScreenMedia(resolvedVideoUri ?? item.videoUri, 'video')}
+                activeOpacity={1}
               />
               {!isVideoPlaying && (
                 <TouchableOpacity
@@ -415,16 +496,76 @@ export default function FeedbackScreen() {
             </>
           ) : (
             (() => {
+              const trellisMP4Url = refreshedTrellisMP4Url;
+              const depthUri = !overlayLoadFailed ? selectedDepthUri : null;
               const overlayUri = effectiveSegmentedImages?.overlay_urls?.[0]?.url;
-              const displayUri = (!overlayLoadFailed && overlayUri) ? overlayUri : item.imageUri || null;
-              const showImageLoader = !isVideo && !!displayUri;
+              const displayUri = depthUri || ((!overlayLoadFailed && overlayUri) ? overlayUri : item.imageUri || null);
+              const videoThumbnailUri = item.imageUri || overlayUri || null;
+              const showImageLoader = !isVideo && (!!depthUri || !trellisMP4Url) && !!displayUri;
+              if (depthUri) {
+                return (
+                  <TouchableOpacity style={styles.mediaTouchable} activeOpacity={1} onPress={() => openFullScreenMedia(depthUri, 'image')}>
+                    <OptimizedImage
+                      source={{ uri: depthUri }}
+                      style={styles.media}
+                      resizeMode="contain"
+                      cachePolicy="memory-disk"
+                      priority="high"
+                      onImageLoad={() => setMediaLoading(false)}
+                    />
+                  </TouchableOpacity>
+                );
+              }
+              if (trellisMP4Url) {
+                return (
+                  <>
+                    <Video
+                      ref={trellisVideoRef}
+                      key={trellisMP4Url}
+                      source={{ uri: trellisMP4Url }}
+                      style={[styles.media, { position: 'absolute', top: 0, left: 0, opacity: isVideoPlaying ? 1 : 0 }]}
+                      resizeMode={ResizeMode.CONTAIN}
+                      isLooping
+                      isMuted
+                      shouldPlay={isVideoPlaying}
+                      useNativeControls={false}
+                      progressUpdateIntervalMillis={100}
+                      onPlaybackStatusUpdate={loopTrellisPreviewAtFourSeconds}
+                    />
+                    {videoThumbnailUri && (
+                      <OptimizedImage
+                        source={{ uri: videoThumbnailUri }}
+                        style={[styles.media, StyleSheet.absoluteFillObject, { opacity: isVideoPlaying ? 0 : 1 }]}
+                        resizeMode="contain"
+                        cachePolicy="memory-disk"
+                        priority="normal"
+                        onImageLoad={() => setMediaLoading(false)}
+                      />
+                    )}
+                    <TouchableOpacity
+                      style={styles.mediaTapTarget}
+                      onPress={() => openFullScreenMedia(isVideoPlaying ? trellisMP4Url : videoThumbnailUri, isVideoPlaying ? 'video' : 'image')}
+                      activeOpacity={1}
+                    />
+                    <Animated.View
+                      style={[StyleSheet.absoluteFill, { backgroundColor: '#000000', opacity: loopFadeAnim, zIndex: 6 }]}
+                      pointerEvents="none"
+                    />
+                    <TouchableOpacity style={styles.playButtonOverlay} onPress={handleVideoPlay} activeOpacity={0.7}>
+                      <View style={styles.playButton}>
+                        <Ionicons name={isVideoPlaying ? 'pause' : 'play'} size={28} color="#FFFFFF" />
+                      </View>
+                    </TouchableOpacity>
+                  </>
+                );
+              }
               if (displayUri) {
                 return (
-                  <TouchableOpacity activeOpacity={1} onPress={() => { setFullImageUri(displayUri); setShowFullImageModal(true); }} style={styles.mediaTouchable}>
+                  <TouchableOpacity activeOpacity={1} onPress={() => openFullScreenMedia(displayUri, 'image')} style={styles.mediaTouchable}>
                     <OptimizedImage
                       source={{ uri: displayUri }}
                       style={styles.media}
-                      resizeMode="cover"
+                      resizeMode="contain"
                       cachePolicy="memory-disk"
                       priority="normal"
                       onImageLoad={() => setMediaLoading(false)}
@@ -457,7 +598,7 @@ export default function FeedbackScreen() {
               <Text style={styles.mealName}>{toSentenceCase(item.mealName || 'Burger')}</Text>
             </View>
             <View style={styles.mealActions}>
-              <Text style={styles.mealCalories}>{item.nutritionalInfo.calories} Kcal</Text>
+              <Text style={styles.mealCalories}>{item.nutritionalInfo?.calories ?? 0} Kcal</Text>
               <TouchableOpacity
                 style={styles.writeCommentButton}
                 onPress={() => {
@@ -486,7 +627,7 @@ export default function FeedbackScreen() {
               onPress={() => { setSelectedDepthIngredient(null); handleVideoPlay(); }}
               activeOpacity={0.7}
             >
-              <Ionicons name="cube-outline" size={10} color={isVideoPlaying ? '#FFFFFF' : '#6B7280'} />
+              <CubeIcon size={18} color={isVideoPlaying ? '#FFFFFF' : '#7BA21B'} />
             </TouchableOpacity>
             <View style={styles.buttonSeparator} />
             <TouchableOpacity
@@ -494,7 +635,7 @@ export default function FeedbackScreen() {
               onPress={() => { setIsVideoPlaying(false); setSelectedDepthIngredient(selectedDepthIngredient === '__full__' ? null : '__full__'); }}
               activeOpacity={0.7}
             >
-              <Ionicons name="analytics-outline" size={10} color={selectedDepthIngredient === '__full__' ? '#FFFFFF' : '#6B7280'} />
+              <MaterialCommunityIcons name="image-filter-hdr" size={18} color={selectedDepthIngredient === '__full__' ? '#FFFFFF' : '#6B7280'} />
             </TouchableOpacity>
             <View style={styles.buttonSeparator} />
             <TouchableOpacity
@@ -502,7 +643,7 @@ export default function FeedbackScreen() {
               onPress={() => { setIsVideoPlaying(false); setSelectedDepthIngredient(selectedDepthIngredient === '__tagged__' ? null : '__tagged__'); }}
               activeOpacity={0.7}
             >
-              <Ionicons name="scan-outline" size={10} color={selectedDepthIngredient === '__tagged__' ? '#FFFFFF' : '#6B7280'} />
+              <MaterialCommunityIcons name="selection-ellipse" size={18} color={selectedDepthIngredient === '__tagged__' ? '#FFFFFF' : '#6B7280'} />
             </TouchableOpacity>
           </View>
         </View>
@@ -596,7 +737,7 @@ export default function FeedbackScreen() {
           <AppHeader
             displayName={displayName}
             lastLoginDate={lastLoginDate}
-            lastLoginTime={lastLoginTime}
+
             onProfilePress={() => navigation.navigate('Profile' as never)}
           />
           <ScrollView
@@ -614,12 +755,13 @@ export default function FeedbackScreen() {
           >
             {/* Media Preview */}
             <View style={styles.mediaContainer}>
-              {isVideo && item.videoUri ? (
+              <View style={styles.mediaBackdrop} pointerEvents="none" />
+              {isVideo && (resolvedVideoUri || resolvingVideoUri) ? (
                 <>
                   <Video
-                    source={{ uri: item.videoUri }}
+                    source={{ uri: resolvedVideoUri || item.videoUri || '' }}
                     style={styles.media}
-                    resizeMode={ResizeMode.COVER}
+                    resizeMode={ResizeMode.CONTAIN}
                     isLooping={false}
                     isMuted={false}
                     shouldPlay={isVideoPlaying}
@@ -628,7 +770,12 @@ export default function FeedbackScreen() {
                       if (status.isLoaded && status.didJustFinish) {
                         setIsVideoPlaying(false);
                       }
-                    }}
+                      }}
+                  />
+                  <TouchableOpacity
+                    style={styles.mediaTapTarget}
+                    onPress={() => openFullScreenMedia(resolvedVideoUri ?? item.videoUri, 'video')}
+                    activeOpacity={1}
                   />
                   {!isVideoPlaying && (
                     <TouchableOpacity
@@ -655,24 +802,80 @@ export default function FeedbackScreen() {
                 </>
               ) : (
                 (() => {
+                  const trellisMP4Url = refreshedTrellisMP4Url;
                   const depthUri = !overlayLoadFailed ? selectedDepthUri : null;
                   const overlayUri = effectiveSegmentedImages?.overlay_urls?.[0]?.url;
                   const displayUri = depthUri || ((!overlayLoadFailed && overlayUri) ? overlayUri : item.imageUri || null);
-                  const showImageLoader = !isVideo && !!displayUri;
+                  const videoThumbnailUri = item.imageUri || overlayUri || null;
+                  const showImageLoader = !isVideo && (!!depthUri || !trellisMP4Url) && !!displayUri;
+                  if (depthUri) {
+                    return (
+                      <TouchableOpacity style={styles.mediaTouchable} activeOpacity={1} onPress={() => openFullScreenMedia(depthUri, 'image')}>
+                        <OptimizedImage
+                          source={{ uri: depthUri }}
+                          style={styles.media}
+                          resizeMode="contain"
+                          cachePolicy="memory-disk"
+                          priority="high"
+                          onImageLoad={() => setMediaLoading(false)}
+                        />
+                      </TouchableOpacity>
+                    );
+                  }
+                  if (trellisMP4Url) {
+                    return (
+                      <>
+                        <Video
+                          ref={trellisVideoRef}
+                          key={trellisMP4Url}
+                          source={{ uri: trellisMP4Url }}
+                          style={[styles.media, { position: 'absolute', top: 0, left: 0, opacity: isVideoPlaying ? 1 : 0 }]}
+                          resizeMode={ResizeMode.CONTAIN}
+                          isLooping
+                          isMuted
+                          shouldPlay={isVideoPlaying}
+                          useNativeControls={false}
+                          progressUpdateIntervalMillis={100}
+                          onPlaybackStatusUpdate={loopTrellisPreviewAtFourSeconds}
+                        />
+                        {videoThumbnailUri && (
+                          <OptimizedImage
+                            source={{ uri: videoThumbnailUri }}
+                            style={[styles.media, StyleSheet.absoluteFillObject, { opacity: isVideoPlaying ? 0 : 1 }]}
+                            resizeMode="contain"
+                            cachePolicy="memory-disk"
+                            priority="normal"
+                            onImageLoad={() => setMediaLoading(false)}
+                          />
+                        )}
+                        <TouchableOpacity
+                          style={styles.mediaTapTarget}
+                          onPress={() => openFullScreenMedia(isVideoPlaying ? trellisMP4Url : videoThumbnailUri, isVideoPlaying ? 'video' : 'image')}
+                          activeOpacity={1}
+                        />
+                        <Animated.View
+                          style={[StyleSheet.absoluteFill, { backgroundColor: '#000000', opacity: loopFadeAnim, zIndex: 6 }]}
+                          pointerEvents="none"
+                        />
+                        <TouchableOpacity style={styles.playButtonOverlay} onPress={handleVideoPlay} activeOpacity={0.7}>
+                          <View style={styles.playButton}>
+                            <Ionicons name={isVideoPlaying ? 'pause' : 'play'} size={28} color="#FFFFFF" />
+                          </View>
+                        </TouchableOpacity>
+                      </>
+                    );
+                  }
                   if (displayUri) {
                     return (
                       <TouchableOpacity
                         activeOpacity={1}
-                        onPress={() => {
-                          if (depthUri) { setSelectedDepthIngredient(null); }
-                          else { setFullImageUri(displayUri); setShowFullImageModal(true); }
-                        }}
+                        onPress={() => openFullScreenMedia(displayUri, 'image')}
                         style={styles.mediaTouchable}
                       >
                         <OptimizedImage
                           source={{ uri: displayUri }}
                           style={styles.media}
-                          resizeMode="cover"
+                          resizeMode="contain"
                           cachePolicy="memory-disk"
                           priority="normal"
                           onImageLoad={() => setMediaLoading(false)}
@@ -696,12 +899,13 @@ export default function FeedbackScreen() {
               </View>
             </View>
             <View style={styles.mealInfo}>
+              {/* Row 1: meal name (wraps) | right: kcal + Write Comments */}
               <View style={styles.mealHeader}>
-                <View style={{ flex: 1 }}>
+                <View style={{ flex: 1, marginRight: 12 }}>
                   <Text style={styles.mealName}>{toSentenceCase(item.mealName || 'Burger')}</Text>
-                  <Text style={styles.mealCalories}>{item.nutritionalInfo.calories} Kcal</Text>
                 </View>
                 <View style={styles.mealActions}>
+                  <Text style={styles.mealCalories}>{item.nutritionalInfo?.calories ?? 0} Kcal</Text>
                   <TouchableOpacity
                     style={styles.writeCommentButton}
                     onPress={() => {
@@ -722,6 +926,32 @@ export default function FeedbackScreen() {
                     </Text>
                   </View>
                 </View>
+              </View>
+              {/* Row 2: 3 view buttons with separators */}
+              <View style={styles.mediaActionButtons}>
+                <TouchableOpacity
+                  style={[styles.mediaActionButton, isVideoPlaying && styles.mediaActionButtonActive]}
+                  onPress={() => { setSelectedDepthIngredient(null); handleVideoPlay(); }}
+                  activeOpacity={0.7}
+                >
+                  <CubeIcon size={18} color={isVideoPlaying ? '#FFFFFF' : '#7BA21B'} />
+                </TouchableOpacity>
+                <View style={styles.buttonSeparator} />
+                <TouchableOpacity
+                  style={[styles.mediaActionButton, selectedDepthIngredient === '__full__' && styles.mediaActionButtonActive]}
+                  onPress={() => { setIsVideoPlaying(false); setSelectedDepthIngredient(selectedDepthIngredient === '__full__' ? null : '__full__'); }}
+                  activeOpacity={0.7}
+                >
+                  <MaterialCommunityIcons name="image-filter-hdr" size={18} color={selectedDepthIngredient === '__full__' ? '#FFFFFF' : '#6B7280'} />
+                </TouchableOpacity>
+                <View style={styles.buttonSeparator} />
+                <TouchableOpacity
+                  style={[styles.mediaActionButton, selectedDepthIngredient === '__tagged__' && styles.mediaActionButtonActive]}
+                  onPress={() => { setIsVideoPlaying(false); setSelectedDepthIngredient(selectedDepthIngredient === '__tagged__' ? null : '__tagged__'); }}
+                  activeOpacity={0.7}
+                >
+                  <MaterialCommunityIcons name="selection-ellipse" size={18} color={selectedDepthIngredient === '__tagged__' ? '#FFFFFF' : '#6B7280'} />
+                </TouchableOpacity>
               </View>
             </View>
             <View style={styles.feedbackSection}>
@@ -826,23 +1056,32 @@ const styles = StyleSheet.create({
   mediaContainer: {
     width: '100%',
     height: 250,
-    backgroundColor: '#F3F4F6',
+    backgroundColor: '#111827',
     justifyContent: 'center',
     alignItems: 'center',
     overflow: 'hidden',
     position: 'relative',
   },
   mediaLoader: {
-    backgroundColor: '#F3F4F6',
+    backgroundColor: 'rgba(17, 24, 39, 0.36)',
     justifyContent: 'center',
     alignItems: 'center',
   },
   media: {
     width: '100%',
     height: '100%',
+    backgroundColor: '#111827',
   },
   placeholder: {
-    backgroundColor: '#D1D5DB',
+    backgroundColor: '#111827',
+  },
+  mediaBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#111827',
+  },
+  mediaTapTarget: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 4,
   },
   emptyState: {
     flex: 1,
@@ -871,13 +1110,14 @@ const styles = StyleSheet.create({
   },
   playButtonOverlay: {
     position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
+    top: '50%',
+    left: '50%',
+    width: 64,
+    height: 64,
+    marginTop: -32,
+    marginLeft: -32,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.3)',
     zIndex: 5,
   },
   playButton: {
@@ -931,8 +1171,8 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   mediaActionButton: {
-    width: 22,
-    height: 22,
+    width: 28,
+    height: 28,
     borderRadius: 6,
     alignItems: 'center',
     justifyContent: 'center',
@@ -951,9 +1191,9 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   captureValue: {
-    fontSize: 11,
+    fontSize: 16,
     color: '#6B7280',
-    fontWeight: '400',
+    fontWeight: '600',
   },
   feedbackSection: {
     padding: 16,

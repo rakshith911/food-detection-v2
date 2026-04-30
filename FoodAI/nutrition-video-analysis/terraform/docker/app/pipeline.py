@@ -174,12 +174,12 @@ class NutritionVideoPipeline:
             return image_pil
 
     def _gemini_clean_image(self, image_pil: Image.Image, job_id: str) -> Image.Image:
-        """Remove background (replace with black), keep only plate+food, remove plate reflections."""
+        """Extract food only on pure black background — no plate, no background, no props."""
         prompt = (
             "Edit this food image precisely:\n"
-            "1. Replace the entire background with pure black (#000000). Remove everything that is not the plate and the food on it.\n"
-            "2. Keep the plate and all food on the plate exactly as-is — do not alter shape, colour, or texture of food.\n"
-            "3. Remove any specular reflections or highlights on the plate surface, but keep the plate's natural colour and form.\n"
+            "1. Replace everything that is not food with pure black (#000000). This includes the plate, bowl, tray, table, background, cutlery, napkins, and any other non-food objects.\n"
+            "2. Keep only the actual food items exactly as-is — do not alter the shape, colour, texture, or position of any food.\n"
+            "3. The result must show the food items floating on a pure black background with clean, sharp edges where food meets background.\n"
             "4. Output only the edited image with no text, borders, or watermarks."
         )
         try:

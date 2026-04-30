@@ -34,7 +34,7 @@ function VideoThumbnail({ videoUri, style }: { videoUri: string; style: any }) {
   );
 }
 
-function formatMealTime(timestamp?: string | number | null): string {
+function formatUploadDate(timestamp?: string | number | null): string {
   if (!timestamp) return '';
   let date = new Date(timestamp);
   if (typeof timestamp === 'string' && isNaN(date.getTime())) {
@@ -44,10 +44,10 @@ function formatMealTime(timestamp?: string | number | null): string {
     }
   }
   if (isNaN(date.getTime())) return '';
-  return date.toLocaleTimeString('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
+  return date.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
   });
 }
 
@@ -385,7 +385,7 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
       : totalCalories === 0
       ? '-'
       : `${totalCalories} Kcal`;
-    const mealTime = formatMealTime(item.timestamp);
+    const uploadDate = formatUploadDate(item.timestamp);
     const translateX = getSwipePosition(item.id);
 
     return (
@@ -453,7 +453,7 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
             {isPendingOrAnalyzing ? (
               <ActivityIndicator size="small" color="#7BA21B" />
             ) : (
-              <Text style={styles.cardTime}>{mealTime}</Text>
+              <Text style={styles.cardTime}>{uploadDate}</Text>
             )}
           </View>
         </TouchableOpacity>
@@ -761,7 +761,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 12,
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-end',
   },
   cardTitle: {
     fontSize: 14,
@@ -774,11 +774,11 @@ const styles = StyleSheet.create({
     color: '#6B7280',
   },
   cardTime: {
-    minWidth: 58,
+    minWidth: 92,
     marginLeft: 10,
     textAlign: 'right',
     fontSize: 12,
-    fontWeight: '700',
+    fontWeight: '400',
     color: '#6B7280',
   },
   captureButton: {

@@ -51,11 +51,6 @@ export default function TutorialScreen({ onBack }: TutorialScreenProps = {}) {
     day: 'numeric',
     year: 'numeric',
   });
-  const lastLoginTime = new Date().toLocaleTimeString('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
-  });
 
   const handleSnapDish = async () => {
     const status = Camera.getCameraPermissionStatus();
@@ -151,7 +146,7 @@ export default function TutorialScreen({ onBack }: TutorialScreenProps = {}) {
           <AppHeader
             displayName={displayName}
             lastLoginDate={lastLoginDate}
-            lastLoginTime={lastLoginTime}
+
             onProfilePress={() => {
               try {
                 navigation.navigate('Profile');
