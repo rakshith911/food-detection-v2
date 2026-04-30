@@ -85,3 +85,6 @@ RAG/
 
 # python cache
 /scripts/__pycache__/
+
+# local experiments (never commit)
+/experiments/

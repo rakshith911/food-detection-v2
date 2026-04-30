@@ -41,10 +41,10 @@ export interface FeedbackData {
 }
 
 export interface SegmentedImage {
-  frame: string;
-  url: string;
-  key: string;
   name?: string;
+  frame?: string;
+  url: string;
+  key?: string;
   type?: 'overlay' | 'mask';
   object_id?: string;
 }

@@ -46,7 +46,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create app directory
 WORKDIR /app
 
-RUN mkdir -p /app/hf_cache /app/vendor /app/PRODUCTION/model_assets /tmp/torchinductor_app
+RUN mkdir -p /app/hf_cache /app/PRODUCTION/model_assets /tmp/torchinductor_app
 
 # CRITICAL: Install NumPy 1.24.3 FIRST before PyTorch
 RUN pip install --no-cache-dir "numpy==1.24.3"

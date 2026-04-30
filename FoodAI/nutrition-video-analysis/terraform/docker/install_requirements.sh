@@ -48,13 +48,6 @@ echo "📦 Step 5/5: Installing sentence-transformers separately for transformer
 pip install "sentence-transformers==3.3.1" --no-deps
 pip install "scikit-learn==1.5.2"
 
-echo "📦 Step 6/6: Installing ZoeDepth source package..."
-if [ ! -d "vendor/ZoeDepth" ]; then
-    mkdir -p vendor
-    git clone --depth 1 https://github.com/isl-org/ZoeDepth.git vendor/ZoeDepth
-fi
-echo "✅ ZoeDepth source cloned to vendor/ZoeDepth (loaded via PYTHONPATH/runtime path injection)"
-
 echo ""
 echo "=========================================="
 echo "✅ Installation Complete!"

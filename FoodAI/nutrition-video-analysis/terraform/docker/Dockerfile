@@ -32,7 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create app directory
 WORKDIR /app
 
-RUN mkdir -p /app/hf_cache /app/vendor /app/PRODUCTION/model_assets /tmp/torchinductor_app
+RUN mkdir -p /app/hf_cache /app/PRODUCTION/model_assets /tmp/torchinductor_app
 
 # CRITICAL: Install NumPy 1.24.3 FIRST before PyTorch
 RUN pip install --no-cache-dir "numpy==1.24.3"
@@ -82,7 +82,7 @@ RUN find /app -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true &&
     python3 -Bc "import compileall; compileall.compile_dir('/app', force=True)" 2>/dev/null || true && \
     echo "Python cache cleared"
 
-# Copy SAM2 package to root so it's importable as 'sam2'
+# Copy SAM2 package to root so legacy video tracking remains importable.
 COPY sam2_package/sam2 ./sam2/
 COPY sam2_package/checkpoints ./checkpoints/
 

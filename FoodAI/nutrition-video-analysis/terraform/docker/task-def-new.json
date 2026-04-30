@@ -41,7 +41,7 @@
                 },
                 {
                     "name": "PRODUCTION_ASSETS_PREFIX",
-                    "value": "production_assets/model_assets"
+                    "value": ""
                 }
             ],
             "mountPoints": [],
