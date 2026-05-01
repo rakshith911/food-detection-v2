@@ -2892,37 +2892,96 @@ class NutritionVideoPipeline:
                 _glb_b_local = None
 
         # ── Volume estimation ──
-        # Primary: raw trimesh unit volume from GLB_B (food only).
-        # When plate detected and GLB_A available, log plate-subtraction intermediate.
-        # No scale factor — raw trimesh units are the output for this experiment phase.
-        # Falls back to Gemini metric-depth volume if trimesh returned nothing.
+        # Ground truth plate dimensions (hardcoded for experiment).
+        # plate_volume_ml: TODO — fill in once measured via Gemini from physical dimensions.
+        _PLATE_DIAMETER_CM = 27.0
+        _PLATE_DIAMETER_M = _PLATE_DIAMETER_CM / 100.0
+        _PLATE_VOLUME_ML: Optional[float] = None  # ← set this once Gemini gives the plate volume
+
         trellis_total_food_volume_ml: Optional[float] = None
         volume_method = "gemini_metric_depth"
 
         glb_b_raw = trellis_volume_debug.get("glb_b_raw_units3")
         glb_a_raw = trellis_volume_debug.get("glb_a_raw_units3")
+        glb_a_metrics = trellis_volume_debug.get("glb_a_metrics") or {}
 
-        if glb_b_raw is not None:
-            logger.info("[%s] GLB_B raw trimesh unit volume = %.6f", job_id, glb_b_raw)
-            trellis_volume_debug["glb_b_raw_vol_units3"] = glb_b_raw
+        logger.info(
+            "[%s] GLB raw unit volumes: GLB_A=%s GLB_B=%s",
+            job_id,
+            f"{glb_a_raw:.6f}" if glb_a_raw is not None else "None",
+            f"{glb_b_raw:.6f}" if glb_b_raw is not None else "None",
+        )
 
-            if plate_detected and glb_a_raw is not None:
-                plate_portion_raw = glb_a_raw - glb_b_raw
+        if plate_detected and glb_a_raw is not None and glb_a_metrics:
+            # Derive scale factor from GLB_A: known plate diameter vs trimesh XY extent
+            extents = glb_a_metrics.get("extents") or []
+            if len(extents) >= 2:
+                plate_units = max(extents[0], extents[1])
+                linear_scale = _PLATE_DIAMETER_M / plate_units        # m per trimesh unit
+                volume_scale_ml = (linear_scale ** 3) * 1_000_000     # ml per unit³
+
+                glb_a_scaled_ml = glb_a_raw * volume_scale_ml
                 logger.info(
-                    "[%s] Plate subtraction: GLB_A=%.6f  GLB_B=%.6f  plate_portion=%.6f (raw units)",
-                    job_id, glb_a_raw, glb_b_raw, plate_portion_raw,
+                    "[%s] Scale calibration: plate_units=%.6f  plate_m=%.3f  "
+                    "linear_scale=%.6f  volume_scale_ml=%.4f  GLB_A_scaled=%.2f ml",
+                    job_id, plate_units, _PLATE_DIAMETER_M,
+                    linear_scale, volume_scale_ml, glb_a_scaled_ml,
                 )
                 trellis_volume_debug.update({
-                    "glb_a_raw_vol_units3": glb_a_raw,
-                    "plate_portion_raw_units3": plate_portion_raw,
+                    "plate_diameter_m_ground_truth": _PLATE_DIAMETER_M,
+                    "plate_units_from_glb_a_extents": plate_units,
+                    "linear_scale_m_per_unit": linear_scale,
+                    "volume_scale_ml_per_unit3": volume_scale_ml,
+                    "glb_a_raw_units3": glb_a_raw,
+                    "glb_a_scaled_ml": glb_a_scaled_ml,
                 })
 
-            trellis_total_food_volume_ml = glb_b_raw
-            volume_method = "trellis_glb_trimesh"
-            logger.info(
-                "[%s] Volume method=trellis_glb_trimesh  food_unit_volume=%.6f",
-                job_id, trellis_total_food_volume_ml,
+                if _PLATE_VOLUME_ML is not None:
+                    food_volume_ml = glb_a_scaled_ml - _PLATE_VOLUME_ML
+                    logger.info(
+                        "[%s] GLB_A path: GLB_A_scaled=%.2f ml  plate_vol=%.2f ml  food_vol=%.2f ml",
+                        job_id, glb_a_scaled_ml, _PLATE_VOLUME_ML, food_volume_ml,
+                    )
+                    trellis_volume_debug.update({
+                        "plate_volume_ml_ground_truth": _PLATE_VOLUME_ML,
+                        "food_volume_ml_from_glb_a": food_volume_ml,
+                    })
+
+                    # Also scale GLB_B for cross-check
+                    if glb_b_raw is not None:
+                        glb_b_scaled_ml = glb_b_raw * volume_scale_ml
+                        logger.info(
+                            "[%s] GLB_B cross-check: raw=%.6f  scaled=%.2f ml  "
+                            "GLB_A_path=%.2f ml  delta=%.2f ml",
+                            job_id, glb_b_raw, glb_b_scaled_ml,
+                            food_volume_ml, food_volume_ml - glb_b_scaled_ml,
+                        )
+                        trellis_volume_debug.update({
+                            "glb_b_raw_units3": glb_b_raw,
+                            "glb_b_scaled_ml": glb_b_scaled_ml,
+                            "glb_a_vs_glb_b_delta_ml": food_volume_ml - glb_b_scaled_ml,
+                        })
+
+                    if food_volume_ml > 0:
+                        trellis_total_food_volume_ml = food_volume_ml
+                        volume_method = "trellis_glb_trimesh"
+                else:
+                    logger.warning(
+                        "[%s] _PLATE_VOLUME_ML not set yet — scale derived (%.4f ml/unit³) "
+                        "but cannot subtract plate; falling back to Gemini depth",
+                        job_id, volume_scale_ml,
+                    )
+            else:
+                logger.warning("[%s] GLB_A extents missing, cannot derive scale factor", job_id)
+
+        elif glb_b_raw is not None and not plate_detected:
+            # No plate in image — GLB_B is food only, but we have no scale reference yet
+            logger.warning(
+                "[%s] No plate detected; GLB_B raw=%.6f units but no scale reference — "
+                "falling back to Gemini depth",
+                job_id, glb_b_raw,
             )
+            trellis_volume_debug["glb_b_raw_units3"] = glb_b_raw
 
         # Determine final volume map ──
         if trellis_total_food_volume_ml is not None and trellis_total_food_volume_ml > 0:
