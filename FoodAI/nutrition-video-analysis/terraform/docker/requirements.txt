@@ -27,6 +27,7 @@ tqdm==4.66.1
 # Depth / Visualization Requirements
 matplotlib==3.7.5
 h5py==3.10.0
+trimesh>=4.4.0
 
 # RAG & NLP
 sentence-transformers>=5.3.0,<6.0.0
