@@ -218,17 +218,48 @@ class NutritionVideoPipeline:
         glb_path: Path,
         job_id: str,
         label: str = "mesh",
-        scale_factor: float = 1.0,
-    ) -> float:
-        """Compute volume (ml) from a GLB file using trimesh.
+    ) -> dict:
+        """Load a GLB with trimesh and return raw unit volume metrics (EXP01 pattern).
 
-        Raises NotImplementedError — waiting for the trimesh script + ground truth calibration values.
-        scale_factor converts raw trimesh units³ → ml.
+        Returns a dict with volume (if watertight) and convex_hull volume in raw trimesh units.
+        No scale factor or unit conversion applied — caller decides how to interpret units.
         """
-        raise NotImplementedError(
-            f"[{job_id}] _estimate_volume_from_glb is a stub awaiting the trimesh script "
-            f"and ground truth calibration values (glb={glb_path}, label={label})"
+        import trimesh as _trimesh
+
+        logger.info("[%s] trimesh load start label=%s path=%s", job_id, label, glb_path)
+        mesh = _trimesh.load(str(glb_path))
+        if isinstance(mesh, _trimesh.Scene):
+            geometries = list(mesh.geometry.values())
+            mesh = _trimesh.util.concatenate(geometries)
+            logger.info("[%s] trimesh Scene concatenated %d geometries label=%s", job_id, len(geometries), label)
+
+        is_watertight = bool(mesh.is_watertight)
+        raw_volume = float(mesh.volume) if is_watertight else None
+        convex_hull_volume = float(mesh.convex_hull.volume)
+
+        logger.info(
+            "[%s] trimesh label=%s is_watertight=%s volume=%s convex_hull_volume=%.6f "
+            "vertices=%d faces=%d extents=%s",
+            job_id, label, is_watertight,
+            f"{raw_volume:.6f}" if raw_volume is not None else "None",
+            convex_hull_volume,
+            len(mesh.vertices), len(mesh.faces),
+            [round(x, 6) for x in mesh.extents.tolist()],
         )
+
+        return {
+            "label": label,
+            "is_watertight": is_watertight,
+            "volume": raw_volume,
+            "volume_convex_hull": convex_hull_volume,
+            "n_vertices": int(len(mesh.vertices)),
+            "n_faces": int(len(mesh.faces)),
+            "extents": mesh.extents.tolist(),
+            "bounds_min": mesh.bounds[0].tolist(),
+            "bounds_max": mesh.bounds[1].tolist(),
+            "centroid": mesh.centroid.tolist(),
+            "euler_number": int(mesh.euler_number),
+        }
 
     def _gemini_distribute_volumes_constrained(
         self,
@@ -2794,13 +2825,18 @@ class NutritionVideoPipeline:
                     # Attempt trimesh volume on GLB_A (with plate)
                     if _glb_a_local and _glb_a_local.exists():
                         try:
-                            raw_vol_a = self._estimate_volume_from_glb(_glb_a_local, job_id, label="glb_a_with_plate")
-                            logger.info("[%s] GLB_A raw trimesh volume = %.4f (raw units³)", job_id, raw_vol_a)
-                            trellis_volume_debug["glb_a_raw_units3"] = raw_vol_a
-                        except NotImplementedError as _stub_err:
-                            logger.warning("[%s] %s", job_id, _stub_err)
+                            _glb_a_metrics = self._estimate_volume_from_glb(_glb_a_local, job_id, label="glb_a_with_plate")
+                            trellis_volume_debug["glb_a_metrics"] = _glb_a_metrics
+                            # prefer watertight volume, fall back to convex hull
+                            trellis_volume_debug["glb_a_raw_units3"] = (
+                                _glb_a_metrics["volume"]
+                                if _glb_a_metrics["volume"] is not None
+                                else _glb_a_metrics["volume_convex_hull"]
+                            )
+                        except Exception as _trimesh_a_err:
+                            logger.warning("[%s] trimesh GLB_A failed: %s", job_id, _trimesh_a_err)
                             trellis_volume_debug["glb_a_raw_units3"] = None
-                            trellis_volume_debug["glb_a_stub"] = True
+                            trellis_volume_debug["glb_a_error"] = str(_trimesh_a_err)
                 except Exception as _glb_a_err:
                     logger.error("[%s] TRELLIS GLB_A failed: %s", job_id, _glb_a_err)
                     trellis_volume_debug["glb_a_error"] = str(_glb_a_err)
@@ -2838,22 +2874,28 @@ class NutritionVideoPipeline:
                 # Attempt trimesh volume on GLB_B (food only)
                 if _glb_b_local and _glb_b_local.exists():
                     try:
-                        raw_vol_b = self._estimate_volume_from_glb(_glb_b_local, job_id, label="glb_b_food_only")
-                        logger.info("[%s] GLB_B raw trimesh volume = %.4f (raw units³)", job_id, raw_vol_b)
-                        trellis_volume_debug["glb_b_raw_units3"] = raw_vol_b
-                    except NotImplementedError as _stub_err:
-                        logger.warning("[%s] %s", job_id, _stub_err)
+                        _glb_b_metrics = self._estimate_volume_from_glb(_glb_b_local, job_id, label="glb_b_food_only")
+                        trellis_volume_debug["glb_b_metrics"] = _glb_b_metrics
+                        # prefer watertight volume, fall back to convex hull
+                        trellis_volume_debug["glb_b_raw_units3"] = (
+                            _glb_b_metrics["volume"]
+                            if _glb_b_metrics["volume"] is not None
+                            else _glb_b_metrics["volume_convex_hull"]
+                        )
+                    except Exception as _trimesh_b_err:
+                        logger.warning("[%s] trimesh GLB_B failed: %s", job_id, _trimesh_b_err)
                         trellis_volume_debug["glb_b_raw_units3"] = None
-                        trellis_volume_debug["glb_b_stub"] = True
+                        trellis_volume_debug["glb_b_error"] = str(_trimesh_b_err)
             except Exception as _glb_b_err:
                 logger.error("[%s] TRELLIS GLB_B failed: %s", job_id, _glb_b_err)
                 trellis_volume_debug["glb_b_error"] = str(_glb_b_err)
                 _glb_b_local = None
 
         # ── Volume estimation ──
-        # Primary path: trimesh from GLB_B (food only).
-        # When plate_detected and GLB_A available, log plate-subtraction intermediate.
-        # Stub raises NotImplementedError → fall through to Gemini metric-depth volume.
+        # Primary: raw trimesh unit volume from GLB_B (food only).
+        # When plate detected and GLB_A available, log plate-subtraction intermediate.
+        # No scale factor — raw trimesh units are the output for this experiment phase.
+        # Falls back to Gemini metric-depth volume if trimesh returned nothing.
         trellis_total_food_volume_ml: Optional[float] = None
         volume_method = "gemini_metric_depth"
 
@@ -2861,46 +2903,24 @@ class NutritionVideoPipeline:
         glb_a_raw = trellis_volume_debug.get("glb_a_raw_units3")
 
         if glb_b_raw is not None:
-            # Scale factor: TBD — will be derived from UKCal card pixel size vs physical size.
-            # Hardcoded to 1.0 until ground truth calibration script is provided.
-            scale_factor_ml_per_unit3 = 1.0
-            trellis_food_vol_raw = glb_b_raw
-            trellis_food_vol_scaled = trellis_food_vol_raw * scale_factor_ml_per_unit3
-            logger.info(
-                "[%s] GLB_B volume: raw=%.4f units³  scale=%.6f  scaled=%.2f ml",
-                job_id, trellis_food_vol_raw, scale_factor_ml_per_unit3, trellis_food_vol_scaled,
-            )
-            trellis_volume_debug.update({
-                "glb_b_scale_factor_ml_per_unit3": scale_factor_ml_per_unit3,
-                "glb_b_raw_vol_units3": trellis_food_vol_raw,
-                "glb_b_scaled_vol_ml": trellis_food_vol_scaled,
-            })
+            logger.info("[%s] GLB_B raw trimesh unit volume = %.6f", job_id, glb_b_raw)
+            trellis_volume_debug["glb_b_raw_vol_units3"] = glb_b_raw
 
             if plate_detected and glb_a_raw is not None:
                 plate_portion_raw = glb_a_raw - glb_b_raw
-                plate_portion_scaled = plate_portion_raw * scale_factor_ml_per_unit3
                 logger.info(
-                    "[%s] Plate subtraction: GLB_A=%.4f  GLB_B=%.4f  plate_portion=%.4f (%.2f ml)",
-                    job_id, glb_a_raw, glb_b_raw, plate_portion_raw, plate_portion_scaled,
+                    "[%s] Plate subtraction: GLB_A=%.6f  GLB_B=%.6f  plate_portion=%.6f (raw units)",
+                    job_id, glb_a_raw, glb_b_raw, plate_portion_raw,
                 )
                 trellis_volume_debug.update({
                     "glb_a_raw_vol_units3": glb_a_raw,
-                    "glb_a_scaled_vol_ml": glb_a_raw * scale_factor_ml_per_unit3,
                     "plate_portion_raw_units3": plate_portion_raw,
-                    "plate_portion_scaled_ml": plate_portion_scaled,
                 })
-                if plate_volume_ml > 0:
-                    logger.info(
-                        "[%s] User-supplied plate_volume_ml=%.1f used for cross-check "
-                        "(trimesh plate portion=%.2f ml)",
-                        job_id, plate_volume_ml, plate_portion_scaled,
-                    )
-                    trellis_volume_debug["plate_volume_ml_user_crosscheck"] = plate_volume_ml
 
-            trellis_total_food_volume_ml = trellis_food_vol_scaled
+            trellis_total_food_volume_ml = glb_b_raw
             volume_method = "trellis_glb_trimesh"
             logger.info(
-                "[%s] Volume method=trellis_glb_trimesh  final_food_volume=%.2f ml",
+                "[%s] Volume method=trellis_glb_trimesh  food_unit_volume=%.6f",
                 job_id, trellis_total_food_volume_ml,
             )
 
