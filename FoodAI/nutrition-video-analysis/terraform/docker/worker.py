@@ -38,10 +38,18 @@ import numpy as np
 print(f"✅ NumPy {np.__version__} imported before PyTorch")
 
 import json
+import logging
 import os
 import sys
 import time
 import tempfile
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(name)s %(levelname)s %(message)s',
+    stream=sys.stdout,
+    force=True,
+)
 import threading
 import traceback
 import urllib.request
