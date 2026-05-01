@@ -658,6 +658,17 @@ def process_message(message: dict, pipeline=None):
             print(f"Deleted SQS message for failed job {job_id}")
         except Exception as delete_error:
             print(f"WARNING: Failed to delete message for failed job {job_id}: {delete_error}")
+    finally:
+        # Safety net: if the job is still showing 'processing' after process_message exits,
+        # mark it failed so the app doesn't spin forever.
+        try:
+            table = dynamodb.Table(DYNAMODB_JOBS_TABLE)
+            item = table.get_item(Key={'job_id': job_id}).get('Item', {})
+            if item.get('status') == 'processing':
+                print(f"SAFETY NET: job {job_id} still processing after handler exited — marking failed")
+                update_job_status(job_id, 'failed', error='Job ended without a final status update')
+        except Exception as safety_err:
+            print(f"WARNING: Safety net check failed for {job_id}: {safety_err}")
 
 
 def poll_queue():
