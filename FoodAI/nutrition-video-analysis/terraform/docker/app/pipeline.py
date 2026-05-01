@@ -2892,11 +2892,12 @@ class NutritionVideoPipeline:
                 _glb_b_local = None
 
         # ── Volume estimation ──
-        # Ground truth plate dimensions (hardcoded for experiment).
-        # plate_volume_ml: TODO — fill in once measured via Gemini from physical dimensions.
+        # Ground truth plate dimensions (physically measured).
+        # Outer diameter: 27cm, rim height: 2.9cm, inner radius: 11.5cm, concavity depth: 2cm
+        # V_plate = π×13.5²×2.9 − π×11.5²×2 = 1662 − 831 ≈ 831 ml
         _PLATE_DIAMETER_CM = 27.0
         _PLATE_DIAMETER_M = _PLATE_DIAMETER_CM / 100.0
-        _PLATE_VOLUME_ML: Optional[float] = None  # ← set this once Gemini gives the plate volume
+        _PLATE_VOLUME_ML: float = 831.0
 
         trellis_total_food_volume_ml: Optional[float] = None
         volume_method = "gemini_metric_depth"
