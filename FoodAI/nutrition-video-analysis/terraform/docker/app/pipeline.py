@@ -190,6 +190,150 @@ class NutritionVideoPipeline:
             logger.warning("[%s] Gemini image cleaning failed, using original image: %s", job_id, exc)
             return image_pil
 
+    def _gemini_clean_image_keep_plate(self, image_pil: Image.Image, job_id: str) -> Image.Image:
+        """Extract food + plate/bowl on pure black background — removes background/props but keeps the vessel."""
+        prompt = (
+            "Edit this food image precisely:\n"
+            "1. Replace everything that is not food or the plate/bowl/vessel with pure black (#000000). "
+            "This includes the table, background, cutlery, napkins, and any other non-food, non-plate objects.\n"
+            "2. Keep the plate or bowl exactly as-is — do not alter its shape, colour, or position.\n"
+            "3. Keep all food items exactly as-is on the plate.\n"
+            "4. The result must show the plate with food on a pure black background with clean, sharp edges.\n"
+            "5. Output only the edited image with no text, borders, or watermarks."
+        )
+        try:
+            cleaned, _ = self._gemini_generate_image(image_pil, prompt, job_id, stage="clean_image_keep_plate")
+            logger.info("[%s] Gemini image cleaning (keep plate) complete", job_id)
+            return cleaned
+        except Exception as exc:
+            logger.warning("[%s] Gemini image cleaning (keep plate) failed, using original image: %s", job_id, exc)
+            return image_pil
+
+    # UKCal reference card dimensions (standard ISO/IEC 7810 ID-1 credit card)
+    _UKCAL_CARD_WIDTH_MM = 85.6
+    _UKCAL_CARD_HEIGHT_MM = 54.0
+
+    def _estimate_volume_from_glb(
+        self,
+        glb_path: Path,
+        job_id: str,
+        label: str = "mesh",
+        scale_factor: float = 1.0,
+    ) -> float:
+        """Compute volume (ml) from a GLB file using trimesh.
+
+        Raises NotImplementedError — waiting for the trimesh script + ground truth calibration values.
+        scale_factor converts raw trimesh units³ → ml.
+        """
+        raise NotImplementedError(
+            f"[{job_id}] _estimate_volume_from_glb is a stub awaiting the trimesh script "
+            f"and ground truth calibration values (glb={glb_path}, label={label})"
+        )
+
+    def _gemini_distribute_volumes_constrained(
+        self,
+        total_volume_ml: float,
+        visible_items: list[dict],
+        first_pass: dict,
+        image_pil: Image.Image,
+        job_id: str,
+        user_context: dict = None,
+    ) -> dict:
+        """Ask Gemini to distribute a *fixed* total food volume across visible ingredients.
+
+        Unlike `_estimate_gemini_metric_depth_volumes`, this method treats total_volume_ml
+        as a hard constraint and only asks Gemini to allocate proportions.
+        """
+        import google.generativeai as genai
+        genai.configure(api_key=self.config.GEMINI_API_KEY)
+
+        labels = [item["name"] for item in visible_items if item.get("name")]
+        prompt = (
+            "You are a food portion allocation system. The total food volume has already been measured "
+            f"precisely: {total_volume_ml:.1f} ml. Your job is ONLY to split this total across the "
+            "visible ingredients listed below — do not re-estimate the total.\n\n"
+            f"Dish: {first_pass.get('meal_name') or 'unknown'}\n"
+            f"Ingredients: {json.dumps(labels, ensure_ascii=True)}\n"
+            f"Fixed total volume to distribute: {total_volume_ml:.1f} ml\n\n"
+            "Use the food image to judge relative proportions (area, height) of each ingredient. "
+            "The sum of all ingredient volumes MUST equal the fixed total exactly.\n\n"
+            "Return ONLY valid JSON:\n"
+            "{"
+            "\"total_volume_ml\": number, "
+            "\"total_confidence\": number, "
+            "\"assumptions\": str, "
+            "\"ingredients\": ["
+            "{\"name\": str, \"volume_ml\": number, \"proportion\": number, \"confidence\": number, \"reason\": str}"
+            "]"
+            "}\n"
+            "Rules: every ingredient must appear exactly once; all volumes > 0; "
+            "sum(ingredient volumes) == total_volume_ml; proportion = fraction of total (0..1); confidence 0..1."
+        )
+        prompt += self._build_user_context_suffix(user_context)
+
+        gm = genai.GenerativeModel(self._flash_model_name(), generation_config=self._GEMINI_GEN_CONFIG)
+        start_time = time.monotonic()
+        try:
+            response = gm.generate_content([prompt, image_pil], request_options={"timeout": 120})
+        except Exception as exc:
+            latency_s = time.monotonic() - start_time
+            logger.warning(
+                "[%s] Gemini constrained volume distribution failed latency=%.2fs error=%s",
+                job_id, latency_s, exc,
+            )
+            raise
+        latency_s = time.monotonic() - start_time
+        response_text = response.text or ""
+        parsed = self._parse_json_object_or_array(response_text, expected="object")
+
+        # Enforce the total constraint: rescale so sum == total_volume_ml
+        ingredients_raw = parsed.get("ingredients") or []
+        raw_sum = sum(float(i.get("volume_ml") or 0.0) for i in ingredients_raw)
+        if raw_sum > 0:
+            scale = total_volume_ml / raw_sum
+        else:
+            scale = 1.0
+        ingredients_normalised = []
+        for entry in ingredients_raw:
+            v = float(entry.get("volume_ml") or 0.0) * scale
+            ingredients_normalised.append({**entry, "volume_ml": round(v, 2)})
+
+        logger.info(
+            "[%s] Gemini constrained volume distribution complete latency=%.2fs "
+            "total_in=%.1f raw_sum=%.1f scale=%.4f ingredients=%d",
+            job_id, latency_s, total_volume_ml, raw_sum, scale, len(ingredients_normalised),
+        )
+        self._record_gemini_output(
+            stage="gemini_constrained_volume_distribution",
+            job_id=job_id,
+            model_name=self._flash_model_name(),
+            prompt=prompt,
+            response_text=response_text,
+            parsed_output=parsed,
+            metadata={"total_volume_ml": total_volume_ml, "raw_sum": raw_sum, "scale": scale, "latency_s": round(latency_s, 3)},
+        )
+
+        volume_map = {}
+        for entry in ingredients_normalised:
+            name = (entry.get("name") or "").strip().lower()
+            if not name:
+                continue
+            volume_map[name] = {
+                "volume_ml": float(entry.get("volume_ml") or 0.0),
+                "proportion": float(entry.get("proportion") or 0.0),
+                "confidence": float(entry.get("confidence") or 0.0),
+                "reason": entry.get("reason"),
+                "method": "trellis_glb_constrained",
+            }
+
+        return {
+            "total_volume_ml": total_volume_ml,
+            "total_confidence": float(parsed.get("total_confidence") or 0.0),
+            "assumptions": parsed.get("assumptions") or "",
+            "volume_map": volume_map,
+            "distribution_latency_s": round(latency_s, 3),
+        }
+
     def _gemini_generate_image(self, image_pil: Image.Image, prompt: str, job_id: str, stage: str) -> tuple[Image.Image, str]:
         from google import genai as genai_new
         from google.genai import types
@@ -2496,6 +2640,8 @@ class NutritionVideoPipeline:
             pil_image = Image.fromarray(img_rgb)
 
         logger.info("[%s] Image pipeline start for %s", job_id, image_path.name)
+
+        # ── TRELLIS GPU warm-up (async, fired early) ──
         trellis_warmup_handle = None
         if getattr(self.config, "ENABLE_TRELLIS", False):
             try:
@@ -2507,6 +2653,8 @@ class NutritionVideoPipeline:
                 )
             except Exception as warmup_err:
                 logger.warning("[%s] Could not start async TRELLIS GPU warm-up: %s", job_id, warmup_err)
+
+        # ── Gemini first pass ──
         first_pass = self._gemini_first_pass_image(pil_image, job_id, user_context=user_context)
         visible_items = [
             {
@@ -2518,7 +2666,6 @@ class NutritionVideoPipeline:
             if (item.get("name") or "").strip()
         ]
         if not visible_items:
-            # Retry: ask Gemini directly for a simple ingredient list
             logger.warning("[%s] First pass returned no visible ingredients, retrying with targeted prompt", job_id)
             try:
                 import google.generativeai as _genai
@@ -2557,50 +2704,25 @@ class NutritionVideoPipeline:
             [item["name"] for item in visible_items],
         )
 
-        calibration: dict = {"method": "gemini_metric_depth", "calibrated": True}
+        # ── Plate detection from first pass ──
+        plate_info = first_pass.get("plate_or_bowl") or {}
+        plate_detected = bool(plate_info) and plate_info.get("vessel_type") in ("plate", "bowl")
+        plate_diameter_cm = float(
+            (user_context or {}).get("plate_diameter_cm")
+            or plate_info.get("diameter_cm")
+            or 0.0
+        )
+        plate_volume_ml = float((user_context or {}).get("plate_volume_ml") or 0.0)
+        food_spread_cm = float((user_context or {}).get("food_spread_cm") or 0.0)
+        logger.info(
+            "[%s] Plate detection: plate_detected=%s vessel_type=%s plate_diameter_cm=%.1f "
+            "plate_volume_ml=%.1f food_spread_cm=%.1f (user_context override applied)",
+            job_id, plate_detected, plate_info.get("vessel_type"), plate_diameter_cm,
+            plate_volume_ml, food_spread_cm,
+        )
 
-        # ── Gemini image cleaning: black background, plate+food only, remove reflections ──
-        logger.info("[%s] Cleaning image via Gemini before TRELLIS", job_id)
-        cleaned_pil = self._gemini_clean_image(pil_image, job_id)
-        import tempfile as _tf
-        _cleaned_dir = Path(_tf.mkdtemp(prefix="cleaned_"))
-        _cleaned_tmp = _cleaned_dir / image_path.name  # keep original filename so TRELLIS result keys match
-        cleaned_pil.save(str(_cleaned_tmp))
-        trellis_image_path = _cleaned_tmp
-
-        # ── TRELLIS (v2): generate GLB + MP4 after first pass ──
-        trellis_glb_s3_key = None
-        trellis_mp4_s3_key = None
-        if getattr(self.config, "ENABLE_TRELLIS", False):
-            try:
-                logger.info("[%s] Starting TRELLIS generation for %s", job_id, image_path.name)
-                from .trellis_gpu import run_trellis_for_job
-                import tempfile
-                _trellis_out_dir = Path(tempfile.mkdtemp(prefix="trellis_"))
-                _trellis_results = run_trellis_for_job(
-                    image_paths=[trellis_image_path],
-                    config=self.config,
-                    job_id=job_id,
-                    local_output_dir=_trellis_out_dir,
-                    warmup_handle=trellis_warmup_handle,
-                )
-                _stem = image_path.stem
-                if _stem in _trellis_results:
-                    trellis_glb_s3_key = _trellis_results[_stem].get("glb_s3_key")
-                    _mp4_local = _trellis_results[_stem].get("mp4")
-                    if _mp4_local:
-                        _mp4_key = f"{self.config.TRELLIS_OUTPUT_PREFIX}/{job_id}/{_stem}.mp4"
-                        trellis_mp4_s3_key = _mp4_key
-                logger.info(
-                    "[%s] TRELLIS preview done — glb=%s mp4=%s",
-                    job_id,
-                    trellis_glb_s3_key,
-                    trellis_mp4_s3_key,
-                )
-            except Exception as _trellis_err:
-                logger.warning("[%s] TRELLIS generation failed (non-fatal): %s", job_id, _trellis_err)
-
-        logger.info("[%s] Starting Gemini metric-depth volume path; TRELLIS output is display-only", job_id)
+        # ── Gemini metric depth (display-only from this point) ──
+        logger.info("[%s] Generating Gemini metric-depth assets (display-only)", job_id)
         depth_assets = self._generate_gemini_metric_depth_assets(
             image_pil=pil_image,
             visible_items=visible_items,
@@ -2608,20 +2730,233 @@ class NutritionVideoPipeline:
             job_id=job_id,
         )
         full_depth_image = Image.open(depth_assets["full_depth_path"]).convert("RGB")
-        volume_estimate = self._estimate_gemini_metric_depth_volumes(
-            image_rgb=img_rgb,
-            full_depth_image=full_depth_image,
-            visible_items=visible_items,
-            first_pass=first_pass,
-            depth_assets=depth_assets,
-            job_id=job_id,
-            user_context=user_context,
-        )
-        volume_map = volume_estimate.get("volume_map") or {}
-        if float(volume_estimate.get("total_volume_ml") or 0.0) <= 0:
-            raise RuntimeError("Gemini metric-depth volume estimation did not return a positive total_volume_ml")
-        calibration["confidence"] = volume_estimate.get("total_confidence")
+        logger.info("[%s] Gemini metric-depth assets complete (display-only, not used for volume)", job_id)
 
+        # ── Gemini image cleaning for TRELLIS inputs ──
+        import tempfile as _tf
+        _cleaned_food_only_dir = Path(_tf.mkdtemp(prefix="cleaned_food_"))
+        _cleaned_with_plate_dir = Path(_tf.mkdtemp(prefix="cleaned_plate_"))
+
+        logger.info("[%s] Cleaning image (food only, no plate) for TRELLIS GLB_B", job_id)
+        cleaned_food_only_pil = self._gemini_clean_image(pil_image, job_id)
+        _food_only_tmp = _cleaned_food_only_dir / image_path.name
+        cleaned_food_only_pil.save(str(_food_only_tmp))
+
+        if plate_detected:
+            logger.info("[%s] Cleaning image (food + plate) for TRELLIS GLB_A", job_id)
+            cleaned_with_plate_pil = self._gemini_clean_image_keep_plate(pil_image, job_id)
+            _with_plate_tmp = _cleaned_with_plate_dir / (image_path.stem + "_plate" + image_path.suffix)
+            cleaned_with_plate_pil.save(str(_with_plate_tmp))
+        else:
+            cleaned_with_plate_pil = None
+            _with_plate_tmp = None
+
+        # ── TRELLIS: run GLB jobs ──
+        # GLB_A = with plate (only when plate detected)
+        # GLB_B = food only (always)
+        trellis_glb_a_s3_key = None   # with plate
+        trellis_glb_b_s3_key = None   # food only (primary volume source)
+        trellis_mp4_s3_key = None
+        trellis_volume_debug: dict = {
+            "ukcal_card_mm": {"width": self._UKCAL_CARD_WIDTH_MM, "height": self._UKCAL_CARD_HEIGHT_MM},
+            "plate_detected": plate_detected,
+            "plate_diameter_cm": plate_diameter_cm,
+            "plate_volume_ml_user": plate_volume_ml,
+            "food_spread_cm": food_spread_cm,
+        }
+
+        if getattr(self.config, "ENABLE_TRELLIS", False):
+            from .trellis_gpu import run_trellis_for_job
+
+            if plate_detected and _with_plate_tmp is not None:
+                # ── GLB_A: with plate ──
+                try:
+                    logger.info("[%s] TRELLIS GLB_A start (with plate) image=%s", job_id, _with_plate_tmp.name)
+                    _glb_a_out_dir = Path(_tf.mkdtemp(prefix="trellis_a_"))
+                    _glb_a_results = run_trellis_for_job(
+                        image_paths=[_with_plate_tmp],
+                        config=self.config,
+                        job_id=job_id,
+                        local_output_dir=_glb_a_out_dir,
+                        warmup_handle=trellis_warmup_handle,
+                    )
+                    trellis_warmup_handle = None  # consumed by first call
+                    _stem_a = _with_plate_tmp.stem
+                    if _stem_a in _glb_a_results:
+                        trellis_glb_a_s3_key = _glb_a_results[_stem_a].get("glb_s3_key")
+                        _glb_a_local: Optional[Path] = _glb_a_results[_stem_a].get("glb")
+                    else:
+                        _glb_a_local = None
+                    logger.info("[%s] TRELLIS GLB_A done — glb_s3=%s local=%s", job_id, trellis_glb_a_s3_key, _glb_a_local)
+                    trellis_volume_debug["glb_a_s3_key"] = trellis_glb_a_s3_key
+                    trellis_volume_debug["glb_a_local"] = str(_glb_a_local) if _glb_a_local else None
+
+                    # Attempt trimesh volume on GLB_A (with plate)
+                    if _glb_a_local and _glb_a_local.exists():
+                        try:
+                            raw_vol_a = self._estimate_volume_from_glb(_glb_a_local, job_id, label="glb_a_with_plate")
+                            logger.info("[%s] GLB_A raw trimesh volume = %.4f (raw units³)", job_id, raw_vol_a)
+                            trellis_volume_debug["glb_a_raw_units3"] = raw_vol_a
+                        except NotImplementedError as _stub_err:
+                            logger.warning("[%s] %s", job_id, _stub_err)
+                            trellis_volume_debug["glb_a_raw_units3"] = None
+                            trellis_volume_debug["glb_a_stub"] = True
+                except Exception as _glb_a_err:
+                    logger.error("[%s] TRELLIS GLB_A failed: %s", job_id, _glb_a_err)
+                    trellis_volume_debug["glb_a_error"] = str(_glb_a_err)
+                    _glb_a_local = None
+
+            # ── GLB_B: food only ──
+            try:
+                logger.info("[%s] TRELLIS GLB_B start (food only) image=%s", job_id, _food_only_tmp.name)
+                _glb_b_out_dir = Path(_tf.mkdtemp(prefix="trellis_b_"))
+                _glb_b_results = run_trellis_for_job(
+                    image_paths=[_food_only_tmp],
+                    config=self.config,
+                    job_id=job_id,
+                    local_output_dir=_glb_b_out_dir,
+                    warmup_handle=trellis_warmup_handle,
+                )
+                trellis_warmup_handle = None
+                _stem_b = _food_only_tmp.stem
+                if _stem_b in _glb_b_results:
+                    trellis_glb_b_s3_key = _glb_b_results[_stem_b].get("glb_s3_key")
+                    _glb_b_local: Optional[Path] = _glb_b_results[_stem_b].get("glb")
+                    _mp4_local = _glb_b_results[_stem_b].get("mp4")
+                    if _mp4_local:
+                        _mp4_key = f"{self.config.TRELLIS_OUTPUT_PREFIX}/{job_id}/{_stem_b}.mp4"
+                        trellis_mp4_s3_key = _mp4_key
+                else:
+                    _glb_b_local = None
+                logger.info(
+                    "[%s] TRELLIS GLB_B done — glb_s3=%s mp4_s3=%s local=%s",
+                    job_id, trellis_glb_b_s3_key, trellis_mp4_s3_key, _glb_b_local,
+                )
+                trellis_volume_debug["glb_b_s3_key"] = trellis_glb_b_s3_key
+                trellis_volume_debug["glb_b_local"] = str(_glb_b_local) if _glb_b_local else None
+
+                # Attempt trimesh volume on GLB_B (food only)
+                if _glb_b_local and _glb_b_local.exists():
+                    try:
+                        raw_vol_b = self._estimate_volume_from_glb(_glb_b_local, job_id, label="glb_b_food_only")
+                        logger.info("[%s] GLB_B raw trimesh volume = %.4f (raw units³)", job_id, raw_vol_b)
+                        trellis_volume_debug["glb_b_raw_units3"] = raw_vol_b
+                    except NotImplementedError as _stub_err:
+                        logger.warning("[%s] %s", job_id, _stub_err)
+                        trellis_volume_debug["glb_b_raw_units3"] = None
+                        trellis_volume_debug["glb_b_stub"] = True
+            except Exception as _glb_b_err:
+                logger.error("[%s] TRELLIS GLB_B failed: %s", job_id, _glb_b_err)
+                trellis_volume_debug["glb_b_error"] = str(_glb_b_err)
+                _glb_b_local = None
+
+        # ── Volume estimation ──
+        # Primary path: trimesh from GLB_B (food only).
+        # When plate_detected and GLB_A available, log plate-subtraction intermediate.
+        # Stub raises NotImplementedError → fall through to Gemini metric-depth volume.
+        trellis_total_food_volume_ml: Optional[float] = None
+        volume_method = "gemini_metric_depth"
+
+        glb_b_raw = trellis_volume_debug.get("glb_b_raw_units3")
+        glb_a_raw = trellis_volume_debug.get("glb_a_raw_units3")
+
+        if glb_b_raw is not None:
+            # Scale factor: TBD — will be derived from UKCal card pixel size vs physical size.
+            # Hardcoded to 1.0 until ground truth calibration script is provided.
+            scale_factor_ml_per_unit3 = 1.0
+            trellis_food_vol_raw = glb_b_raw
+            trellis_food_vol_scaled = trellis_food_vol_raw * scale_factor_ml_per_unit3
+            logger.info(
+                "[%s] GLB_B volume: raw=%.4f units³  scale=%.6f  scaled=%.2f ml",
+                job_id, trellis_food_vol_raw, scale_factor_ml_per_unit3, trellis_food_vol_scaled,
+            )
+            trellis_volume_debug.update({
+                "glb_b_scale_factor_ml_per_unit3": scale_factor_ml_per_unit3,
+                "glb_b_raw_vol_units3": trellis_food_vol_raw,
+                "glb_b_scaled_vol_ml": trellis_food_vol_scaled,
+            })
+
+            if plate_detected and glb_a_raw is not None:
+                plate_portion_raw = glb_a_raw - glb_b_raw
+                plate_portion_scaled = plate_portion_raw * scale_factor_ml_per_unit3
+                logger.info(
+                    "[%s] Plate subtraction: GLB_A=%.4f  GLB_B=%.4f  plate_portion=%.4f (%.2f ml)",
+                    job_id, glb_a_raw, glb_b_raw, plate_portion_raw, plate_portion_scaled,
+                )
+                trellis_volume_debug.update({
+                    "glb_a_raw_vol_units3": glb_a_raw,
+                    "glb_a_scaled_vol_ml": glb_a_raw * scale_factor_ml_per_unit3,
+                    "plate_portion_raw_units3": plate_portion_raw,
+                    "plate_portion_scaled_ml": plate_portion_scaled,
+                })
+                if plate_volume_ml > 0:
+                    logger.info(
+                        "[%s] User-supplied plate_volume_ml=%.1f used for cross-check "
+                        "(trimesh plate portion=%.2f ml)",
+                        job_id, plate_volume_ml, plate_portion_scaled,
+                    )
+                    trellis_volume_debug["plate_volume_ml_user_crosscheck"] = plate_volume_ml
+
+            trellis_total_food_volume_ml = trellis_food_vol_scaled
+            volume_method = "trellis_glb_trimesh"
+            logger.info(
+                "[%s] Volume method=trellis_glb_trimesh  final_food_volume=%.2f ml",
+                job_id, trellis_total_food_volume_ml,
+            )
+
+        # Determine final volume map ──
+        if trellis_total_food_volume_ml is not None and trellis_total_food_volume_ml > 0:
+            logger.info(
+                "[%s] Distributing %.2f ml across %d ingredients via Gemini (constrained)",
+                job_id, trellis_total_food_volume_ml, len(visible_items),
+            )
+            volume_estimate = self._gemini_distribute_volumes_constrained(
+                total_volume_ml=trellis_total_food_volume_ml,
+                visible_items=visible_items,
+                first_pass=first_pass,
+                image_pil=pil_image,
+                job_id=job_id,
+                user_context=user_context,
+            )
+            calibration = {
+                "method": volume_method,
+                "calibrated": True,
+                "confidence": volume_estimate.get("total_confidence"),
+                "trellis_glb_b_s3_key": trellis_glb_b_s3_key,
+                "trellis_glb_a_s3_key": trellis_glb_a_s3_key,
+            }
+        else:
+            # trimesh stub not yet implemented → fall back to Gemini metric-depth volume
+            logger.warning(
+                "[%s] TRELLIS volume not available (stub pending) — falling back to Gemini metric-depth volume",
+                job_id,
+            )
+            volume_estimate = self._estimate_gemini_metric_depth_volumes(
+                image_rgb=img_rgb,
+                full_depth_image=full_depth_image,
+                visible_items=visible_items,
+                first_pass=first_pass,
+                depth_assets=depth_assets,
+                job_id=job_id,
+                user_context=user_context,
+            )
+            if float(volume_estimate.get("total_volume_ml") or 0.0) <= 0:
+                raise RuntimeError("Volume estimation did not return a positive total_volume_ml")
+            calibration = {
+                "method": "gemini_metric_depth",
+                "calibrated": True,
+                "confidence": volume_estimate.get("total_confidence"),
+            }
+
+        volume_map = volume_estimate.get("volume_map") or {}
+        logger.info(
+            "[%s] Volume map ready method=%s total_volume_ml=%.2f items=%d",
+            job_id, calibration["method"],
+            float(volume_estimate.get("total_volume_ml") or 0.0),
+            len(volume_map),
+        )
+
+        # ── Questionnaire + hidden/extra items ──
         verified_questionnaire = self._verify_questionnaire_items_with_gemini(
             {
                 "main_food_item": first_pass.get("meal_name"),
@@ -2638,10 +2973,7 @@ class NutritionVideoPipeline:
             if item.get("verdict") == "include"
             and float(item.get("verification_confidence") or item.get("confidence") or 0.0) >= 0.6
             and (
-                # hidden items must not already be visible in base
                 (item.get("type") == "hidden" and not item.get("already_visible"))
-                # extras are always included — already_visible just means the base stays in base table
-                # and the extra increment goes to high_calorie
                 or item.get("type") == "extra"
             )
         ]
@@ -2656,6 +2988,7 @@ class NutritionVideoPipeline:
             user_context=user_context,
         )
 
+        # ── Nutrition analysis ──
         logger.info("[%s] Starting nutrition analysis phase", job_id)
         nutrition_results = self._analyze_nutrition_from_production(
             first_pass=first_pass,
@@ -2667,6 +3000,7 @@ class NutritionVideoPipeline:
             job_id=job_id,
         )
         logger.info("[%s] Nutrition analysis phase complete", job_id)
+
         overall_confidence = self._calculate_overall_confidence(
             first_pass=first_pass,
             visible_items=visible_items,
@@ -2675,10 +3009,10 @@ class NutritionVideoPipeline:
             questionnaire_verification=self.last_questionnaire_verification,
             nutrition_results=nutrition_results,
         )
+
         output_dir = self.config.OUTPUT_DIR / f"production_{job_id}"
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Generate tagged image (ingredients labeled on photo) — replaces v1 sam3_segmentation
         logger.info("[%s] Generating tagged image with ingredient labels", job_id)
         tagged_image = self._gemini_tag_image(pil_image, visible_items, job_id)
         tagged_image_path = output_dir / "tagged.png"
@@ -2715,7 +3049,8 @@ class NutritionVideoPipeline:
             "timestamp": datetime.utcnow().isoformat(),
             "num_frames_processed": 1,
             "calibration": calibration,
-            "trellis_glb_s3_key": trellis_glb_s3_key,
+            "trellis_glb_s3_key": trellis_glb_b_s3_key,       # primary (food-only) GLB for 3D viewer
+            "trellis_glb_a_s3_key": trellis_glb_a_s3_key,     # with-plate GLB (experiment)
             "trellis_mp4_s3_key": trellis_mp4_s3_key,
             "tracking": {
                 "objects": {
@@ -2736,8 +3071,8 @@ class NutritionVideoPipeline:
             "analysis_report": analysis_report,
             "questionnaire_verification": self.last_questionnaire_verification,
             "pipeline_runtime": {
-                "image_pipeline": "gemini_metric_depth",
-                "trellis_usage": "preview_only",
+                "image_pipeline": calibration["method"],
+                "trellis_usage": "glb_volume_primary" if volume_method == "trellis_glb_trimesh" else "display_only_depth_fallback",
                 "gemini_depth_image_model": self._GEMINI_DEPTH_IMAGE_MODEL,
                 "device": self.device,
             },
@@ -2750,20 +3085,24 @@ class NutritionVideoPipeline:
                 "cooking_method": first_pass.get("cooking_method"),
                 "cooking_method_confidence": float(first_pass.get("cooking_method_confidence") or 0.0),
                 "visible_items": visible_items,
+                "plate_info": plate_info,
+                "plate_detected": plate_detected,
                 "depth_outputs": {
                     "assets": debug_assets,
                     "gemini_metric_depth": depth_assets,
                 },
                 "gemini_depth_assets": depth_assets,
+                "trellis_volume_debug": trellis_volume_debug,
+                "volume_method": volume_method,
+                "volume_estimate": volume_estimate,
                 "gemini_pass_2_volume": volume_map,
-                "gemini_metric_depth_volume": volume_estimate,
                 "gemini_pass_3_inferred_items": inferred_nonvisible_items,
                 "questionnaire_items": questionnaire_nutrition,
                 "overall_confidence": overall_confidence,
                 "gemini_outputs": self.gemini_outputs,
                 "runtime": {
-                    "image_pipeline": "gemini_metric_depth",
-                    "trellis_usage": "preview_only",
+                    "image_pipeline": calibration["method"],
+                    "trellis_usage": "glb_volume_primary" if volume_method == "trellis_glb_trimesh" else "display_only_depth_fallback",
                     "gemini_depth_image_model": self._GEMINI_DEPTH_IMAGE_MODEL,
                     "device": self.device,
                 },
