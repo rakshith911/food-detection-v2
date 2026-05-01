@@ -681,6 +681,14 @@ export class NutritionAnalysisAPI {
   }
 
   /**
+   * Re-queue a failed job for reprocessing.
+   * The image is already in S3 — this just resets DynamoDB status and re-sends to SQS.
+   */
+  async requeueJob(jobId: string): Promise<boolean> {
+    return this.confirmUpload(jobId);
+  }
+
+  /**
    * Poll for job completion
    * @param detailed - Whether to request detailed results (default: true to get segmented images)
    */

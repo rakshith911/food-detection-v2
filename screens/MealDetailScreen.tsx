@@ -1166,49 +1166,51 @@ export default function MealDetailScreen() {
               <Text style={styles.mealCalories}>
                 {dishTables.every((table) => table.rows.length === 0) ? '-' : `${totalCalories} Kcal`}
               </Text>
-              <TouchableOpacity
-                style={[styles.addButton, !canAddBaseIngredient && styles.addButtonDisabled]}
-                onPress={() => canAddBaseIngredient && handleAddContent()}
-                activeOpacity={canAddBaseIngredient ? 0.8 : 1}
-              >
-                <View style={styles.addButtonIcon}>
-                  <Text style={styles.addButtonIconText}>+</Text>
-                </View>
-                <Text style={styles.addButtonText}>Add Ingredient</Text>
-              </TouchableOpacity>
             </View>
           </View>
 
-          {/* Row 2: 3 view buttons with separators */}
+          {/* Row 2: 3 view buttons (left) + Add Ingredient (right) */}
           <View style={styles.mediaActionButtons}>
+            <View style={styles.mediaActionButtonsGroup}>
+              <TouchableOpacity
+                style={[styles.mediaActionButton, isVideoPlaying && styles.mediaActionButtonActive]}
+                onPress={() => { setSelectedDepthIngredient(null); handleVideoPlay(); }}
+                activeOpacity={0.7}
+              >
+                <CubeIcon size={18} color={isVideoPlaying ? '#FFFFFF' : '#7BA21B'} />
+              </TouchableOpacity>
+              <View style={styles.buttonSeparator} />
+              <TouchableOpacity
+                style={[styles.mediaActionButton, selectedDepthIngredient === '__full__' && styles.mediaActionButtonActive]}
+                onPress={() => {
+                  setIsVideoPlaying(false);
+                  setSelectedDepthIngredient(selectedDepthIngredient === '__full__' ? null : '__full__');
+                }}
+                activeOpacity={0.7}
+              >
+                <MaterialCommunityIcons name="image-filter-hdr" size={18} color={selectedDepthIngredient === '__full__' ? '#FFFFFF' : '#6B7280'} />
+              </TouchableOpacity>
+              <View style={styles.buttonSeparator} />
+              <TouchableOpacity
+                style={[styles.mediaActionButton, selectedDepthIngredient === '__tagged__' && styles.mediaActionButtonActive]}
+                onPress={() => {
+                  setIsVideoPlaying(false);
+                  setSelectedDepthIngredient(selectedDepthIngredient === '__tagged__' ? null : '__tagged__');
+                }}
+                activeOpacity={0.7}
+              >
+                <MaterialCommunityIcons name="selection-ellipse" size={18} color={selectedDepthIngredient === '__tagged__' ? '#FFFFFF' : '#6B7280'} />
+              </TouchableOpacity>
+            </View>
             <TouchableOpacity
-              style={[styles.mediaActionButton, isVideoPlaying && styles.mediaActionButtonActive]}
-              onPress={() => { setSelectedDepthIngredient(null); handleVideoPlay(); }}
-              activeOpacity={0.7}
+              style={[styles.addButton, !canAddBaseIngredient && styles.addButtonDisabled]}
+              onPress={() => canAddBaseIngredient && handleAddContent()}
+              activeOpacity={canAddBaseIngredient ? 0.8 : 1}
             >
-              <CubeIcon size={18} color={isVideoPlaying ? '#FFFFFF' : '#7BA21B'} />
-            </TouchableOpacity>
-            <View style={styles.buttonSeparator} />
-            <TouchableOpacity
-              style={[styles.mediaActionButton, selectedDepthIngredient === '__full__' && styles.mediaActionButtonActive]}
-              onPress={() => {
-                setIsVideoPlaying(false);
-                setSelectedDepthIngredient(selectedDepthIngredient === '__full__' ? null : '__full__');
-              }}
-              activeOpacity={0.7}
-            >
-              <MaterialCommunityIcons name="image-filter-hdr" size={18} color={selectedDepthIngredient === '__full__' ? '#FFFFFF' : '#6B7280'} />
-            </TouchableOpacity>
-            <View style={styles.buttonSeparator} />
-            <TouchableOpacity
-              style={[styles.mediaActionButton, selectedDepthIngredient === '__tagged__' && styles.mediaActionButtonActive]}
-              onPress={() => {
-                setIsVideoPlaying(false);
-                setSelectedDepthIngredient(selectedDepthIngredient === '__tagged__' ? null : '__tagged__');
-              }}
-              activeOpacity={0.7}
-            >
-              <MaterialCommunityIcons name="selection-ellipse" size={18} color={selectedDepthIngredient === '__tagged__' ? '#FFFFFF' : '#6B7280'} />
+              <View style={styles.addButtonIcon}>
+                <Text style={styles.addButtonIconText}>+</Text>
+              </View>
+              <Text style={styles.addButtonText}>Add Ingredient</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -1418,7 +1420,12 @@ const styles = StyleSheet.create({
   mediaActionButtons: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
     marginTop: 8,
+  },
+  mediaActionButtonsGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
     gap: 6,
   },
   mediaActionButton: {

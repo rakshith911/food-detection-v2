@@ -640,22 +640,16 @@ def process_message(message: dict, pipeline=None):
             error=str(e)
         )
 
-        deterministic_errors = (
-            "Gemini metric-depth volume estimation did not return a positive total_volume_ml",
-        )
-        if any(msg in str(e) for msg in deterministic_errors):
-            print(f"Deterministic failure for job {job_id}; deleting SQS message to avoid endless retries")
-            try:
-                sqs.delete_message(
-                    QueueUrl=SQS_VIDEO_QUEUE_URL,
-                    ReceiptHandle=receipt_handle
-                )
-            except Exception as delete_error:
-                print(f"WARNING: Failed to delete deterministic-failure message: {delete_error}")
-            return
-
-        # Re-raise to ensure we don't silently continue
-        raise
+        # Always delete the message — failed jobs should not auto-retry.
+        # The user can explicitly retry via the app, which re-queues the job.
+        try:
+            sqs.delete_message(
+                QueueUrl=SQS_VIDEO_QUEUE_URL,
+                ReceiptHandle=receipt_handle
+            )
+            print(f"Deleted SQS message for failed job {job_id}")
+        except Exception as delete_error:
+            print(f"WARNING: Failed to delete message for failed job {job_id}: {delete_error}")
 
 
 def poll_queue():

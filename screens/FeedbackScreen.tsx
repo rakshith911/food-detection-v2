@@ -599,51 +599,46 @@ export default function FeedbackScreen() {
             </View>
             <View style={styles.mealActions}>
               <Text style={styles.mealCalories}>{item.nutritionalInfo?.calories ?? 0} Kcal</Text>
-              <TouchableOpacity
-                style={styles.writeCommentButton}
-                onPress={() => {
-                  scrollViewRef.current?.scrollToEnd({ animated: true });
-                  setTimeout(() => {
-                    commentInputRef.current?.focus();
-                  }, 300);
-                }}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.writeCommentButtonText}>Write Comments</Text>
-              </TouchableOpacity>
-              <View style={styles.captureInfo}>
-                <Text style={styles.captureValue}>
-                  {captureDateText && captureTimeText
-                    ? `${captureDateText}, ${captureTimeText}`
-                    : 'Unavailable'}
-                </Text>
-              </View>
             </View>
           </View>
-          {/* Row 2: 3 view buttons with separators */}
+          {/* Row 2: 3 view buttons (left) + Write Comments (right) */}
           <View style={styles.mediaActionButtons}>
+            <View style={styles.mediaActionButtonsGroup}>
+              <TouchableOpacity
+                style={[styles.mediaActionButton, isVideoPlaying && styles.mediaActionButtonActive]}
+                onPress={() => { setSelectedDepthIngredient(null); handleVideoPlay(); }}
+                activeOpacity={0.7}
+              >
+                <CubeIcon size={18} color={isVideoPlaying ? '#FFFFFF' : '#7BA21B'} />
+              </TouchableOpacity>
+              <View style={styles.buttonSeparator} />
+              <TouchableOpacity
+                style={[styles.mediaActionButton, selectedDepthIngredient === '__full__' && styles.mediaActionButtonActive]}
+                onPress={() => { setIsVideoPlaying(false); setSelectedDepthIngredient(selectedDepthIngredient === '__full__' ? null : '__full__'); }}
+                activeOpacity={0.7}
+              >
+                <MaterialCommunityIcons name="image-filter-hdr" size={18} color={selectedDepthIngredient === '__full__' ? '#FFFFFF' : '#6B7280'} />
+              </TouchableOpacity>
+              <View style={styles.buttonSeparator} />
+              <TouchableOpacity
+                style={[styles.mediaActionButton, selectedDepthIngredient === '__tagged__' && styles.mediaActionButtonActive]}
+                onPress={() => { setIsVideoPlaying(false); setSelectedDepthIngredient(selectedDepthIngredient === '__tagged__' ? null : '__tagged__'); }}
+                activeOpacity={0.7}
+              >
+                <MaterialCommunityIcons name="selection-ellipse" size={18} color={selectedDepthIngredient === '__tagged__' ? '#FFFFFF' : '#6B7280'} />
+              </TouchableOpacity>
+            </View>
             <TouchableOpacity
-              style={[styles.mediaActionButton, isVideoPlaying && styles.mediaActionButtonActive]}
-              onPress={() => { setSelectedDepthIngredient(null); handleVideoPlay(); }}
+              style={styles.writeCommentButton}
+              onPress={() => {
+                scrollViewRef.current?.scrollToEnd({ animated: true });
+                setTimeout(() => {
+                  commentInputRef.current?.focus();
+                }, 300);
+              }}
               activeOpacity={0.7}
             >
-              <CubeIcon size={18} color={isVideoPlaying ? '#FFFFFF' : '#7BA21B'} />
-            </TouchableOpacity>
-            <View style={styles.buttonSeparator} />
-            <TouchableOpacity
-              style={[styles.mediaActionButton, selectedDepthIngredient === '__full__' && styles.mediaActionButtonActive]}
-              onPress={() => { setIsVideoPlaying(false); setSelectedDepthIngredient(selectedDepthIngredient === '__full__' ? null : '__full__'); }}
-              activeOpacity={0.7}
-            >
-              <MaterialCommunityIcons name="image-filter-hdr" size={18} color={selectedDepthIngredient === '__full__' ? '#FFFFFF' : '#6B7280'} />
-            </TouchableOpacity>
-            <View style={styles.buttonSeparator} />
-            <TouchableOpacity
-              style={[styles.mediaActionButton, selectedDepthIngredient === '__tagged__' && styles.mediaActionButtonActive]}
-              onPress={() => { setIsVideoPlaying(false); setSelectedDepthIngredient(selectedDepthIngredient === '__tagged__' ? null : '__tagged__'); }}
-              activeOpacity={0.7}
-            >
-              <MaterialCommunityIcons name="selection-ellipse" size={18} color={selectedDepthIngredient === '__tagged__' ? '#FFFFFF' : '#6B7280'} />
+              <Text style={styles.writeCommentButtonText}>Write Comments</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -906,18 +901,6 @@ export default function FeedbackScreen() {
                 </View>
                 <View style={styles.mealActions}>
                   <Text style={styles.mealCalories}>{item.nutritionalInfo?.calories ?? 0} Kcal</Text>
-                  <TouchableOpacity
-                    style={styles.writeCommentButton}
-                    onPress={() => {
-                      scrollViewRef.current?.scrollToEnd({ animated: true });
-                      setTimeout(() => {
-                        commentInputRef.current?.focus();
-                      }, 300);
-                    }}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={styles.writeCommentButtonText}>Write Comments</Text>
-                  </TouchableOpacity>
                   <View style={styles.captureInfo}>
                     <Text style={styles.captureValue}>
                       {captureDateText && captureTimeText
@@ -927,30 +910,44 @@ export default function FeedbackScreen() {
                   </View>
                 </View>
               </View>
-              {/* Row 2: 3 view buttons with separators */}
+              {/* Row 2: 3 view buttons (left) + Write Comments (right) */}
               <View style={styles.mediaActionButtons}>
+                <View style={styles.mediaActionButtonsGroup}>
+                  <TouchableOpacity
+                    style={[styles.mediaActionButton, isVideoPlaying && styles.mediaActionButtonActive]}
+                    onPress={() => { setSelectedDepthIngredient(null); handleVideoPlay(); }}
+                    activeOpacity={0.7}
+                  >
+                    <CubeIcon size={18} color={isVideoPlaying ? '#FFFFFF' : '#7BA21B'} />
+                  </TouchableOpacity>
+                  <View style={styles.buttonSeparator} />
+                  <TouchableOpacity
+                    style={[styles.mediaActionButton, selectedDepthIngredient === '__full__' && styles.mediaActionButtonActive]}
+                    onPress={() => { setIsVideoPlaying(false); setSelectedDepthIngredient(selectedDepthIngredient === '__full__' ? null : '__full__'); }}
+                    activeOpacity={0.7}
+                  >
+                    <MaterialCommunityIcons name="image-filter-hdr" size={18} color={selectedDepthIngredient === '__full__' ? '#FFFFFF' : '#6B7280'} />
+                  </TouchableOpacity>
+                  <View style={styles.buttonSeparator} />
+                  <TouchableOpacity
+                    style={[styles.mediaActionButton, selectedDepthIngredient === '__tagged__' && styles.mediaActionButtonActive]}
+                    onPress={() => { setIsVideoPlaying(false); setSelectedDepthIngredient(selectedDepthIngredient === '__tagged__' ? null : '__tagged__'); }}
+                    activeOpacity={0.7}
+                  >
+                    <MaterialCommunityIcons name="selection-ellipse" size={18} color={selectedDepthIngredient === '__tagged__' ? '#FFFFFF' : '#6B7280'} />
+                  </TouchableOpacity>
+                </View>
                 <TouchableOpacity
-                  style={[styles.mediaActionButton, isVideoPlaying && styles.mediaActionButtonActive]}
-                  onPress={() => { setSelectedDepthIngredient(null); handleVideoPlay(); }}
+                  style={styles.writeCommentButton}
+                  onPress={() => {
+                    scrollViewRef.current?.scrollToEnd({ animated: true });
+                    setTimeout(() => {
+                      commentInputRef.current?.focus();
+                    }, 300);
+                  }}
                   activeOpacity={0.7}
                 >
-                  <CubeIcon size={18} color={isVideoPlaying ? '#FFFFFF' : '#7BA21B'} />
-                </TouchableOpacity>
-                <View style={styles.buttonSeparator} />
-                <TouchableOpacity
-                  style={[styles.mediaActionButton, selectedDepthIngredient === '__full__' && styles.mediaActionButtonActive]}
-                  onPress={() => { setIsVideoPlaying(false); setSelectedDepthIngredient(selectedDepthIngredient === '__full__' ? null : '__full__'); }}
-                  activeOpacity={0.7}
-                >
-                  <MaterialCommunityIcons name="image-filter-hdr" size={18} color={selectedDepthIngredient === '__full__' ? '#FFFFFF' : '#6B7280'} />
-                </TouchableOpacity>
-                <View style={styles.buttonSeparator} />
-                <TouchableOpacity
-                  style={[styles.mediaActionButton, selectedDepthIngredient === '__tagged__' && styles.mediaActionButtonActive]}
-                  onPress={() => { setIsVideoPlaying(false); setSelectedDepthIngredient(selectedDepthIngredient === '__tagged__' ? null : '__tagged__'); }}
-                  activeOpacity={0.7}
-                >
-                  <MaterialCommunityIcons name="selection-ellipse" size={18} color={selectedDepthIngredient === '__tagged__' ? '#FFFFFF' : '#6B7280'} />
+                  <Text style={styles.writeCommentButtonText}>Write Comments</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -1167,7 +1164,12 @@ const styles = StyleSheet.create({
   mediaActionButtons: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
     marginTop: 8,
+  },
+  mediaActionButtonsGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
     gap: 6,
   },
   mediaActionButton: {

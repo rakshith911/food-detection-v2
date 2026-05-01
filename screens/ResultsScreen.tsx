@@ -8,7 +8,7 @@ import { Ionicons } from '@expo/vector-icons';
 import Svg, { Path } from 'react-native-svg';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useAppDispatch, useAppSelector } from '../store/hooks';
-import { deleteAnalysis, loadHistory, clearHistoryLocal } from '../store/slices/historySlice';
+import { deleteAnalysis, loadHistory, clearHistoryLocal, updateAnalysisProgress } from '../store/slices/historySlice';
 import { loadProfile } from '../store/slices/profileSlice';
 import type { AnalysisEntry } from '../store/slices/historySlice';
 import ScreenLoader from '../components/ScreenLoader';
@@ -18,6 +18,7 @@ import AppHeader from '../components/AppHeader';
 import BottomButtonContainer from '../components/BottomButtonContainer';
 import TutorialScreen from './TutorialScreen';
 import { toSentenceCase } from '../utils/textCase';
+import { nutritionAnalysisAPI } from '../services/NutritionAnalysisAPI';
 
 // Auto-plays and loops the TRELLIS 3D rotating preview MP4 on the card.
 function VideoThumbnail({ videoUri, style }: { videoUri: string; style: any }) {
@@ -452,6 +453,23 @@ export default function ResultsScreen({ navigation: navigationProp }: { navigati
             </View>
             {isPendingOrAnalyzing ? (
               <ActivityIndicator size="small" color="#7BA21B" />
+            ) : item.analysisStatus === 'failed' ? (
+              <View style={styles.cardRightFailed}>
+                <TouchableOpacity
+                  style={styles.retryAnalysisButton}
+                  onPress={async () => {
+                    dispatch(updateAnalysisProgress({ id: item.id, progress: 0, status: 'analyzing' }));
+                    const ok = await nutritionAnalysisAPI.requeueJob(item.job_id);
+                    if (!ok) {
+                      dispatch(updateAnalysisProgress({ id: item.id, progress: 0, status: 'failed' }));
+                    }
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.retryAnalysisButtonText}>Retry</Text>
+                </TouchableOpacity>
+                <Text style={styles.cardTime}>{uploadDate}</Text>
+              </View>
             ) : (
               <Text style={styles.cardTime}>{uploadDate}</Text>
             )}
@@ -780,6 +798,22 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '400',
     color: '#6B7280',
+  },
+  cardRightFailed: {
+    alignItems: 'flex-end',
+    gap: 4,
+    marginLeft: 10,
+  },
+  retryAnalysisButton: {
+    backgroundColor: '#7BA21B',
+    paddingHorizontal: 14,
+    paddingVertical: 5,
+    borderRadius: 20,
+  },
+  retryAnalysisButtonText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '600',
   },
   captureButton: {
     height: 56, // Fixed height

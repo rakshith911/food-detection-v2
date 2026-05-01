@@ -675,7 +675,7 @@ class NutritionVideoPipeline:
             "\"cooking_method_confidence\": number, "
             "\"visible_ingredients\": [{\"name\": str, \"role_tag\": \"base\", \"confidence\": number}], "
             "\"plate_or_bowl\": {\"name\": str, \"role_tag\": \"plate_or_bowl\", \"vessel_type\": \"plate\"|\"bowl\"|\"unknown\", \"diameter_cm\": number|null, \"confidence\": number} | null, "
-            "\"reference_objects\": [{\"name\": str, \"role_tag\": \"reference_object\", \"width_cm\": number|null, \"height_cm\": number|null, \"confidence\": number}], "
+            "\"reference_objects\": [{\"name\": str, \"role_tag\": \"reference_object\", \"width_cm\": number|null, \"height_cm\": number|null, \"depth_cm\": number|null, \"confidence\": number}], "
             "\"notes\": str"
             "}\n\n"
             f"Image size: {img_width}x{img_height}.\n"
@@ -685,7 +685,7 @@ class NutritionVideoPipeline:
             "- role_tag for visible ingredients must always be 'base'.\n"
             "- Use simple, common food names (e.g. 'white sauce', 'yellow rice', 'falafel') — not long database-style descriptions.\n"
             "- Detect a plate or bowl if present and estimate its real-world diameter in cm.\n"
-            "- Detect reference objects if present, including cards, utensils, cans, cups, packaged items, trays, takeout containers, parchment paper, baking paper, foil liners, wrappers, or other visible base/support objects whose dimensions can be reasonably estimated, and estimate their real-world width/height in cm.\n"
+            "- Detect reference objects if present, including cards, utensils, cans, cups, packaged items, trays, takeout containers, parchment paper, baking paper, foil liners, wrappers, or other visible base/support objects whose dimensions can be reasonably estimated, and estimate their real-world width_cm, height_cm, and depth_cm (thickness/depth for 3-D objects such as cans or cups; null for flat objects such as cards or paper).\n"
             "- If there is no plate/bowl but the food sits on a visible paper, tray, liner, wrapper, or container with estimable dimensions, include it in reference_objects.\n"
             "- Confidence must be between 0 and 1.\n"
             "- Do not include questionnaire-only hidden or extra items in visible_ingredients.\n"
@@ -2481,9 +2481,19 @@ class NutritionVideoPipeline:
     def _run_production_image_pipeline(self, image_path: Path, job_id: str, user_context: dict = None) -> Dict:
         img_bgr = cv2.imread(str(image_path))
         if img_bgr is None:
-            raise ValueError(f"Could not load image: {image_path}")
-        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-        pil_image = Image.fromarray(img_rgb)
+            # cv2 cannot read HEIF/HEIC — try pillow-heif as fallback
+            try:
+                from pillow_heif import register_heif_opener
+                register_heif_opener()
+                pil_image = Image.open(image_path).convert("RGB")
+                img_rgb = np.array(pil_image)
+                img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+                logger.info("[%s] Loaded image via pillow-heif fallback (%s)", job_id, image_path.suffix)
+            except Exception as heif_exc:
+                raise ValueError(f"Could not load image: {image_path}") from heif_exc
+        else:
+            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+            pil_image = Image.fromarray(img_rgb)
 
         logger.info("[%s] Image pipeline start for %s", job_id, image_path.name)
         trellis_warmup_handle = None
