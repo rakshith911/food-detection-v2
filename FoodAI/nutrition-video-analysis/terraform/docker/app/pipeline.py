@@ -2799,97 +2799,82 @@ class NutritionVideoPipeline:
         if getattr(self.config, "ENABLE_TRELLIS", False):
             from .trellis_gpu import run_trellis_for_job
 
+            # Build image list for a single TRELLIS call — one GPU start/stop for both GLBs
+            _trellis_images: list = []
             if plate_detected and _with_plate_tmp is not None:
-                # ── GLB_A: with plate ──
-                try:
-                    logger.info("[%s] TRELLIS GLB_A start (with plate) image=%s", job_id, _with_plate_tmp.name)
-                    _glb_a_out_dir = Path(_tf.mkdtemp(prefix="trellis_a_"))
-                    _glb_a_results = run_trellis_for_job(
-                        image_paths=[_with_plate_tmp],
-                        config=self.config,
-                        job_id=job_id,
-                        local_output_dir=_glb_a_out_dir,
-                        warmup_handle=trellis_warmup_handle,
-                    )
-                    trellis_warmup_handle = None  # consumed by first call
+                _trellis_images.append(_with_plate_tmp)   # GLB_A (with plate)
+            _trellis_images.append(_food_only_tmp)         # GLB_B (food only)
+
+            _glb_a_local: Optional[Path] = None
+            _glb_b_local: Optional[Path] = None
+
+            try:
+                logger.info(
+                    "[%s] TRELLIS single call: %d images %s",
+                    job_id, len(_trellis_images), [p.name for p in _trellis_images],
+                )
+                _trellis_out_dir = Path(_tf.mkdtemp(prefix="trellis_"))
+                _trellis_results = run_trellis_for_job(
+                    image_paths=_trellis_images,
+                    config=self.config,
+                    job_id=job_id,
+                    local_output_dir=_trellis_out_dir,
+                    warmup_handle=trellis_warmup_handle,
+                )
+                trellis_warmup_handle = None
+
+                # ── Extract GLB_A (with plate) ──
+                if plate_detected and _with_plate_tmp is not None:
                     _stem_a = _with_plate_tmp.stem
-                    if _stem_a in _glb_a_results:
-                        trellis_glb_a_s3_key = _glb_a_results[_stem_a].get("glb_s3_key")
-                        _glb_a_local: Optional[Path] = _glb_a_results[_stem_a].get("glb")
-                    else:
-                        _glb_a_local = None
-                    logger.info("[%s] TRELLIS GLB_A done — glb_s3=%s local=%s", job_id, trellis_glb_a_s3_key, _glb_a_local)
+                    if _stem_a in _trellis_results:
+                        trellis_glb_a_s3_key = _trellis_results[_stem_a].get("glb_s3_key")
+                        _glb_a_local = _trellis_results[_stem_a].get("glb")
+                    logger.info("[%s] GLB_A — glb_s3=%s local=%s", job_id, trellis_glb_a_s3_key, _glb_a_local)
                     trellis_volume_debug["glb_a_s3_key"] = trellis_glb_a_s3_key
                     trellis_volume_debug["glb_a_local"] = str(_glb_a_local) if _glb_a_local else None
 
-                    # Attempt trimesh volume on GLB_A (with plate)
                     if _glb_a_local and _glb_a_local.exists():
                         try:
                             _glb_a_metrics = self._estimate_volume_from_glb(_glb_a_local, job_id, label="glb_a_with_plate")
                             trellis_volume_debug["glb_a_metrics"] = _glb_a_metrics
-                            # prefer watertight volume, fall back to convex hull
                             trellis_volume_debug["glb_a_raw_units3"] = (
-                                _glb_a_metrics["volume"]
-                                if _glb_a_metrics["volume"] is not None
+                                _glb_a_metrics["volume"] if _glb_a_metrics["volume"] is not None
                                 else _glb_a_metrics["volume_convex_hull"]
                             )
                         except Exception as _trimesh_a_err:
                             logger.warning("[%s] trimesh GLB_A failed: %s", job_id, _trimesh_a_err)
-                            trellis_volume_debug["glb_a_raw_units3"] = None
-                            trellis_volume_debug["glb_a_error"] = str(_trimesh_a_err)
-                except Exception as _glb_a_err:
-                    logger.error("[%s] TRELLIS GLB_A failed: %s", job_id, _glb_a_err)
-                    trellis_volume_debug["glb_a_error"] = str(_glb_a_err)
-                    _glb_a_local = None
+                            trellis_volume_debug["glb_a_trimesh_error"] = str(_trimesh_a_err)
 
-            # ── GLB_B: food only ──
-            try:
-                logger.info("[%s] TRELLIS GLB_B start (food only) image=%s", job_id, _food_only_tmp.name)
-                _glb_b_out_dir = Path(_tf.mkdtemp(prefix="trellis_b_"))
-                _glb_b_results = run_trellis_for_job(
-                    image_paths=[_food_only_tmp],
-                    config=self.config,
-                    job_id=job_id,
-                    local_output_dir=_glb_b_out_dir,
-                    warmup_handle=trellis_warmup_handle,
-                )
-                trellis_warmup_handle = None
+                # ── Extract GLB_B (food only) ──
                 _stem_b = _food_only_tmp.stem
-                if _stem_b in _glb_b_results:
-                    trellis_glb_b_s3_key = _glb_b_results[_stem_b].get("glb_s3_key")
-                    _glb_b_local: Optional[Path] = _glb_b_results[_stem_b].get("glb")
-                    _mp4_local = _glb_b_results[_stem_b].get("mp4")
+                if _stem_b in _trellis_results:
+                    trellis_glb_b_s3_key = _trellis_results[_stem_b].get("glb_s3_key")
+                    _glb_b_local = _trellis_results[_stem_b].get("glb")
+                    _mp4_local = _trellis_results[_stem_b].get("mp4")
                     if _mp4_local:
-                        _mp4_key = f"{self.config.TRELLIS_OUTPUT_PREFIX}/{job_id}/{_stem_b}.mp4"
-                        trellis_mp4_s3_key = _mp4_key
-                else:
-                    _glb_b_local = None
+                        trellis_mp4_s3_key = f"{self.config.TRELLIS_OUTPUT_PREFIX}/{job_id}/{_stem_b}.mp4"
                 logger.info(
-                    "[%s] TRELLIS GLB_B done — glb_s3=%s mp4_s3=%s local=%s",
+                    "[%s] GLB_B — glb_s3=%s mp4_s3=%s local=%s",
                     job_id, trellis_glb_b_s3_key, trellis_mp4_s3_key, _glb_b_local,
                 )
                 trellis_volume_debug["glb_b_s3_key"] = trellis_glb_b_s3_key
                 trellis_volume_debug["glb_b_local"] = str(_glb_b_local) if _glb_b_local else None
 
-                # Attempt trimesh volume on GLB_B (food only)
                 if _glb_b_local and _glb_b_local.exists():
                     try:
                         _glb_b_metrics = self._estimate_volume_from_glb(_glb_b_local, job_id, label="glb_b_food_only")
                         trellis_volume_debug["glb_b_metrics"] = _glb_b_metrics
-                        # prefer watertight volume, fall back to convex hull
                         trellis_volume_debug["glb_b_raw_units3"] = (
-                            _glb_b_metrics["volume"]
-                            if _glb_b_metrics["volume"] is not None
+                            _glb_b_metrics["volume"] if _glb_b_metrics["volume"] is not None
                             else _glb_b_metrics["volume_convex_hull"]
                         )
                     except Exception as _trimesh_b_err:
                         logger.warning("[%s] trimesh GLB_B failed: %s", job_id, _trimesh_b_err)
-                        trellis_volume_debug["glb_b_raw_units3"] = None
-                        trellis_volume_debug["glb_b_error"] = str(_trimesh_b_err)
-            except Exception as _glb_b_err:
-                logger.error("[%s] TRELLIS GLB_B failed: %s", job_id, _glb_b_err)
-                trellis_volume_debug["glb_b_error"] = str(_glb_b_err)
-                _glb_b_local = None
+                        trellis_volume_debug["glb_b_trimesh_error"] = str(_trimesh_b_err)
+
+            except Exception as _trellis_err:
+                logger.error("[%s] TRELLIS call failed: %s", job_id, _trellis_err)
+                trellis_volume_debug["trellis_error"] = str(_trellis_err)
 
         # ── Volume estimation ──
         # Ground truth plate dimensions (physically measured).
