@@ -933,6 +933,12 @@ class NutritionRAG:
         'pepper', 'peppers', 'onion', 'onions', 'cabbage', 'broccoli',
         'cauliflower', 'peas', 'jalapeno', 'jalapeño', 'turnip', 'turnips',
         'eggplant',
+        # leafy greens — must be classified as vegetables so raw-produce scoring applies
+        'spinach', 'greens', 'green', 'mixed', 'arugula', 'rocket', 'kale',
+        'chard', 'radicchio', 'endive', 'chicory', 'escarole', 'frisee',
+        'watercress', 'sorrel', 'microgreens', 'sprouts', 'coleslaw',
+        'celery', 'radish', 'beetroot', 'beet', 'asparagus', 'zucchini',
+        'courgette', 'squash', 'aubergine',
     }
     _DAIRY_TERMS = {
         'feta', 'cheese', 'yogurt', 'yoghurt', 'tzatziki', 'cream', 'creamy',
@@ -1490,7 +1496,10 @@ class NutritionRAG:
         _RAW_PRODUCE  = {'tomato', 'tomatoes', 'cucumber', 'lettuce', 'carrot',
                          'carrots', 'onion', 'onions', 'pepper', 'celery',
                          'radish', 'spinach', 'rocket', 'watercress', 'herb',
-                         'herbs', 'parsley', 'coriander', 'mint'}
+                         'herbs', 'parsley', 'coriander', 'cilantro', 'mint',
+                         'green', 'greens', 'mixed', 'arugula', 'kale', 'chard',
+                         'radicchio', 'endive', 'chicory', 'escarole', 'frisee',
+                         'sorrel', 'microgreens', 'sprouts', 'cabbage', 'coleslaw'}
         query_is_raw_produce = bool(set(query_words) & _RAW_PRODUCE)
         if query_is_raw_produce:
             # For fresh produce: reward raw entries, penalise cooked entries
