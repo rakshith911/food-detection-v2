@@ -865,6 +865,16 @@ class NutritionVideoPipeline:
             raise RuntimeError(f"Gemini init failed for production first pass: {e}")
 
         img_width, img_height = image_pil.size
+        # Inject physical plate measurements into prompt if provided via user_context
+        _plate_phys = (user_context or {}).get("plate_physical_measurements") or {}
+        _plate_phys_hint = ""
+        if _plate_phys:
+            _plate_phys_hint = (
+                "\nKnown plate physical measurements (ground truth — use these to compute plate_volume_ml):\n"
+                + "\n".join(f"  {k}: {v}" for k, v in _plate_phys.items())
+                + "\n"
+            )
+
         prompt = (
             "Analyze this food image for an image-only nutrition pipeline.\n\n"
             "Return ONLY valid JSON with this exact structure:\n"
@@ -876,17 +886,21 @@ class NutritionVideoPipeline:
             "\"cooking_method\": str, "
             "\"cooking_method_confidence\": number, "
             "\"visible_ingredients\": [{\"name\": str, \"role_tag\": \"base\", \"confidence\": number}], "
-            "\"plate_or_bowl\": {\"name\": str, \"role_tag\": \"plate_or_bowl\", \"vessel_type\": \"plate\"|\"bowl\"|\"unknown\", \"diameter_cm\": number|null, \"confidence\": number} | null, "
+            "\"plate_or_bowl\": {\"name\": str, \"role_tag\": \"plate_or_bowl\", \"vessel_type\": \"plate\"|\"bowl\"|\"unknown\", \"diameter_cm\": number|null, \"plate_volume_ml\": number|null, \"confidence\": number} | null, "
             "\"reference_objects\": [{\"name\": str, \"role_tag\": \"reference_object\", \"width_cm\": number|null, \"height_cm\": number|null, \"depth_cm\": number|null, \"confidence\": number}], "
             "\"notes\": str"
             "}\n\n"
             f"Image size: {img_width}x{img_height}.\n"
+            f"{_plate_phys_hint}"
             "Rules:\n"
             "- visible_ingredients must contain ONLY food items you can directly see in the image. Do NOT include items that are commonly served with this dish but are not physically visible in the image.\n"
             "- If you cannot see it, do not list it. Bread, pita, tortillas, wraps, or any item not visible in the frame must NOT be listed.\n"
             "- role_tag for visible ingredients must always be 'base'.\n"
             "- Use simple, common food names (e.g. 'white sauce', 'yellow rice', 'falafel') — not long database-style descriptions.\n"
             "- Detect a plate or bowl if present and estimate its real-world diameter in cm.\n"
+            "- plate_volume_ml: the volume of ceramic/material the vessel displaces (material displacement, NOT bowl capacity). "
+            "If plate_physical_measurements are provided above, compute it from mass_g / ceramic_density_g_per_cm3. "
+            "If no measurements are provided, estimate from the visible vessel geometry. Set null if unknown.\n"
             "- Detect reference objects if present, including cards, utensils, cans, cups, packaged items, trays, takeout containers, parchment paper, baking paper, foil liners, wrappers, or other visible base/support objects whose dimensions can be reasonably estimated, and estimate their real-world width_cm, height_cm, and depth_cm (thickness/depth for 3-D objects such as cans or cups; null for flat objects such as cards or paper).\n"
             "- If there is no plate/bowl but the food sits on a visible paper, tray, liner, wrapper, or container with estimable dimensions, include it in reference_objects.\n"
             "- Confidence must be between 0 and 1.\n"
@@ -2770,13 +2784,23 @@ class NutritionVideoPipeline:
             or plate_info.get("diameter_cm")
             or 0.0
         )
-        plate_volume_ml = float((user_context or {}).get("plate_volume_ml") or 0.0)
+        # plate_volume_ml: user_context > Gemini first pass estimate > 0 (derived later from ground truth)
+        plate_volume_ml = float(
+            (user_context or {}).get("plate_volume_ml")
+            or plate_info.get("plate_volume_ml")
+            or 0.0
+        )
         food_spread_cm = float((user_context or {}).get("food_spread_cm") or 0.0)
+        _plate_vol_source = (
+            "user_context" if (user_context or {}).get("plate_volume_ml")
+            else "gemini_first_pass" if plate_info.get("plate_volume_ml")
+            else "pending_ground_truth"
+        )
         logger.info(
             "[%s] Plate detection: plate_detected=%s vessel_type=%s plate_diameter_cm=%.1f "
-            "plate_volume_ml=%.1f food_spread_cm=%.1f (user_context override applied)",
+            "plate_volume_ml=%.1f (%s) food_spread_cm=%.1f",
             job_id, plate_detected, plate_info.get("vessel_type"), plate_diameter_cm,
-            plate_volume_ml, food_spread_cm,
+            plate_volume_ml, _plate_vol_source, food_spread_cm,
         )
 
         # ── Gemini metric depth (display-only from this point) ──
@@ -2904,12 +2928,19 @@ class NutritionVideoPipeline:
                 trellis_volume_debug["trellis_error"] = str(_trellis_err)
 
         # ── Volume estimation ──
-        # Ground truth plate dimensions (physically measured).
+        # Ground truth plate dimensions (physically measured, EXP01).
         # Outer diameter: 27cm, rim height: 2.9cm, inner radius: 11.5cm, concavity depth: 2cm
-        # V_plate = π×13.5²×2.9 − π×11.5²×2 = 1662 − 831 ≈ 831 ml
+        # Material displacement: mass 744g / ceramic density 2.4 g/cm³ = 310 ml
         _PLATE_DIAMETER_CM = 27.0
         _PLATE_DIAMETER_M = _PLATE_DIAMETER_CM / 100.0
-        _PLATE_VOLUME_ML: float = 831.0
+        # Use Gemini first-pass estimate if available, else fall back to ground truth (310 ml).
+        # 310 ml = 744g plate mass / 2.4 g/cm³ ceramic density (material displacement, not bowl capacity).
+        _PLATE_VOLUME_ML: float = plate_volume_ml if plate_volume_ml > 0 else 310.0
+        logger.info(
+            "[%s] Plate volume: %.1f ml (source=%s)",
+            job_id, _PLATE_VOLUME_ML,
+            _plate_vol_source if plate_volume_ml > 0 else "ground_truth_fallback(744g/2.4)",
+        )
         # Food spread ground truth: measured diameter of food footprint on plate (EXP01)
         _FOOD_SPREAD_CM = 23.0
 
