@@ -190,6 +190,33 @@ class NutritionVideoPipeline:
             logger.warning("[%s] Gemini image cleaning failed, using original image: %s", job_id, exc)
             return image_pil
 
+    def _gemini_estimate_food_spread_cm(self, image_pil: Image.Image, plate_diameter_cm: float, job_id: str) -> float:
+        """Ask Gemini to estimate the diameter of the food spread on the plate in cm."""
+        import google.generativeai as genai
+        genai.configure(api_key=self.config.GEMINI_API_KEY)
+        prompt = (
+            f"The plate in this image has a known diameter of {plate_diameter_cm:.1f} cm. "
+            "Using the plate as a scale reference, estimate the diameter of the food spread "
+            "(the widest extent of all food items) in centimetres. "
+            "Return ONLY a single JSON object: {\"food_spread_cm\": number, \"confidence\": number, \"reason\": str}. "
+            "No other text."
+        )
+        gm = genai.GenerativeModel(self._flash_model_name(), generation_config=self._GEMINI_GEN_CONFIG)
+        start = time.monotonic()
+        try:
+            resp = gm.generate_content([prompt, image_pil], request_options={"timeout": 60})
+            parsed = self._parse_json_object_or_array(resp.text or "", expected="object")
+            spread = float(parsed.get("food_spread_cm") or 0.0)
+            logger.info(
+                "[%s] Gemini food spread estimate: %.1f cm (confidence=%.2f reason=%s) latency=%.2fs",
+                job_id, spread, float(parsed.get("confidence") or 0.0),
+                parsed.get("reason", ""), time.monotonic() - start,
+            )
+            return spread
+        except Exception as exc:
+            logger.warning("[%s] Gemini food spread estimation failed: %s", job_id, exc)
+            return 0.0
+
     def _gemini_clean_image_keep_plate(self, image_pil: Image.Image, job_id: str) -> Image.Image:
         """Extract food + plate/bowl on pure black background — removes background/props but keeps the vessel."""
         prompt = (
@@ -2933,20 +2960,60 @@ class NutritionVideoPipeline:
                         "food_volume_ml_from_glb_a": food_volume_ml,
                     })
 
-                    # Also scale GLB_B for cross-check
+                    # ── GLB_B independent path: scale using food spread ──
                     if glb_b_raw is not None:
-                        glb_b_scaled_ml = glb_b_raw * volume_scale_ml
-                        logger.info(
-                            "[%s] GLB_B cross-check: raw=%.6f  scaled=%.2f ml  "
-                            "GLB_A_path=%.2f ml  delta=%.2f ml",
-                            job_id, glb_b_raw, glb_b_scaled_ml,
-                            food_volume_ml, food_volume_ml - glb_b_scaled_ml,
-                        )
-                        trellis_volume_debug.update({
-                            "glb_b_raw_units3": glb_b_raw,
-                            "glb_b_scaled_ml": glb_b_scaled_ml,
-                            "glb_a_vs_glb_b_delta_ml": food_volume_ml - glb_b_scaled_ml,
-                        })
+                        _glb_b_metrics_inner = trellis_volume_debug.get("glb_b_metrics") or {}
+                        _glb_b_extents = _glb_b_metrics_inner.get("extents") or []
+
+                        # Get food spread: user_context first, then Gemini estimate
+                        _food_spread_cm = food_spread_cm
+                        if not _food_spread_cm or _food_spread_cm <= 0:
+                            logger.info("[%s] food_spread_cm not in user_context — asking Gemini", job_id)
+                            _food_spread_cm = self._gemini_estimate_food_spread_cm(
+                                pil_image, _PLATE_DIAMETER_CM, job_id,
+                            )
+                            trellis_volume_debug["food_spread_cm_gemini"] = _food_spread_cm
+                        else:
+                            trellis_volume_debug["food_spread_cm_user"] = _food_spread_cm
+
+                        if _food_spread_cm > 0 and len(_glb_b_extents) >= 2:
+                            _food_spread_m = _food_spread_cm / 100.0
+                            _glb_b_spread_units = max(_glb_b_extents[0], _glb_b_extents[1])
+                            _linear_scale_b = _food_spread_m / _glb_b_spread_units
+                            _volume_scale_b_ml = (_linear_scale_b ** 3) * 1_000_000
+                            glb_b_scaled_ml = glb_b_raw * _volume_scale_b_ml
+                            logger.info(
+                                "[%s] GLB_B path: spread_cm=%.1f spread_units=%.6f "
+                                "linear_scale=%.6f volume_scale=%.4f raw=%.6f scaled=%.2f ml",
+                                job_id, _food_spread_cm, _glb_b_spread_units,
+                                _linear_scale_b, _volume_scale_b_ml, glb_b_raw, glb_b_scaled_ml,
+                            )
+                            trellis_volume_debug.update({
+                                "food_spread_cm": _food_spread_cm,
+                                "glb_b_spread_units": _glb_b_spread_units,
+                                "glb_b_linear_scale_m_per_unit": _linear_scale_b,
+                                "glb_b_volume_scale_ml_per_unit3": _volume_scale_b_ml,
+                                "glb_b_raw_units3": glb_b_raw,
+                                "glb_b_scaled_ml": glb_b_scaled_ml,
+                                "glb_a_vs_glb_b_delta_ml": food_volume_ml - glb_b_scaled_ml,
+                            })
+                            logger.info(
+                                "[%s] Cross-check: GLB_A_path=%.2f ml  GLB_B_path=%.2f ml  delta=%.2f ml",
+                                job_id, food_volume_ml, glb_b_scaled_ml,
+                                food_volume_ml - glb_b_scaled_ml,
+                            )
+                        else:
+                            # No food spread available — apply same scale as GLB_A for a rough cross-check
+                            glb_b_scaled_ml = glb_b_raw * volume_scale_ml
+                            trellis_volume_debug.update({
+                                "glb_b_raw_units3": glb_b_raw,
+                                "glb_b_scaled_ml_same_scale_as_a": glb_b_scaled_ml,
+                                "glb_a_vs_glb_b_delta_ml_same_scale": food_volume_ml - glb_b_scaled_ml,
+                            })
+                            logger.info(
+                                "[%s] GLB_B no spread ref — same scale as GLB_A: %.2f ml  delta=%.2f ml",
+                                job_id, glb_b_scaled_ml, food_volume_ml - glb_b_scaled_ml,
+                            )
 
                     if food_volume_ml > 0:
                         trellis_total_food_volume_ml = food_volume_ml
@@ -2961,13 +3028,35 @@ class NutritionVideoPipeline:
                 logger.warning("[%s] GLB_A extents missing, cannot derive scale factor", job_id)
 
         elif glb_b_raw is not None and not plate_detected:
-            # No plate in image — GLB_B is food only, but we have no scale reference yet
-            logger.warning(
-                "[%s] No plate detected; GLB_B raw=%.6f units but no scale reference — "
-                "falling back to Gemini depth",
-                job_id, glb_b_raw,
-            )
-            trellis_volume_debug["glb_b_raw_units3"] = glb_b_raw
+            # No plate — scale GLB_B using food spread only
+            _glb_b_metrics_np = trellis_volume_debug.get("glb_b_metrics") or {}
+            _glb_b_extents_np = _glb_b_metrics_np.get("extents") or []
+            _food_spread_cm_np = food_spread_cm
+            if not _food_spread_cm_np or _food_spread_cm_np <= 0:
+                logger.info("[%s] No plate, asking Gemini for food spread", job_id)
+                _food_spread_cm_np = self._gemini_estimate_food_spread_cm(pil_image, 0.0, job_id)
+                trellis_volume_debug["food_spread_cm_gemini"] = _food_spread_cm_np
+            if _food_spread_cm_np > 0 and len(_glb_b_extents_np) >= 2:
+                _food_spread_m_np = _food_spread_cm_np / 100.0
+                _spread_units_np = max(_glb_b_extents_np[0], _glb_b_extents_np[1])
+                _ls_np = _food_spread_m_np / _spread_units_np
+                _vs_np = (_ls_np ** 3) * 1_000_000
+                _glb_b_vol_np = glb_b_raw * _vs_np
+                logger.info(
+                    "[%s] No-plate GLB_B: spread_cm=%.1f scale=%.4f raw=%.6f vol=%.2f ml",
+                    job_id, _food_spread_cm_np, _vs_np, glb_b_raw, _glb_b_vol_np,
+                )
+                trellis_volume_debug.update({
+                    "food_spread_cm": _food_spread_cm_np,
+                    "glb_b_raw_units3": glb_b_raw,
+                    "glb_b_scaled_ml": _glb_b_vol_np,
+                })
+                if _glb_b_vol_np > 0:
+                    trellis_total_food_volume_ml = _glb_b_vol_np
+                    volume_method = "trellis_glb_trimesh"
+            else:
+                logger.warning("[%s] No plate and no food spread — falling back to Gemini depth", job_id)
+                trellis_volume_debug["glb_b_raw_units3"] = glb_b_raw
 
         # Determine final volume map ──
         if trellis_total_food_volume_ml is not None and trellis_total_food_volume_ml > 0:
