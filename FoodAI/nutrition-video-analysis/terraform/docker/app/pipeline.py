@@ -245,11 +245,13 @@ class NutritionVideoPipeline:
         glb_path: Path,
         job_id: str,
         label: str = "mesh",
+        voxel_pitch: float = 0.005,
     ) -> dict:
         """Load a GLB with trimesh and return raw unit volume metrics (EXP01 pattern).
 
-        Returns a dict with volume (if watertight) and convex_hull volume in raw trimesh units.
-        No scale factor or unit conversion applied — caller decides how to interpret units.
+        Returns a dict with volume (if watertight), convex_hull volume, and voxelized
+        volume in raw trimesh units. No scale factor applied — caller converts to ml.
+        voxel_pitch: voxel size in trimesh units (0.005 ≈ 1.35mm at our 27cm=1unit scale).
         """
         import trimesh as _trimesh
 
@@ -264,14 +266,29 @@ class NutritionVideoPipeline:
         raw_volume = float(mesh.volume) if is_watertight else None
         convex_hull_volume = float(mesh.convex_hull.volume)
 
+        # Voxelized (raycast) volume — more accurate than convex hull for non-convex shapes
+        voxel_volume: float | None = None
+        try:
+            _trimesh.repair.fix_winding(mesh)
+            voxels = mesh.voxelized(pitch=voxel_pitch)
+            voxel_volume = float(voxels.volume)
+            logger.info(
+                "[%s] trimesh label=%s voxel_volume=%.6f pitch=%.4f voxel_count=%d",
+                job_id, label, voxel_volume, voxel_pitch, len(voxels.sparse_indices),
+            )
+        except Exception as _vox_err:
+            logger.warning("[%s] trimesh voxelization failed label=%s: %s", job_id, label, _vox_err)
+
         logger.info(
             "[%s] trimesh label=%s is_watertight=%s volume=%s convex_hull_volume=%.6f "
-            "vertices=%d faces=%d extents=%s",
+            "voxel_volume=%s vertices=%d faces=%d extents=%s euler=%d",
             job_id, label, is_watertight,
             f"{raw_volume:.6f}" if raw_volume is not None else "None",
             convex_hull_volume,
+            f"{voxel_volume:.6f}" if voxel_volume is not None else "None",
             len(mesh.vertices), len(mesh.faces),
             [round(x, 6) for x in mesh.extents.tolist()],
+            int(mesh.euler_number),
         )
 
         return {
@@ -279,6 +296,8 @@ class NutritionVideoPipeline:
             "is_watertight": is_watertight,
             "volume": raw_volume,
             "volume_convex_hull": convex_hull_volume,
+            "volume_voxelized": voxel_volume,
+            "voxel_pitch": voxel_pitch,
             "n_vertices": int(len(mesh.vertices)),
             "n_faces": int(len(mesh.faces)),
             "extents": mesh.extents.tolist(),
