@@ -959,11 +959,12 @@ export default function MealDetailScreen() {
                 ref={overlayVideoRef}
                 key={trellisMP4Url}
                 source={{ uri: trellisMP4Url }}
-                style={[styles.media, { backgroundColor: '#000000', position: 'absolute', top: 0, left: 0, opacity: isVideoPlaying ? 1 : 0 }]}
+                style={[styles.media, { backgroundColor: '#000000', position: 'absolute', top: 0, left: 0 }]}
                 resizeMode={ResizeMode.CONTAIN}
                 isLooping
                 isMuted
                 shouldPlay={isVideoPlaying}
+                positionMillis={isVideoPlaying ? undefined : 0}
                 useNativeControls={false}
                 progressUpdateIntervalMillis={100}
                 onPlaybackStatusUpdate={(status) => {
@@ -973,16 +974,6 @@ export default function MealDetailScreen() {
                   }
                 }}
               />
-              {videoThumbnailUri && (
-                <OptimizedImage
-                  source={{ uri: videoThumbnailUri }}
-                  style={[styles.media, StyleSheet.absoluteFillObject, { backgroundColor: '#000000', opacity: isVideoPlaying ? 0 : 1 }]}
-                  resizeMode="contain"
-                  cachePolicy="memory-disk"
-                  priority="normal"
-                  onImageLoad={() => setMediaLoading(false)}
-                />
-              )}
               <TouchableOpacity
                 style={styles.mediaTapTarget}
                 onPress={() => openFullScreenMedia(isVideoPlaying ? trellisMP4Url : videoThumbnailUri, isVideoPlaying ? 'video' : 'image')}
@@ -1181,14 +1172,14 @@ export default function MealDetailScreen() {
               </TouchableOpacity>
               <View style={styles.buttonSeparator} />
               <TouchableOpacity
-                style={[styles.mediaActionButton, selectedDepthIngredient === '__full__' && styles.mediaActionButtonActive]}
+                style={[styles.mediaActionButton, (selectedDepthIngredient !== null && selectedDepthIngredient !== '__tagged__') && styles.mediaActionButtonActive]}
                 onPress={() => {
                   setIsVideoPlaying(false);
                   setSelectedDepthIngredient(selectedDepthIngredient === '__full__' ? null : '__full__');
                 }}
                 activeOpacity={0.7}
               >
-                <MaterialCommunityIcons name="image-filter-hdr" size={18} color={selectedDepthIngredient === '__full__' ? '#FFFFFF' : '#6B7280'} />
+                <MaterialCommunityIcons name="image-filter-hdr" size={18} color={(selectedDepthIngredient !== null && selectedDepthIngredient !== '__tagged__') ? '#FFFFFF' : '#6B7280'} />
               </TouchableOpacity>
               <View style={styles.buttonSeparator} />
               <TouchableOpacity

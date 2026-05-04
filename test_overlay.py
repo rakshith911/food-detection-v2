@@ -10,6 +10,7 @@ Output: test_overlay_result.png  (saved next to this script)
 import cv2
 import numpy as np
 from pathlib import Path
+from PIL import Image, ImageDraw, ImageFont
 
 # ---------- colour palette (same as pipeline.py) ----------
 DISTINCT_COLORS_RGB = [
@@ -34,6 +35,48 @@ DISTINCT_COLORS_RGB = [
     (  0,   0, 128),   # Navy
     (128, 128, 128),   # Grey
 ]
+
+
+def format_overlay_label(label: str, max_chars: int = 40) -> str:
+    return (label or "").strip().upper()[:max_chars]
+
+
+def load_overlay_label_font(size: int):
+    font_candidates = [
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/Library/Fonts/Arial.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+        "/usr/share/fonts/truetype/msttcorefonts/Arial.ttf",
+        "/usr/share/fonts/truetype/msttcorefonts/arial.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    ]
+    for font_path in font_candidates:
+        try:
+            return ImageFont.truetype(font_path, size=size)
+        except Exception:
+            continue
+    try:
+        return ImageFont.truetype("Arial.ttf", size=size)
+    except Exception:
+        return ImageFont.load_default()
+
+
+def draw_overlay_label(image_bgr, text, tx, ty, font, fill_bgr, pad):
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    pil_img = Image.fromarray(image_rgb)
+    draw = ImageDraw.Draw(pil_img)
+    bbox = draw.textbbox((tx, ty), text, font=font)
+    pill = (
+        max(0, bbox[0] - pad),
+        max(0, bbox[1] - pad),
+        min(image_bgr.shape[1] - 1, bbox[2] + pad),
+        min(image_bgr.shape[0] - 1, bbox[3] + pad),
+    )
+    fill_rgb = (fill_bgr[2], fill_bgr[1], fill_bgr[0])
+    draw.rectangle(pill, fill=fill_rgb)
+    draw.text((tx, ty), text, fill=(255, 255, 255), font=font)
+    return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
 # ---------- load image ----------
 img_path = Path(__file__).parent / (
@@ -74,6 +117,8 @@ for obj_id, label, (x1, y1, x2, y2) in food_items:
 
 # ---------- run the same overlay logic from _save_segmentation_masks ----------
 overlay = frame.astype(np.float32) / 255.0  # BGR float
+font = load_overlay_label_font(18)
+pad = 4
 
 obj_ids_sorted = sorted(masks_dict.keys())
 color_bgr_map = {}
@@ -104,32 +149,18 @@ for obj_id in obj_ids_sorted:
     else:
         cx, cy = w // 2, h // 2
 
-    # Draw label text with a dark background rectangle for readability
-    display_label = label[:40]
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.55
-    thickness = 2
-    (tw, th_text), baseline = cv2.getTextSize(display_label, font, font_scale, thickness)
+    # Draw label text with a colored background rectangle for readability
+    display_label = format_overlay_label(label)
+    bbox = font.getbbox(display_label)
+    tw, th_text = bbox[2] - bbox[0], bbox[3] - bbox[1]
 
     # Clamp so the label stays within the image bounds
-    tx = max(0, min(cx - tw // 2, w - tw - 4))
-    ty = max(th_text + 4, min(cy, h - baseline - 4))
+    tx = max(0, min(cx - tw // 2, w - tw - pad * 2))
+    ty = max(0, min(cy - th_text // 2, h - th_text - pad * 2))
 
     overlay_uint8 = (np.clip(overlay, 0, 1) * 255).astype(np.uint8)
 
-    # Dark background pill behind the text
-    cv2.rectangle(
-        overlay_uint8,
-        (tx - 2, ty - th_text - 2),
-        (tx + tw + 2, ty + baseline + 2),
-        (0, 0, 0),
-        cv2.FILLED,
-    )
-    # Label text in the object's colour so it matches the mask
-    cv2.putText(
-        overlay_uint8, display_label, (tx, ty),
-        font, font_scale, bgr, thickness, cv2.LINE_AA,
-    )
+    overlay_uint8 = draw_overlay_label(overlay_uint8, display_label, tx, ty, font, bgr, pad)
 
     overlay = overlay_uint8.astype(np.float32) / 255.0
 
