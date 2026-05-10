@@ -25,6 +25,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import PreviewScreen from './PreviewScreen';
 import { captureException } from '../utils/sentry';
 import { safeGoBack } from '../utils/navigationHelpers';
+import { verifyFoodImageOnDevice } from '../services/FoodPrecheckService';
 
 export default function CameraScreen() {
   const navigation = useNavigation();
@@ -42,6 +43,7 @@ export default function CameraScreen() {
   const [lastMediaMode, setLastMediaMode] = useState<'photo' | 'video'>('photo');
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [selectedVideo, setSelectedVideo] = useState<string | null>(null);
+  const [isVerifyingImage, setIsVerifyingImage] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
   const [isCameraActive, setIsCameraActive] = useState(false);
@@ -52,6 +54,7 @@ export default function CameraScreen() {
   const isRecordingRef = useRef<boolean>(false);
   const MAX_RECORDING_SECONDS = 5;
   const isTakingPhotoRef = useRef(false);
+  const isVerifyingImageRef = useRef(false);
   const dispatch = useAppDispatch();
   const user = useAppSelector((state) => state.auth.user);
 
@@ -133,8 +136,49 @@ export default function CameraScreen() {
     }
   };
 
+  const rejectImage = (reason?: string) => {
+    setSelectedImage(null);
+    Alert.alert(
+      'Invalid Image',
+      reason || 'Please upload or take a clear photo of food.',
+      [
+        { text: 'Retake', style: 'cancel' },
+        { text: 'Choose Photo', onPress: pickImageFromGallery },
+      ]
+    );
+  };
+
+  const verifyAndSetImage = async (imageUri: string) => {
+    if (isVerifyingImageRef.current) {
+      return;
+    }
+
+    try {
+      isVerifyingImageRef.current = true;
+      setIsVerifyingImage(true);
+      const result = await verifyFoodImageOnDevice(imageUri);
+
+      if (result.verdict === 'allow') {
+        setSelectedImage(imageUri);
+        Alert.alert('Image Verified', 'Food detected. You can continue.');
+        return;
+      }
+
+      rejectImage(result.reason);
+    } catch (error) {
+      console.error('[Camera] Food verification error:', error);
+      captureException(error instanceof Error ? error : new Error(String(error)), {
+        context: 'Camera - Food Precheck',
+      });
+      rejectImage('Could not verify that this image contains food. Please try another photo.');
+    } finally {
+      setIsVerifyingImage(false);
+      isVerifyingImageRef.current = false;
+    }
+  };
+
   const takePhoto = async () => {
-    if (!cameraRef.current || isTakingPhotoRef.current) {
+    if (!cameraRef.current || isTakingPhotoRef.current || isVerifyingImageRef.current) {
       return;
     }
 
@@ -144,7 +188,7 @@ export default function CameraScreen() {
         flash: flashEnabled ? 'on' : 'off',
       });
       if (photo && photo.path) {
-        setSelectedImage('file://' + photo.path);
+        await verifyAndSetImage('file://' + photo.path);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -166,7 +210,7 @@ export default function CameraScreen() {
       });
 
       if (!result.canceled && result.assets[0]) {
-        setSelectedImage(result.assets[0].uri);
+        await verifyAndSetImage(result.assets[0].uri);
       }
     } catch (error) {
       console.error('Gallery error:', error);
@@ -221,7 +265,7 @@ export default function CameraScreen() {
           }
           setSelectedVideo(asset.uri);
         } else {
-          setSelectedImage(asset.uri);
+          await verifyAndSetImage(asset.uri);
         }
       }
     } catch (error) {
@@ -469,7 +513,7 @@ export default function CameraScreen() {
                 ref={cameraRef}
                 style={styles.camera}
                 device={device}
-                isActive={isCameraActive && !selectedImage && !selectedVideo}
+                isActive={isCameraActive && !selectedImage && !selectedVideo && !isVerifyingImage}
                 photo={true}
                 video={true}
                 audio={true}
@@ -520,6 +564,16 @@ export default function CameraScreen() {
               <View style={styles.recordingIndicator}>
                 <View style={styles.recordingDot} />
                 <Text style={styles.recordingText}>Recording: {recordingTime}s</Text>
+              </View>
+            )}
+
+            {isVerifyingImage && (
+              <View style={styles.verifyingOverlay}>
+                <View style={styles.verifyingCard}>
+                  <Ionicons name="scan-outline" size={28} color="#34C759" />
+                  <Text style={styles.verifyingTitle}>Verifying image</Text>
+                  <Text style={styles.verifyingText}>Checking for food on this device</Text>
+                </View>
               </View>
             )}
 
@@ -583,8 +637,9 @@ export default function CameraScreen() {
             </TouchableOpacity>
 
             <TouchableOpacity
-              style={styles.tab}
+              style={[styles.tab, isVerifyingImage && styles.disabledControl]}
               onPress={pickFromGallery}
+              disabled={isVerifyingImage}
             >
               <Text
                 style={[
@@ -598,7 +653,11 @@ export default function CameraScreen() {
 
            {/* Shutter/Record Button - only show when camera is available */}
            {activeTab === 'photo' && isCameraAvailable && (
-             <TouchableOpacity style={styles.shutterButton} onPress={takePhoto}>
+             <TouchableOpacity
+               style={[styles.shutterButton, isVerifyingImage && styles.disabledControl]}
+               onPress={takePhoto}
+               disabled={isVerifyingImage}
+             >
                <View style={styles.shutterInner} />
              </TouchableOpacity>
            )}
@@ -614,7 +673,11 @@ export default function CameraScreen() {
           
            {/* Show gallery prompt when camera not available */}
            {!isCameraAvailable && (activeTab === 'photo' || activeTab === 'video') && (
-             <TouchableOpacity style={styles.shutterButton} onPress={pickFromGallery}>
+             <TouchableOpacity
+               style={[styles.shutterButton, isVerifyingImage && styles.disabledControl]}
+               onPress={pickFromGallery}
+               disabled={isVerifyingImage}
+             >
                <Ionicons name="images" size={32} color="#34C759" />
              </TouchableOpacity>
            )}
@@ -687,6 +750,42 @@ const styles = StyleSheet.create({
     height: '100%',
     marginBottom: 0,
     paddingBottom: 0,
+  },
+  verifyingOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.45)',
+    zIndex: 30,
+  },
+  verifyingCard: {
+    width: 220,
+    minHeight: 116,
+    borderRadius: 8,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 18,
+    paddingVertical: 16,
+  },
+  verifyingTitle: {
+    color: '#111827',
+    fontSize: 16,
+    fontWeight: '700',
+    marginTop: 8,
+  },
+  verifyingText: {
+    color: '#4B5563',
+    fontSize: 13,
+    textAlign: 'center',
+    marginTop: 4,
+  },
+  disabledControl: {
+    opacity: 0.55,
   },
   topOverlay: {
     position: 'absolute',

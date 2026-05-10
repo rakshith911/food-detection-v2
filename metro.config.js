@@ -23,6 +23,10 @@ config.resolver.sourceExts.push('mjs', 'cjs', 'css');
 // Configure SVG transformer - must be done before other transformer configs
 const { transformer, resolver } = config;
 
+if (!config.resolver.assetExts.includes('onnx')) {
+  config.resolver.assetExts.push('onnx');
+}
+
 config.transformer = {
   ...transformer,
   babelTransformerPath: require.resolve('react-native-svg-transformer'),
@@ -69,4 +73,3 @@ config.resolver.resolveRequest = (context, moduleName, platform) => {
 };
 
 module.exports = config;
-

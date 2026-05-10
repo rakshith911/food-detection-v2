@@ -88,3 +88,6 @@ RAG/
 
 # local experiments (never commit)
 /experiments/
+
+# local on-device ML binaries
+/assets/models/*.onnx
