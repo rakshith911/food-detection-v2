@@ -22,3 +22,8 @@ Expected contract:
 - Output: two logits or probabilities in class order `[food, not_food]`
 
 The app rejects images when this model is missing or cannot run.
+
+The `.onnx` file is intentionally ignored by Git. For EAS cloud builds, set
+`FOOD_PRECHECK_MODEL_URL` as an EAS secret pointing to a private HTTPS copy of
+the model. The `eas-build-post-install` hook downloads it before the native
+bundle step runs.
